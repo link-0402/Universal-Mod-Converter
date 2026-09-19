@@ -17,6 +17,8 @@ internal sealed class ConversionCards(ConverterSession session)
 {
     private const float WideLayoutWidth = 640f;
 
+    private readonly AnimationTargetPanel _animation = new(session);
+
     private string _targetFilter = string.Empty;
 
     public void Draw()
@@ -82,7 +84,7 @@ internal sealed class ConversionCards(ConverterSession session)
                 Widgets.Muted("Scanning the mod…");
             }
             else
-                Widgets.MutedWrapped("No gear, facewear, hair, face, tail or Viera-ear root was found in this mod.");
+                Widgets.MutedWrapped("No gear, facewear, hair, face, tail, Viera-ear or animation was found in this mod.");
             return;
         }
 
@@ -120,16 +122,31 @@ internal sealed class ConversionCards(ConverterSession session)
     private static string SourceLabel(DetectedItem item)
         => $"[{KindLabel(item)}] {item.ItemName}  ·  {IdLabel(item)}";
 
-    private static string KindLabel(DetectedItem item)
-        => item.IsCustomization ? CustomizationKinds.Get(item.Kind).DisplayName : SlotInfo.DisplayLabelMap[item.Slot];
+    private static string KindLabel(DetectedItem item) => item switch
+    {
+        { Animation: { } animation } => animation.Kind switch
+        {
+            AnimationSourceKind.Idle  => "Idle",
+            AnimationSourceKind.Emote => "Emote",
+            _                         => "Animation",
+        },
+        { IsCustomization: true } => CustomizationKinds.Get(item.Kind).DisplayName,
+        _ => SlotInfo.DisplayLabelMap[item.Slot],
+    };
 
-    private static string IdLabel(DetectedItem item)
-        => item.IsCustomization ? ConverterSession.RaceLabel(item.GenderRace ?? 0) : $"{(item.IsAccessory ? 'a' : 'e')}{item.ModelIdDisplay}";
+    private static string IdLabel(DetectedItem item) => item switch
+    {
+        { Animation: { } animation } => animation.Races.Length == 1
+            ? ConverterSession.RaceLabel(animation.Races[0])
+            : $"{animation.Races.Length} races",
+        { IsCustomization: true } => ConverterSession.RaceLabel(item.GenderRace ?? 0),
+        _ => $"{(item.IsAccessory ? 'a' : 'e')}{item.ModelIdDisplay}",
+    };
 
     private static void DrawItemSummary(DetectedItem source)
     {
         var iconSize = ImGui.GetTextLineHeight() * 2.6f;
-        if (source.IsCustomization)
+        if (source.IsCustomization || source.Animation != null && source.Icon == 0)
         {
             using (ImRaii.PushColor(ImGuiCol.Text, Theme.Muted))
             using (ImRaii.PushFont(UiBuilder.IconFont))
@@ -138,6 +155,7 @@ internal sealed class ConversionCards(ConverterSession session)
                 {
                     AssetKind.Hair => FontAwesomeIcon.Cut,
                     AssetKind.Face => FontAwesomeIcon.UserCircle,
+                    AssetKind.Animation => FontAwesomeIcon.Running,
                     _              => FontAwesomeIcon.Paw,
                 };
                 ImGui.Button(glyph.ToIconString() + "##kind", new Vector2(iconSize));
@@ -153,6 +171,13 @@ internal sealed class ConversionCards(ConverterSession session)
             Widgets.Badge(KindLabel(source), Theme.Accent);
             ImGui.SameLine();
             Widgets.Badge(IdLabel(source), Theme.Info);
+        }
+
+        if (source.Animation is { } animation)
+        {
+            ImGui.Spacing();
+            Widgets.MutedWrapped(string.Join("\n", animation.Locations));
+            Widgets.MutedWrapped("Races in the mod: " + string.Join(", ", animation.Races.Select(r => $"c{r:D4}")));
         }
 
         if (source.IsAmbiguous)
@@ -176,7 +201,8 @@ internal sealed class ConversionCards(ConverterSession session)
             return;
         }
 
-        if (source.IsCustomization) DrawCustomizationTarget(source);
+        if (source.Animation is { } animation) _animation.Draw(animation);
+        else if (source.IsCustomization) DrawCustomizationTarget(source);
         else DrawGearTarget();
     }
 

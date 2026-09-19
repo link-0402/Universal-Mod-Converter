@@ -33,7 +33,7 @@ public sealed record ResultBanner(
 /// from it and call its commands; everything here runs on the framework thread, and long
 /// work goes through <see cref="Runner"/>.
 /// </summary>
-public sealed class ConverterSession
+public sealed partial class ConverterSession
 {
     private static readonly TimeSpan AutoPreviewDelay = TimeSpan.FromMilliseconds(600);
     private static readonly TimeSpan PenumbraPollInterval = TimeSpan.FromSeconds(1);
@@ -172,7 +172,9 @@ public sealed class ConverterSession
             return;
         }
 
-        if (Config.AutoRefreshPreview && !PlanIsCurrent && _autoPreviewVersion != _inputsVersion &&
+        // Retargeting rebuilds every animation, which is too slow to redo on each change.
+        var slowPreview = Source?.Animation != null && AnimationOperation == AnimationOperation.Retarget;
+        if (Config.AutoRefreshPreview && !slowPreview && !PlanIsCurrent && _autoPreviewVersion != _inputsVersion &&
             DateTime.UtcNow - _lastInputChange > AutoPreviewDelay && PreviewBlockReason == null)
         {
             _autoPreviewVersion = _inputsVersion;
@@ -218,6 +220,7 @@ public sealed class ConverterSession
             if (!HasMod) return "Select a mod.";
             if (ModError != null) return ModError;
             if (Source is not { } source) return DetectedItems.Count == 0 ? "No convertible item was found in this mod." : "Select a source item.";
+            if (source.Animation is { } animation) return AnimationBlockReason(animation);
             if (!source.IsCustomization) return TargetItem == null ? "Select a target item." : null;
             if (TargetCustomizationId is < 1 or > 9999) return "Customization IDs must be between 1 and 9999.";
             if (CustomizationTargets.BlockReason(source.Kind, source.GenderRace ?? 0, TargetCustomizationKind, TargetRace) is { } blocked)
@@ -312,7 +315,7 @@ public sealed class ConverterSession
 
             Log.Add(result.Items.Count > 0
                 ? $"Scan found {result.Items.Count} asset root(s) in {ModName}."
-                : $"Scan found no gear, facewear, hair, face, tail, or Viera-ear roots in {ModName}.");
+                : $"Scan found no gear, facewear, hair, face, tail, Viera-ear or animation in {ModName}.");
             if (result.Items.Count == 1) SelectSource(0);
         }, ex =>
         {
@@ -329,7 +332,9 @@ public sealed class ConverterSession
         var source  = DetectedItems[index];
         TargetSlot  = source.Slot;
         ClearGearTarget();
-        if (source.IsCustomization)
+        if (source.Animation is { } animation)
+            ResetAnimationTarget(animation);
+        else if (source.IsCustomization)
         {
             TargetCustomizationKind = source.Kind;
             TargetCustomizationId   = int.TryParse(source.ModelIdPadded, out var id) ? id : 1;
@@ -504,6 +509,7 @@ public sealed class ConverterSession
         var label = Source switch
         {
             null => string.Empty,
+            { Animation: { } animation } => AnimationNameLabel(animation),
             { IsCustomization: true } => $"{RaceLabel(TargetRace)} {TargetOptionLabel}",
             _ when TargetItem != null => $"{SlotInfo.DisplayLabelMap[TargetSlot]} {TargetItem.Name}",
             _ => SlotInfo.DisplayLabelMap[TargetSlot],
@@ -527,21 +533,30 @@ public sealed class ConverterSession
         if (PreviewBlockReason != null || Source is not { } source) return;
 
         var target = TargetItem;
-        var task = new ConversionTask
-        {
-            Kind                    = source.Kind,
-            TargetCustomizationKind = source.IsCustomization ? TargetCustomizationKind : null,
-            ModDirectory            = ModDirectory,
-            OutputMode              = OutputMode,
-            Slot                    = source.Slot,
-            OldIdPadded             = source.ModelIdPadded,
-            NewIdPadded             = source.IsCustomization ? TargetCustomizationId.ToString("D4") : target!.ModelIdPadded,
-            TargetVariant           = source.IsCustomization ? 1 : target!.Variant,
-            SourceVariant           = source.Variant,
-            SourceGenderRace        = source.GenderRace,
-            TargetGenderRace        = source.IsCustomization ? TargetRace : null,
-            TargetSlot              = !source.IsCustomization && TargetSlot != source.Slot ? TargetSlot : null,
-        };
+        var task = source.Animation is { } animation
+            ? new ConversionTask
+            {
+                Kind             = AssetKind.Animation,
+                ModDirectory     = ModDirectory,
+                OutputMode       = OutputMode,
+                AnimationRequest = BuildAnimationRequest(animation),
+            }
+            : new ConversionTask
+            {
+                Kind                    = source.Kind,
+                TargetCustomizationKind = source.IsCustomization ? TargetCustomizationKind : null,
+                ModDirectory            = ModDirectory,
+                OutputMode              = OutputMode,
+                Slot                    = source.Slot,
+                OldIdPadded             = source.ModelIdPadded,
+                NewIdPadded             = source.IsCustomization ? TargetCustomizationId.ToString("D4") : target!.ModelIdPadded,
+                TargetVariant           = source.IsCustomization ? 1 : target!.Variant,
+                SourceVariant           = source.Variant,
+                SourceGenderRace        = source.GenderRace,
+                TargetGenderRace        = source.IsCustomization ? TargetRace : null,
+                TargetSlot              = !source.IsCustomization && TargetSlot != source.Slot ? TargetSlot : null,
+            };
+        if (task.Kind == AssetKind.Animation && task.AnimationRequest == null) return;
         var version     = _inputsVersion;
         var description = Describe(source);
         Result = null;
@@ -559,6 +574,8 @@ public sealed class ConverterSession
             {
                 var counts = planned.GearPlan is { } plan
                     ? $"{plan.Changes.Count} change(s), {plan.Files.Count} file operation(s)"
+                    : planned.AnimationPlan is { } animationPlan
+                    ? $"{animationPlan.Changes.Count} change(s), {animationPlan.Files.Count} file operation(s)"
                     : $"{planned.PlannedRenames.Count} rename(s), {planned.PlannedJsonChanges.Sum(j => j.Changes.Count)} metadata change(s), " +
                       $"{planned.PlannedBinaryPatches.Sum(b => b.Patches.Count)} binary patch(es), {planned.PlannedMdlChanges.Count} model rewrite(s)";
                 Log.Add(planned.HasBlockers ? LogLevel.Warning : LogLevel.Info,
@@ -637,6 +654,7 @@ public sealed class ConverterSession
     /// <summary>Short description of the current conversion, e.g. "Body 0164-1 → Hands 0200-1".</summary>
     public string Describe(DetectedItem source)
     {
+        if (source.Animation is { } animation) return DescribeAnimation(animation);
         if (source.IsCustomization)
             return $"{RaceLabel(source.GenderRace ?? 0)} {source.ItemName} → {RaceLabel(TargetRace)} {TargetOptionLabel}";
         var target = TargetItem == null ? "?" : $"{TargetItem.Name} ({TargetItem.ModelIdDisplay})";

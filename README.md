@@ -1,6 +1,6 @@
 # Advanced Penumbra Mod Converter
 
-A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](https://github.com/xivdev/Penumbra) mods to a different item, slot or race, keeping all of the mod's options and toggles intact.
+A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](https://github.com/xivdev/Penumbra) mods to a different item, slot or race, keeping all of the mod's options and toggles intact. It also swaps idle and emote animations and retargets animations to other races.
 
 > **Testing build.** The plugin is published as a testing-only plugin and is under active development. Use **Create a new mod** (the default) so your source mod is never touched, and report anything that looks wrong.
 
@@ -8,6 +8,7 @@ A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](ht
 
 - **Gear and facewear:** retarget a modded item to any other wearable item, including a different slot (for example body → hands). Weapons are not supported.
 - **Hair, faces, tails and Viera ears:** retarget to another ID and/or another race, with the model reshaped for the target race. Tails and Viera ears can convert into each other.
+- **Animations:** move an idle to another idle slot (optionally as a Penumbra option group with one option per slot), move an emote's animations to another emote, and retarget body animations to other races' skeletons.
 - **Safe by default:** everything is previewed before anything is written, output is built in a staging folder and verified, and every conversion can be reverted.
 
 ## Installation
@@ -29,7 +30,7 @@ Penumbra must be installed. Without it the plugin still works on mod folders you
 Open the window with `/apmc` (settings: `/apmcconfig` or the cog icon).
 
 1. **Pick a mod** in the browser on the left, or enter a folder path under **Other folder**.
-2. **From:** choose the item, hair, face, tail or ear the mod replaces. Mods that touch several items list each one; nothing is guessed.
+2. **From:** choose the item, hair, face, tail, ear or animation the mod replaces. Mods that touch several items list each one; nothing is guessed.
 3. **To:**
    - Gear: choose the slot and the target item.
    - Hair, faces, tails and ears: choose the target race and one of the options players can pick for it, e.g. "Face 101 (Keeper of the Moon)".
@@ -59,6 +60,18 @@ Every model keeps at least one mesh group. MDL v5 models, and files an in-place 
 - **Shared materials** are resolved the way the game loads them. For example, hairs 101–200 share the Midlander materials, and Hrothgar tails share the `t0001` root. Shared materials are copied, never moved or overwritten, so other races keep working.
 - **Extra skeletons** (EST / physics bones) of hair and faces are carried over explicitly for the target. A skeleton that doesn't exist for the target race is reported.
 - **Tails ↔ Viera ears** rename the part and material layout. Real tails use tail bones that Viera don't have; this is reported.
+
+## Animations
+
+The mod's body animations (`chara/human/c####/animation/a####/…pap`) are listed as **Idle**, **Emote** or **Animation** sources. An idle slot is its loop together with its start; an emote is every animation of that emote the mod replaces. Facial animations are not supported.
+
+- **Swap to another slot (idles):** standing, chair-sitting and ground-sitting idles move only within their own family. The slots are read from the game: the default member (`resident/idle`, `emote/sit`, `emote/jmn`) and every numbered `pose##`, `s_pose##` or `j_pose##`.
+  - **Replace one slot** moves the animation (in place, **Keep it in the current slot too** copies it instead).
+  - **Option group with a variant per slot** creates a single-select Penumbra group with one option per chosen slot, so the slot can be changed in Penumbra at any time. The original slot is selected by default. This needs the animation in the mod's default files.
+- **Swap to another emote:** each animation of the emote moves to the animation in the same position of the target emote (main, start, ground sitting, chair sitting, upper body). Sounds and effects stay those of the target emote.
+- **How a swap works:** the game plays the animation named by the destination's action timeline (`chara/action/<key>.tmb`), so the file is moved to the destination path and the animation, and the timeline inside the file, are renamed to that name. Other animations in the file are left alone. The game's `resident/idle.pap` also holds a hit reaction (`cbna_add_dmg_f`); a file moved there without it is reported, because the game cannot play it while the mod is enabled.
+- **Retarget to other races** rebuilds the animation for each chosen race's base skeleton and writes it to that race's path. Bones are matched by name; rotations and scale transfer relative to each skeleton's rest pose, and movement away from the rest pose is scaled to the target's bone lengths, so a Lalafell does not jump as high as a Roegadyn. Bones the target does not have are dropped and their motion carried by the bones below them. The source skeleton is the one the file says it was made for; a skeleton the mod itself replaces is used instead of the game's. Every rebuilt animation is decoded again and compared frame by frame before anything is written. Retargeting uses the game's own animation runtime and is not previewed automatically, because it takes a moment per file.
+- **Race inheritance:** a race without its own file plays the one of its parent race in the game's race tree (`human.pbd`, for example Lalafell female → Lalafell male → Midlander male). The preview lists which other races each new file also covers, and a swap takes the destination name from the parent race when a race has no file of its own.
 
 ## Safety and reverting
 

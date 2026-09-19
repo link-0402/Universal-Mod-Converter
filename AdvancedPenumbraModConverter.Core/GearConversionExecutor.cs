@@ -1,10 +1,18 @@
 namespace AdvancedPenumbraModConverter.Core;
 
-/// <summary>Writes a <see cref="GearConversionPlan"/> to disk.</summary>
+/// <summary>A plan that is written as file operations plus a complete mod definition.</summary>
+public interface IModFilePlan
+{
+    PenumbraMod Result { get; }
+    IReadOnlyList<PlannedFileOperation> Files { get; }
+    bool HasBlockers { get; }
+}
+
+/// <summary>Writes a <see cref="GearConversionPlan"/> (or any <see cref="IModFilePlan"/>) to disk.</summary>
 public static class GearConversionExecutor
 {
     /// <summary>Creates the converted mod in <paramref name="outputDirectory"/> (which must be empty or absent).</summary>
-    public static void WriteNewMod(GearConversionPlan plan, string sourceDirectory, string outputDirectory,
+    public static void WriteNewMod(IModFilePlan plan, string sourceDirectory, string outputDirectory,
         string displayName, Action<string>? log = null)
     {
         if (plan.HasBlockers) throw new InvalidOperationException("The conversion plan has blockers.");
@@ -36,7 +44,7 @@ public static class GearConversionExecutor
     }
 
     /// <summary>Applies the plan to <paramref name="modDirectory"/> (normally a staged copy of the mod).</summary>
-    public static void ApplyInPlace(GearConversionPlan plan, string modDirectory, Action<string>? log = null)
+    public static void ApplyInPlace(IModFilePlan plan, string modDirectory, Action<string>? log = null)
     {
         if (plan.HasBlockers) throw new InvalidOperationException("The conversion plan has blockers.");
         var vacated = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -60,6 +68,7 @@ public static class GearConversionExecutor
                     break;
                 case LocalFileOperation.Delete:
                     File.Delete(destination);
+                    log?.Invoke($"Removed {operation.Destination} ({operation.Reason})");
                     vacated.Add(Path.GetDirectoryName(destination)!);
                     break;
                 default:

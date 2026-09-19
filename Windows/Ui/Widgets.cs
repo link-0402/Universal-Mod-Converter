@@ -18,14 +18,33 @@ internal static class Widgets
         else ImGui.TextUnformatted(icon.ToIconString());
     }
 
-    /// <summary>Draws a game icon, or an empty square of the same size while it loads.</summary>
+    /// <summary>Icon IDs the game has no file for; looking them up again would throw every frame.</summary>
+    private static readonly HashSet<uint> MissingIcons = [];
+
+    /// <summary>
+    /// Draws a game icon, or an empty square of the same size while it loads or when it does not
+    /// exist. Never throws: an exception escaping mid-frame leaves ImGui's child and ID stacks
+    /// unbalanced, which crashes the game in native code (some emotes name icons that do not exist).
+    /// </summary>
     public static void GameIcon(uint iconId, float size)
     {
-        if (iconId != 0 &&
-            Plugin.TextureProvider.GetFromGameIcon(new GameIconLookup(iconId)).TryGetWrap(out var wrap, out _))
-            ImGui.Image(wrap.Handle, new Vector2(size));
-        else
-            ImGui.Dummy(new Vector2(size));
+        if (iconId != 0 && !MissingIcons.Contains(iconId))
+        {
+            try
+            {
+                if (Plugin.TextureProvider.GetFromGameIcon(new GameIconLookup(iconId)).TryGetWrap(out var wrap, out _))
+                {
+                    ImGui.Image(wrap.Handle, new Vector2(size));
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                MissingIcons.Add(iconId);
+                Plugin.Log.Debug(ex, "[APMC] Game icon {0} is unavailable.", iconId);
+            }
+        }
+        ImGui.Dummy(new Vector2(size));
     }
 
     public static void Muted(string text) => ImGui.TextColored(Theme.Muted, text);

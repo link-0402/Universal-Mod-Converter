@@ -14,6 +14,12 @@ public class ConversionTask
     /// <summary>The complete gear conversion plan; null for customization conversions.</summary>
     public GearConversionPlan? GearPlan { get; set; }
 
+    /// <summary>Animations only: what to do, set before planning.</summary>
+    public AnimationConversionRequest? AnimationRequest { get; set; }
+
+    /// <summary>Animations only: the complete plan.</summary>
+    public AnimationConversionPlan? AnimationPlan { get; set; }
+
     /// <summary>Target customization kind; null means the same kind as <see cref="Kind"/>.</summary>
     public AssetKind? TargetCustomizationKind { get; set; }
 

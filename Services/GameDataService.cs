@@ -41,6 +41,9 @@ public sealed class DetectedItem
 
     public bool IsAmbiguous      { get; init; }
 
+    /// <summary>Animations only: what the mod replaces and for which races.</summary>
+    public AnimationSource? Animation { get; init; }
+
     /// <summary>Game item name resolved from the Item sheet, or "Unknown (ID {n})" if not found.</summary>
     public string ItemName        { get; init; } = string.Empty;
 
@@ -112,7 +115,11 @@ public sealed class GameDataService : IGameFileProvider
     {
         _data = data;
         _log  = log;
+        Animations = new AnimationCatalog(data, log);
     }
+
+    /// <summary>Emotes, idle slots and the animations a mod replaces.</summary>
+    public AnimationCatalog Animations { get; }
 
     public byte[]? GetHumanPbdBytes() => GetRawFileBytes("chara/xls/boneDeformer/human.pbd");
 
@@ -435,6 +442,7 @@ public sealed class GameDataService : IGameFileProvider
         // Key: (slot, 4-digit-id), Value: isAccessory
         var found = new Dictionary<(EquipSlot, string), bool>();
         var custom = new HashSet<(AssetKind Kind, ushort Race, string Id)>();
+        var animations = new List<AnimationSource>();
 
         try
         {
@@ -456,6 +464,8 @@ public sealed class GameDataService : IGameFileProvider
 
             foreach (var root in CustomizationDetection.FindRoots(mod, modDir))
                 custom.Add((root.Kind, root.GenderRace, root.ModelId.ToString("D4")));
+
+            animations = Animations.Scan(mod);
         }
         catch (Exception ex)
         {
@@ -520,6 +530,15 @@ public sealed class GameDataService : IGameFileProvider
                 ModelIdPadded = entry.Id,
                 GenderRace    = entry.Race,
                 ItemName      = DescribeCustomization(entry.Kind, entry.Race, ushort.Parse(entry.Id)),
+            });
+
+        foreach (var animation in animations)
+            result.Add(new DetectedItem
+            {
+                Kind      = AssetKind.Animation,
+                ItemName  = animation.Label,
+                Icon      = animation.Icon,
+                Animation = animation,
             });
 
         return result;

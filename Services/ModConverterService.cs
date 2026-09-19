@@ -25,12 +25,19 @@ public sealed class ModConverterService
 
     private readonly IPluginLog           _log;
     private readonly IGameFileProvider    _gameFiles;
+    private readonly GameDataService?     _gameData;
     private readonly CustomizationPlanner _customizationPlanner;
+    private readonly IAnimationRetargeter? _retargeter;
+    private HumanPbd? _pbd;
+    private bool _pbdLoaded;
 
-    public ModConverterService(IPluginLog log, GameDataService? gameData = null, IFramework? framework = null)
+    public ModConverterService(IPluginLog log, GameDataService? gameData = null, IFramework? framework = null,
+        IAnimationRetargeter? retargeter = null)
     {
-        _log       = log;
-        _gameFiles = (IGameFileProvider?)gameData ?? NoGameFiles.Instance;
+        _log        = log;
+        _gameData   = gameData;
+        _retargeter = retargeter;
+        _gameFiles  = (IGameFileProvider?)gameData ?? NoGameFiles.Instance;
         var skeletons = gameData == null || framework == null
             ? null
             : new SkeletonHierarchyService(gameData, new HavokSkeletonHierarchyReader(framework), log);
@@ -70,6 +77,7 @@ public sealed class ModConverterService
         task.MeshRemovals.Clear();
         task.Diagnostics.Clear();
         task.GearPlan = null;
+        task.AnimationPlan = null;
         task.IsPlanned = false;
         task.IsApplied = false;
         task.ResultStatus = ConversionResultStatus.NotStarted;
@@ -79,6 +87,12 @@ public sealed class ModConverterService
 
         try
         {
+            if (task.Kind == AssetKind.Animation)
+            {
+                PlanAnimation(task);
+                return;
+            }
+
             if (CustomizationKinds.IsCustomization(task.Kind))
             {
                 _customizationPlanner.Plan(task);
@@ -114,6 +128,53 @@ public sealed class ModConverterService
         }
     }
 
+    private void PlanAnimation(ConversionTask task)
+    {
+        var request = task.AnimationRequest ?? throw new InvalidOperationException("Choose what to do with the animation.");
+        var plan = new AnimationConversionPlanner(_gameFiles, ParentRace, _retargeter).Plan(task.ModDirectory, request);
+        task.AnimationPlan = plan;
+        task.Diagnostics.AddRange(plan.Diagnostics);
+        task.SourceFingerprint = AnimationSourceFingerprint(task) ?? string.Empty;
+        task.PlanFingerprint = plan.Fingerprint();
+        task.IsPlanned = true;
+        task.ErrorMessage = task.HasBlockers
+            ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
+            : null;
+        _log.Information("[APMC] Planned animation {0} ({1}): {2} file operation(s), {3} diagnostic(s).",
+            request.Description, request.Mode, plan.Files.Count, plan.Diagnostics.Count);
+    }
+
+    /// <summary>The skeleton parent of a race in the game's race tree (human.pbd).</summary>
+    private ushort? ParentRace(ushort race)
+    {
+        if (!_pbdLoaded)
+        {
+            _pbdLoaded = true;
+            try
+            {
+                if (_gameData?.GetHumanPbdBytes() is { } bytes) _pbd = new HumanPbd(bytes);
+            }
+            catch (Exception ex)
+            {
+                _log.Warning(ex, "[APMC] The race tree could not be read; animations will not inherit between races.");
+            }
+        }
+        return _pbd?.GetParentRace(race);
+    }
+
+    private static string? AnimationSourceFingerprint(ConversionTask task)
+    {
+        try
+        {
+            return ModFingerprint.Compute(task.ModDirectory,
+                task.AnimationPlan!.InputFiles.Concat(PenumbraMod.DefinitionFiles(task.ModDirectory).Where(File.Exists)));
+        }
+        catch (Exception)
+        {
+            return null; // A planned input no longer exists.
+        }
+    }
+
     public static GearConversionRequest BuildGearRequest(ConversionTask task)
     {
         if (!ushort.TryParse(task.OldIdPadded, out var sourceId) || !ushort.TryParse(task.NewIdPadded, out var targetId))
@@ -140,10 +201,11 @@ public sealed class ModConverterService
     {
         if (!task.IsPlanned) throw new InvalidOperationException("Preview the conversion before applying it.");
         if (task.HasBlockers) throw new InvalidOperationException(task.ErrorMessage ?? "The conversion plan has blockers.");
-        if (task.GearPlan is { } plan && plan.Request.Mode != mode)
+        if (task.GearPlan is { } plan && plan.Request.Mode != mode ||
+            task.AnimationPlan is { } animation && animation.Request.Mode != mode)
             throw new InvalidOperationException("The output mode changed after preview. Preview again before applying.");
-        var current = task.GearPlan != null
-            ? GearSourceFingerprint(task)
+        var current = task.GearPlan != null ? GearSourceFingerprint(task)
+            : task.AnimationPlan != null ? AnimationSourceFingerprint(task)
             : ConversionPlanValidator.RecomputeSourceFingerprint(task);
         if (!string.Equals(current, task.SourceFingerprint, StringComparison.Ordinal))
             throw new InvalidOperationException("The source mod changed after preview. Preview again before applying.");
@@ -187,6 +249,8 @@ public sealed class ModConverterService
                 GearConversionExecutor.ApplyInPlace(plan, stageDir, Log);
                 GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
             }
+            else if (task.AnimationPlan is { } animation)
+                GearConversionExecutor.ApplyInPlace(animation, stageDir, Log);
             else
             {
                 var stagedTask = RemapTask(task, stageDir);
@@ -346,6 +410,8 @@ public sealed class ModConverterService
                 GearConversionExecutor.WriteNewMod(plan, task.ModDirectory, stageDir, modDisplayName, Log);
                 GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
             }
+            else if (task.AnimationPlan is { } animation)
+                GearConversionExecutor.WriteNewMod(animation, task.ModDirectory, stageDir, modDisplayName, Log);
             else
             {
                 CopyDirectory(task.ModDirectory, stageDir);
@@ -516,6 +582,18 @@ public sealed class ModConverterService
                     {
                         FilePath = modDirectory,
                         HitType  = issue.IsError ? "missing" : "leftover",
+                        Detail   = issue.Message,
+                    });
+                return hits;
+            }
+
+            if (task.AnimationPlan is { } animation)
+            {
+                foreach (var issue in AnimationConversionVerifier.Verify(modDirectory, animation))
+                    hits.Add(new LeftoverHit
+                    {
+                        FilePath = modDirectory,
+                        HitType  = issue.IsError ? "missing" : "note",
                         Detail   = issue.Message,
                     });
                 return hits;

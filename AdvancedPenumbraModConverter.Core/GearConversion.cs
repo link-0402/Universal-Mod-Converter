@@ -28,7 +28,7 @@ public sealed record PlannedFileOperation(
 /// <summary>A human-readable line of the preview.</summary>
 public sealed record GearPlanChange(string Category, string Scope, string From, string To);
 
-public sealed class GearConversionPlan
+public sealed class GearConversionPlan : IModFilePlan
 {
     internal GearConversionPlan(GearConversionRequest request, PenumbraMod result)
     {
@@ -42,6 +42,8 @@ public sealed class GearConversionPlan
     public PenumbraMod Result { get; }
 
     public List<PlannedFileOperation> Files { get; } = [];
+
+    IReadOnlyList<PlannedFileOperation> IModFilePlan.Files => Files;
 
     public List<GearPlanChange> Changes { get; } = [];
 
@@ -968,60 +970,9 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             }
         }
 
-        /// <summary>
-        /// Removes groups that ended up without data. Groups referenced by the conditions or
-        /// parent links of kept groups stay, because Penumbra refuses mods with dangling GUIDs.
-        /// </summary>
         private void PruneGroups(PenumbraMod result)
-        {
-            var keep = result.Groups.Where(g => !g.Node.ContainsKey("__apmc_drop") &&
-                                                (g.IsImc || g.Containers.Any(c => !c.IsEmpty))).ToHashSet();
-            var changed = true;
-            while (changed)
-            {
-                changed = false;
-                var referenced = new HashSet<Guid>();
-                foreach (var group in keep) CollectReferences(group.Node, referenced, topLevel: true);
-                foreach (var group in result.Groups)
-                {
-                    if (keep.Contains(group)) continue;
-                    var ids = group.Options.Select(o => Json.GetString(o["Id"])).Append(Json.GetString(group.Node["Id"]));
-                    if (!ids.Any(id => Guid.TryParse(id, out var guid) && referenced.Contains(guid))) continue;
-                    keep.Add(group);
-                    changed = true;
-                }
-            }
-
-            foreach (var group in result.Groups.Where(g => !keep.Contains(g)))
-                _plan.Changes.Add(new GearPlanChange("Group", group.Name, "option group", "not included (no converted content)"));
-            result.Groups.RemoveAll(g => !keep.Contains(g));
-            foreach (var group in result.Groups) group.Node.Remove("__apmc_drop");
-        }
-
-        private static void CollectReferences(JsonNode? node, HashSet<Guid> output, bool topLevel)
-        {
-            if (node is not JsonObject obj) return;
-            if (Guid.TryParse(Json.GetString(obj["ParentSetting"]), out var parent)) output.Add(parent);
-            CollectGuids(obj["Condition"], output);
-            if (topLevel && obj["Options"] is JsonArray options)
-                foreach (var option in options) CollectReferences(option, output, false);
-        }
-
-        private static void CollectGuids(JsonNode? node, HashSet<Guid> output)
-        {
-            switch (node)
-            {
-                case JsonObject obj:
-                    foreach (var (_, value) in obj) CollectGuids(value, output);
-                    break;
-                case JsonArray array:
-                    foreach (var value in array) CollectGuids(value, output);
-                    break;
-                case JsonValue value when Guid.TryParse(Json.GetString(value), out var guid):
-                    output.Add(guid);
-                    break;
-            }
-        }
+            => ModGroupPruning.Prune(result, group => _plan.Changes.Add(
+                new GearPlanChange("Group", group.Name, "option group", "not included (no converted content)")));
 
         // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -1067,7 +1018,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
     }
 
     /// <summary>Hands out unique mod-relative destinations (case-insensitive, like Windows).</summary>
-    private sealed class LocalAllocator
+    internal sealed class LocalAllocator
     {
         private readonly HashSet<string> _taken = new(StringComparer.OrdinalIgnoreCase);
 

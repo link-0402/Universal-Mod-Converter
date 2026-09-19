@@ -10,6 +10,7 @@ public enum AssetKind
     Face,
     Tail,
     VieraEar,
+    Animation,
 }
 
 public enum ConversionOutputMode

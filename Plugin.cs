@@ -5,6 +5,7 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Interface.Windowing;
 using AdvancedPenumbraModConverter.Services;
+using AdvancedPenumbraModConverter.Services.Animations;
 using AdvancedPenumbraModConverter.Session;
 using AdvancedPenumbraModConverter.Windows;
 
@@ -19,6 +20,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IDataManager            DataManager     { get; private set; } = null!;
     [PluginService] internal static IFramework              Framework       { get; private set; } = null!;
     [PluginService] internal static ITextureProvider        TextureProvider { get; private set; } = null!;
+    [PluginService] internal static ISigScanner             SigScanner      { get; private set; } = null!;
 
     // ── Plugin internals ──────────────────────────────────────────────────────
     internal Configuration            Configuration  { get; }
@@ -42,7 +44,8 @@ public sealed class Plugin : IDalamudPlugin
 
         PenumbraIpc = new PenumbraIpcService(PluginInterface, Log);
         GameData    = new GameDataService(DataManager, Log);
-        Converter   = new ModConverterService(Log, GameData, Framework);
+        Converter   = new ModConverterService(Log, GameData, Framework,
+            new HavokAnimationRetargeter(new HavokAnimation(SigScanner), Framework));
         History     = new ConversionHistoryService(Configuration);
         Session     = new ConverterSession(this);
 

@@ -110,6 +110,13 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
 
     private void DrawHeader(ConversionTask task)
     {
+        if (task.AnimationPlan is { } animation)
+        {
+            ImGui.TextColored(Theme.Accent, animation.Request.Description);
+            DrawBadges(task, animation.Result.Format);
+            return;
+        }
+
         var kind = task.TargetCustomizationKind is { } targetKind && targetKind != task.Kind
             ? $"{task.Kind} → {targetKind}"
             : task.Kind.ToString();
@@ -117,7 +124,11 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
             ? $"   c{task.SourceGenderRace:D4} → c{task.TargetGenderRace:D4}"
             : string.Empty;
         ImGui.TextColored(Theme.Accent, $"{kind}: {task.OldIdPadded} → {task.NewIdPadded}{race}");
+        DrawBadges(task, task.GearPlan?.Result.Format);
+    }
 
+    private void DrawBadges(ConversionTask task, PenumbraModFormat? format)
+    {
         ImGui.SameLine();
         if (task.IsApplied)
             Widgets.Badge("Applied", Theme.Success);
@@ -128,10 +139,10 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
 
         ImGui.SameLine();
         Widgets.Badge(task.OutputMode == ConversionOutputMode.NewMod ? "New mod" : "In place", Theme.Muted);
-        if (task.GearPlan is { } plan)
+        if (format is { } modFormat)
         {
             ImGui.SameLine();
-            Widgets.Badge(plan.Result.Format == PenumbraModFormat.Unified ? "Penumbra 1.7+ format" : "Legacy format", Theme.Muted);
+            Widgets.Badge(modFormat == PenumbraModFormat.Unified ? "Penumbra 1.7+ format" : "Legacy format", Theme.Muted);
         }
         ImGui.Spacing();
     }
@@ -237,26 +248,38 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         _builtFor    = task;
         _filteredFor = "\0"; // force refilter
         _filtered    = new();
-        _sections    = task.GearPlan is { } plan ? BuildGear(plan) : BuildCustomization(task);
+        _sections    = task.GearPlan is { } plan ? BuildGear(plan.Changes, plan.Files)
+            : task.AnimationPlan is { } animation ? BuildGear(animation.Changes, animation.Files, AnimationSections)
+            : BuildCustomization(task);
         _sections.RemoveAll(s => s.Rows.Count == 0);
     }
 
-    private static List<Section> BuildGear(GearConversionPlan plan)
+    private static readonly (string Category, string Title)[] AnimationSections =
+    [
+        ("Game path", "Game paths"),
+        ("Retarget", "Retargeted animations"),
+        ("Option", "Option group contents"),
+        ("Group", "Option groups"),
+    ];
+
+    private static List<Section> BuildGear(IReadOnlyList<GearPlanChange> changes, IReadOnlyList<PlannedFileOperation> files,
+        (string Category, string Title)[]? categories = null)
     {
+        categories ??= GearSections;
         var sections = new List<Section>();
-        var known    = GearSections.Select(s => s.Category).ToHashSet();
+        var known    = categories.Select(s => s.Category).ToHashSet();
         var cols     = new[] { "Scope", "From", "To" };
         var styles   = new[] { Cell.Muted, Cell.From, Cell.To };
 
-        foreach (var (category, title) in GearSections)
+        foreach (var (category, title) in categories)
             sections.Add(new Section(title, cols, styles,
-                plan.Changes.Where(c => c.Category == category).Select(c => new[] { c.Scope, c.From, c.To }).ToList()));
-        foreach (var group in plan.Changes.Where(c => !known.Contains(c.Category)).GroupBy(c => c.Category))
+                changes.Where(c => c.Category == category).Select(c => new[] { c.Scope, c.From, c.To }).ToList()));
+        foreach (var group in changes.Where(c => !known.Contains(c.Category)).GroupBy(c => c.Category))
             sections.Add(new Section(group.Key, cols, styles, group.Select(c => new[] { c.Scope, c.From, c.To }).ToList()));
 
         sections.Add(new Section("Files written or moved", ["Operation", "Source", "Destination", "Reason"],
             [Cell.Accent, Cell.From, Cell.To, Cell.Muted],
-            plan.Files.Select(f => new[]
+            files.Select(f => new[]
             {
                 f.Operation.ToString(),
                 f.Source != null && f.Operation != LocalFileOperation.Write ? f.Source : string.Empty,
