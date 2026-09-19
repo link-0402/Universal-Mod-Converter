@@ -8,7 +8,6 @@ A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](ht
 
 - **Gear and facewear:** retarget a modded item to any other wearable item, including a different slot (for example body → hands). Weapons are not supported.
 - **Hair, faces, tails and Viera ears:** retarget to another ID and/or another race, with the model reshaped for the target race. Tails and Viera ears can convert into each other.
-- **Both Penumbra mod formats:** Penumbra 1.7+ (`meta.json` only) and the legacy multi-file layout.
 - **Safe by default:** everything is previewed before anything is written, output is built in a staging folder and verified, and every conversion can be reverted.
 
 ## Installation
@@ -79,25 +78,6 @@ Gear conversion works on the game paths a mod redirects, never on local file nam
 - **Options:** every group type is converted, including Combining and IMC groups. New mods keep only the converted item's data and drop groups that end up empty, unless another group references them.
 - **In place:** resources used only by the converted item move to the target; resources other items still use are kept and duplicated for the target.
 - **Paths** follow TexTools' rules: the `equipment/e####` / `accessory/a####` root, the item token and the slot suffix change together. MDL (v5 and v6) and MTRL string tables are edited structurally, including renames that change a material name's length.
-
-## Mod formats
-
-- **Penumbra 1.7+ (meta version 4):** all option data lives in `meta.json`. Groups and options carry IDs that conditions and parent links refer to.
-- **Legacy (meta version 3 and older):** `meta.json`, `default_mod.json` and `group_*.json`.
-
-In-place conversions keep the mod's format. New mods use the source's format. A new 1.7+ mod gets its own identifier, while group and option IDs, conditions, pages, parenting, colors and default settings are kept. Unknown properties are left untouched.
-
-## Development
-
-```powershell
-dotnet restore AdvancedPenumbraItemConverter.sln
-dotnet build AdvancedPenumbraItemConverter.sln -c Debug --no-restore
-dotnet run --project AdvancedPenumbraItemConverter.Tests -c Debug --no-build
-```
-
-The conversion engine lives in `AdvancedPenumbraItemConverter.Core` and is also built standalone, so the tests run without the game. The plugin itself is split into `Services` (planning, conversion, game data, Penumbra IPC), `Session` (UI state and background work) and `Windows` (ImGui views).
-
-**Releasing:** set `<Version>` in `AdvancedPenumbraItemConverter.csproj`, then push a tag such as `v1.1.0.0`. The release workflow builds, runs the tests, and publishes `AdvancedPenumbraItemConverter.zip` to a GitHub release, which the shared repository installs from.
 
 ## License
 
