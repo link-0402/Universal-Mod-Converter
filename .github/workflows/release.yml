@@ -1,0 +1,64 @@
+name: Release plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Dalamud SDK
+        shell: pwsh
+        run: |
+          $dalamudHome = Join-Path $env:AppData 'XIVLauncher\addon\Hooks\dev'
+          $archive = Join-Path $env:RUNNER_TEMP 'dalamud.zip'
+          New-Item -ItemType Directory -Force -Path $dalamudHome | Out-Null
+          Invoke-WebRequest -Uri 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $dalamudHome -Force
+
+      - name: Restore dependencies
+        run: dotnet restore AdvancedPenumbraItemConverter.sln
+
+      - name: Build
+        run: dotnet build AdvancedPenumbraItemConverter.sln --configuration Release --no-restore
+
+      - name: Run tests
+        run: dotnet run --project AdvancedPenumbraItemConverter.Tests --configuration Release --no-build
+
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
+          $artifactDirectory = Join-Path $PWD 'release-assets'
+          New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
+          $package = @(
+            'bin/Release/AdvancedPenumbraItemConverter/latest.zip',
+            'bin/x64/Release/AdvancedPenumbraItemConverter/latest.zip'
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $package) {
+            throw 'Dalamud package was not produced.'
+          }
+          Copy-Item -LiteralPath $package -Destination (Join-Path $artifactDirectory 'AdvancedPenumbraItemConverter.zip') -Force
+          Copy-Item -LiteralPath $package -Destination (Join-Path $artifactDirectory 'latest.zip') -Force
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/AdvancedPenumbraItemConverter.zip
+            release-assets/latest.zip
+          generate_release_notes: true
+          token: ${{ secrets.GITHUB_TOKEN }}

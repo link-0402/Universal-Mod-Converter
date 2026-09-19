@@ -1,0 +1,21 @@
+{
+  "Author": "Luci",
+  "Name": "Advanced Penumbra Item Converter",
+  "Description": "Convert gear, facewear, hair, face, tail and Viera-ear assets in Penumbra mods to other items, slots and races. Supports the Penumbra 1.7+ mod format, retargets game paths, model/material references and metadata, and verifies the result.",
+  "Punchline": "Retarget Penumbra mods to a different item ID in-game.",
+  "Tags": [
+    "penumbra",
+    "modding",
+    "ffxiv",
+    "gear"
+  ],
+  "CategoryTags": [
+    "Modding"
+  ],
+  "RepoUrl": "https://github.com/link-0402/AdvancedPenumbraItemConverter",
+  "DalamudApiLevel": 15,
+  "LoadRequiredState": 0,
+  "LoadSync": false,
+  "CanUnloadAsync": true,
+  "LoadPriority": 0
+}

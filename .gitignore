@@ -1,0 +1,7 @@
+bin/
+obj/
+**/bin/
+**/obj/
+TestData/Local/
+*.user
+*.suo
