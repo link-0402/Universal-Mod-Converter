@@ -2,11 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using AdvancedPenumbraItemConverter.Core;
-using AdvancedPenumbraItemConverter.Models;
+using AdvancedPenumbraModConverter.Core;
+using AdvancedPenumbraModConverter.Models;
 using Dalamud.Plugin.Services;
 
-namespace AdvancedPenumbraItemConverter.Services;
+namespace AdvancedPenumbraModConverter.Services;
 
 internal readonly record struct EstOverrideKey(AssetKind Kind, ushort GenderRace, ushort SetId);
 
@@ -84,7 +84,7 @@ internal sealed class SkeletonHierarchyService(
         {
             var warning = $"Skeleton '{gamePath}' could not be read; unresolved bones will remain unchanged. {ex.Message}";
             warnings.Add(warning);
-            log.Warning(ex, "[APIC] {0}", warning);
+            log.Warning(ex, "[APMC] {0}", warning);
             return null;
         }
     }

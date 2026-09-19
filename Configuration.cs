@@ -1,9 +1,9 @@
 using Dalamud.Configuration;
 using System;
 using System.Collections.Generic;
-using AdvancedPenumbraItemConverter.Core;
+using AdvancedPenumbraModConverter.Core;
 
-namespace AdvancedPenumbraItemConverter;
+namespace AdvancedPenumbraModConverter;
 
 [Serializable]
 public class Configuration : IPluginConfiguration

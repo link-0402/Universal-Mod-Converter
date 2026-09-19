@@ -1,4 +1,4 @@
-# Advanced Penumbra Item Converter
+# Advanced Penumbra Mod Converter
 
 A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](https://github.com/xivdev/Penumbra) mods to a different item, slot or race, keeping all of the mod's options and toggles intact.
 
@@ -20,13 +20,13 @@ The plugin is distributed through the shared [DalamudPlugins](https://github.com
    https://raw.githubusercontent.com/link-0402/DalamudPlugins/main/repo.json
    ```
 3. On the same tab, enable **Get plugin testing builds**.
-4. Find **Advanced Penumbra Item Converter** in `/xlplugins` and install it.
+4. Find **Advanced Penumbra Mod Converter** in `/xlplugins` and install it.
 
 Penumbra must be installed. Without it the plugin still works on mod folders you enter by path, but new mods have to be added to Penumbra by hand.
 
 ## Using it
 
-Open the window with `/apic` (settings: `/apicconfig` or the cog icon).
+Open the window with `/apmc` (settings: `/apmcconfig` or the cog icon).
 
 1. **Pick a mod** in the browser on the left, or enter a folder path under **Other folder**.
 2. **From:** choose the item, hair, face, tail or ear the mod replaces. Mods that touch several items list each one; nothing is guessed.
@@ -64,8 +64,8 @@ Every model keeps at least one mesh group. MDL v5 models, and files an in-place 
 
 - **Nothing is written during preview.** Apply refuses to run if the source mod changed since the preview.
 - **New mods** are built in a hidden staging folder next to the source, validated, and only then moved into place.
-- **In-place conversions** build a full shadow copy, keep the original in a hidden `.apic-backups` folder inside the Penumbra mod directory, and swap folders atomically. If Penumbra can't load the result, the original is restored automatically.
-- **Reverting never deletes anything.** The reverted output is moved into `.apic-backups`. Delete that folder yourself to reclaim space.
+- **In-place conversions** build a full shadow copy, keep the original in a hidden `.apmc-backups` folder inside the Penumbra mod directory, and swap folders atomically. If Penumbra can't load the result, the original is restored automatically.
+- **Reverting never deletes anything.** The reverted output is moved into `.apmc-backups`. Delete that folder yourself to reclaim space.
 - **Status is reported in two parts:** writing the output to disk, and Penumbra loading it. An output Penumbra couldn't load is shown with its path and a retry button.
 
 ## How gear conversion works

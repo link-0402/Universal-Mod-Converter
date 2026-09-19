@@ -1,13 +1,13 @@
 using System;
 using System.Collections.Generic;
-using AdvancedPenumbraItemConverter.Core;
+using AdvancedPenumbraModConverter.Core;
 using FFXIVClientStructs.Havok.Animation;
 using FFXIVClientStructs.Havok.Common.Base.Object;
 using FFXIVClientStructs.Havok.Common.Serialize.Resource;
 using FFXIVClientStructs.Havok.Common.Serialize.Util;
 using Dalamud.Plugin.Services;
 
-namespace AdvancedPenumbraItemConverter.Services;
+namespace AdvancedPenumbraModConverter.Services;
 
 /// <summary>
 /// Thin game-runtime adapter. Callers invoke this only from the framework/UI thread

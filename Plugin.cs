@@ -4,11 +4,11 @@ using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Interface.Windowing;
-using AdvancedPenumbraItemConverter.Services;
-using AdvancedPenumbraItemConverter.Session;
-using AdvancedPenumbraItemConverter.Windows;
+using AdvancedPenumbraModConverter.Services;
+using AdvancedPenumbraModConverter.Session;
+using AdvancedPenumbraModConverter.Windows;
 
-namespace AdvancedPenumbraItemConverter;
+namespace AdvancedPenumbraModConverter;
 
 public sealed class Plugin : IDalamudPlugin
 {
@@ -28,12 +28,12 @@ public sealed class Plugin : IDalamudPlugin
     internal ConversionHistoryService History        { get; }
     internal ConverterSession         Session        { get; }
 
-    public   readonly WindowSystem WindowSystem = new("AdvancedPenumbraItemConverter");
+    public   readonly WindowSystem WindowSystem = new("AdvancedPenumbraModConverter");
     private  ConfigWindow          ConfigWindow  { get; }
     private  MainWindow            MainWindow    { get; }
 
-    private const string CommandName    = "/apic";
-    private const string CommandConfig  = "/apicconfig";
+    private const string CommandName    = "/apmc";
+    private const string CommandConfig  = "/apmcconfig";
 
     public Plugin()
     {
@@ -56,11 +56,11 @@ public sealed class Plugin : IDalamudPlugin
         // ── Commands ──────────────────────────────────────────────────────────
         CommandManager.AddHandler(CommandName, new CommandInfo(OnMainCommand)
         {
-            HelpMessage = "Open the Advanced Penumbra Item Converter window."
+            HelpMessage = "Open the Advanced Penumbra Mod Converter window."
         });
         CommandManager.AddHandler(CommandConfig, new CommandInfo(OnConfigCommand)
         {
-            HelpMessage = "Open the Advanced Penumbra Item Converter configuration."
+            HelpMessage = "Open the Advanced Penumbra Mod Converter configuration."
         });
 
         // ── UI hooks ──────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ public sealed class Plugin : IDalamudPlugin
         PenumbraIpc.PenumbraInitialized += OnPenumbraStateChanged;
         PenumbraIpc.PenumbraDisposed    += OnPenumbraStateChanged;
 
-        Log.Information("[APIC] Advanced Penumbra Item Converter loaded.");
+        Log.Information("[APMC] Advanced Penumbra Mod Converter loaded.");
     }
 
     public void Dispose()
@@ -113,7 +113,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnPenumbraStateChanged()
     {
-        Log.Information("[APIC] Penumbra availability changed.");
+        Log.Information("[APMC] Penumbra availability changed.");
         Session.Runner.Post(Session.RefreshPenumbraState);
     }
 }

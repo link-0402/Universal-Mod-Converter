@@ -2,14 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using AdvancedPenumbraItemConverter.Core;
-using AdvancedPenumbraItemConverter.Models;
+using AdvancedPenumbraModConverter.Core;
+using AdvancedPenumbraModConverter.Models;
 
-namespace AdvancedPenumbraItemConverter.Services;
+namespace AdvancedPenumbraModConverter.Services;
 
 /// <summary>
 /// Remembers published conversions and reverts them. A revert never deletes anything: the
-/// converted output is moved into the hidden <c>.apic-backups</c> folder, and for in-place
+/// converted output is moved into the hidden <c>.apmc-backups</c> folder, and for in-place
 /// conversions the original is moved back from there.
 /// </summary>
 public sealed class ConversionHistoryService(Configuration configuration)

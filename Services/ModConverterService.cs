@@ -6,11 +6,11 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
-using AdvancedPenumbraItemConverter.Core;
-using AdvancedPenumbraItemConverter.Models;
+using AdvancedPenumbraModConverter.Core;
+using AdvancedPenumbraModConverter.Models;
 using Dalamud.Plugin.Services;
 
-namespace AdvancedPenumbraItemConverter.Services;
+namespace AdvancedPenumbraModConverter.Services;
 
 /// <summary>
 /// Plans, applies and verifies conversions of a Penumbra mod.
@@ -21,7 +21,7 @@ namespace AdvancedPenumbraItemConverter.Services;
 /// </summary>
 public sealed class ModConverterService
 {
-    private const string BackupFolderName = ".apic-backups";
+    private const string BackupFolderName = ".apmc-backups";
 
     private readonly IPluginLog           _log;
     private readonly IGameFileProvider    _gameFiles;
@@ -103,14 +103,14 @@ public sealed class ModConverterService
             task.ErrorMessage = task.HasBlockers
                 ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
                 : null;
-            _log.Information("[APIC] Planned {0} -> {1} ({2}): {3} path(s), {4} file operation(s), {5} diagnostic(s).",
+            _log.Information("[APMC] Planned {0} -> {1} ({2}): {3} path(s), {4} file operation(s), {5} diagnostic(s).",
                 request.Source, request.Target, request.Mode, plan.GamePathMap.Count, plan.Files.Count, plan.Diagnostics.Count);
         }
         catch (Exception ex)
         {
             task.ErrorMessage = ex.Message;
             task.Diagnostics.Add(new PlanDiagnostic("planning_failed", ex.Message, true));
-            _log.Error(ex, "[APIC] PlanConversion failed");
+            _log.Error(ex, "[APMC] PlanConversion failed");
         }
     }
 
@@ -163,7 +163,7 @@ public sealed class ModConverterService
         task.ResultStatus = ConversionResultStatus.NotStarted;
         task.ErrorMessage = null;
 
-        void Log(string msg) { onLog?.Invoke(msg); _log.Information("[APIC] {0}", msg); }
+        void Log(string msg) { onLog?.Invoke(msg); _log.Information("[APMC] {0}", msg); }
 
         string? stageDir = null;
         string? backupDir = null;
@@ -176,9 +176,9 @@ public sealed class ModConverterService
             var parent = Path.GetDirectoryName(sourceDir) ?? throw new InvalidOperationException("The mod has no parent directory.");
             var name = Path.GetFileName(sourceDir);
             var id = Guid.NewGuid().ToString("N");
-            stageDir = Path.Combine(parent, $".{name}.apic-stage-{id}");
+            stageDir = Path.Combine(parent, $".{name}.apmc-stage-{id}");
             backupDir = Path.Combine(BackupRoot(parent), $"{name}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{id[..8]}");
-            task.JournalPath = Path.Combine(parent, $".{name}.apic-recovery-{id}.json");
+            task.JournalPath = Path.Combine(parent, $".{name}.apmc-recovery-{id}.json");
 
             Log($"Staging complete mod shadow: {stageDir}");
             CopyDirectory(sourceDir, stageDir);
@@ -227,7 +227,7 @@ public sealed class ModConverterService
             if (stageDir != null && Directory.Exists(stageDir))
                 try { Directory.Delete(stageDir, true); } catch { }
             task.ErrorMessage = ex.Message;
-            _log.Error(ex, "[APIC] ApplyConversion failed");
+            _log.Error(ex, "[APMC] ApplyConversion failed");
             onLog?.Invoke($"Error: {ex.Message}");
         }
     }
@@ -290,7 +290,7 @@ public sealed class ModConverterService
         {
             if (task.RecoveryPath is not { } backup || !Directory.Exists(backup)) return false;
             var current = Path.GetFullPath(task.ModDirectory).TrimEnd('\\', '/');
-            var failed = current + $".apic-failed-{Guid.NewGuid():N}";
+            var failed = current + $".apmc-failed-{Guid.NewGuid():N}";
             if (Directory.Exists(current)) Directory.Move(current, failed);
             Directory.Move(backup, current);
             try { if (Directory.Exists(failed)) Directory.Delete(failed, true); } catch { }
@@ -331,7 +331,7 @@ public sealed class ModConverterService
         task.ResultStatus = ConversionResultStatus.NotStarted;
         task.ErrorMessage = null;
         string? stageDir = null;
-        void Log(string msg) { onLog?.Invoke(msg); _log.Information("[APIC] {0}", msg); }
+        void Log(string msg) { onLog?.Invoke(msg); _log.Information("[APMC] {0}", msg); }
         try
         {
             EnsurePlanIsCurrent(task, ConversionOutputMode.NewMod);
@@ -340,7 +340,7 @@ public sealed class ModConverterService
             if (Directory.Exists(finalDir) || File.Exists(finalDir))
                 throw new IOException($"The output path already exists: {finalDir}");
             var parent = Path.GetDirectoryName(finalDir) ?? throw new InvalidOperationException("The output path has no parent.");
-            stageDir = Path.Combine(parent, $".{Path.GetFileName(finalDir)}.apic-stage-{Guid.NewGuid():N}");
+            stageDir = Path.Combine(parent, $".{Path.GetFileName(finalDir)}.apmc-stage-{Guid.NewGuid():N}");
             if (task.GearPlan is { } plan)
             {
                 GearConversionExecutor.WriteNewMod(plan, task.ModDirectory, stageDir, modDisplayName, Log);
@@ -370,7 +370,7 @@ public sealed class ModConverterService
             task.ResultStatus = ConversionResultStatus.Failed;
             task.ErrorMessage = ex.Message;
             onLog?.Invoke($"Error: {ex.Message}");
-            _log.Error(ex, "[APIC] Atomic new-mod publication failed");
+            _log.Error(ex, "[APMC] Atomic new-mod publication failed");
             return null;
         }
     }
@@ -529,7 +529,7 @@ public sealed class ModConverterService
         }
         catch (Exception ex)
         {
-            _log.Error(ex, "[APIC] VerifyConversion failed");
+            _log.Error(ex, "[APMC] VerifyConversion failed");
             hits.Add(new LeftoverHit { FilePath = modDirectory, HitType = "error", Detail = $"Verification failed: {ex.Message}" });
         }
 
@@ -617,7 +617,7 @@ public sealed class ModConverterService
             }
             catch (Exception ex)
             {
-                _log.Warning(ex, "[APIC] Could not remove empty customization dir {0}", directory);
+                _log.Warning(ex, "[APMC] Could not remove empty customization dir {0}", directory);
             }
         }
     }

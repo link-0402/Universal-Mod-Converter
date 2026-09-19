@@ -6,7 +6,7 @@ using Dalamud.Interface.Components;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraItemConverter.Windows.Ui;
+namespace AdvancedPenumbraModConverter.Windows.Ui;
 
 /// <summary>Small reusable drawing helpers shared by the window components.</summary>
 internal static class Widgets

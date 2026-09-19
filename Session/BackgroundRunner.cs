@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading.Tasks;
 
-namespace AdvancedPenumbraItemConverter.Session;
+namespace AdvancedPenumbraModConverter.Session;
 
 /// <summary>
 /// Runs one long operation (scan, preview, apply, revert) at a time off the framework thread.
@@ -60,7 +60,7 @@ public sealed class BackgroundRunner
             }
             catch (Exception ex)
             {
-                Plugin.Log.Error(ex, "[APIC] Background completion failed");
+                Plugin.Log.Error(ex, "[APMC] Background completion failed");
             }
         }
     }

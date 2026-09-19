@@ -3,11 +3,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using AdvancedPenumbraItemConverter.Core;
-using AdvancedPenumbraItemConverter.Models;
-using AdvancedPenumbraItemConverter.Services;
+using AdvancedPenumbraModConverter.Core;
+using AdvancedPenumbraModConverter.Models;
+using AdvancedPenumbraModConverter.Services;
 
-namespace AdvancedPenumbraItemConverter.Session;
+namespace AdvancedPenumbraModConverter.Session;
 
 public sealed record ModEntry(string Name, string Directory, string Folder);
 
@@ -873,7 +873,7 @@ public sealed class ConverterSession
         }
         catch (Exception ex)
         {
-            Plugin.Log.Warning(ex, "[APIC] Could not open {0}", path);
+            Plugin.Log.Warning(ex, "[APMC] Could not open {0}", path);
         }
     }
 

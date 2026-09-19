@@ -1,10 +1,10 @@
 using System;
 using System.IO;
 using System.Linq;
-using AdvancedPenumbraItemConverter.Core;
-using AdvancedPenumbraItemConverter.Models;
+using AdvancedPenumbraModConverter.Core;
+using AdvancedPenumbraModConverter.Models;
 
-namespace AdvancedPenumbraItemConverter.Services;
+namespace AdvancedPenumbraModConverter.Services;
 
 internal static class ConversionPlanValidator
 {

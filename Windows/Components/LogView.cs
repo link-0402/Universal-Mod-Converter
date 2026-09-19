@@ -2,13 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
-using AdvancedPenumbraItemConverter.Session;
-using AdvancedPenumbraItemConverter.Windows.Ui;
+using AdvancedPenumbraModConverter.Session;
+using AdvancedPenumbraModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraItemConverter.Windows.Components;
+namespace AdvancedPenumbraModConverter.Windows.Components;
 
 /// <summary>Filterable operation log.</summary>
 internal sealed class LogView(LogStore log)

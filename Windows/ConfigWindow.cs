@@ -1,17 +1,17 @@
 using System;
-using AdvancedPenumbraItemConverter.Windows.Ui;
+using AdvancedPenumbraModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 
-namespace AdvancedPenumbraItemConverter.Windows;
+namespace AdvancedPenumbraModConverter.Windows;
 
 public sealed class ConfigWindow : Window, IDisposable
 {
     private readonly Plugin _plugin;
 
     public ConfigWindow(Plugin plugin) : base(
-        "Advanced Penumbra Item Converter — Settings###APICConfig",
+        "Advanced Penumbra Mod Converter — Settings###APMCConfig",
         ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoCollapse)
     {
         _plugin = plugin;
@@ -49,7 +49,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
         ImGui.Spacing();
         using (ImRaii.TextWrapPos(ImGui.GetFontSize() * 28f))
-            Widgets.Muted("Reverted and in-place originals are kept in the hidden .apic-backups folder " +
+            Widgets.Muted("Reverted and in-place originals are kept in the hidden .apmc-backups folder " +
                           "inside your Penumbra mod directory. Delete it manually to reclaim space.");
     }
 }

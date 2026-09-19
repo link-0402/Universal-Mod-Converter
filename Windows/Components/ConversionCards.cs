@@ -1,16 +1,16 @@
 using System;
 using System.Linq;
 using System.Numerics;
-using AdvancedPenumbraItemConverter.Core;
-using AdvancedPenumbraItemConverter.Models;
-using AdvancedPenumbraItemConverter.Services;
-using AdvancedPenumbraItemConverter.Session;
-using AdvancedPenumbraItemConverter.Windows.Ui;
+using AdvancedPenumbraModConverter.Core;
+using AdvancedPenumbraModConverter.Models;
+using AdvancedPenumbraModConverter.Services;
+using AdvancedPenumbraModConverter.Session;
+using AdvancedPenumbraModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraItemConverter.Windows.Components;
+namespace AdvancedPenumbraModConverter.Windows.Components;
 
 /// <summary>The "From" and "To" cards: source root selection and target picker.</summary>
 internal sealed class ConversionCards(ConverterSession session)

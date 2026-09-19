@@ -2,14 +2,14 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-using AdvancedPenumbraItemConverter.Core;
-using AdvancedPenumbraItemConverter.Session;
-using AdvancedPenumbraItemConverter.Windows.Ui;
+using AdvancedPenumbraModConverter.Core;
+using AdvancedPenumbraModConverter.Session;
+using AdvancedPenumbraModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraItemConverter.Windows.Components;
+namespace AdvancedPenumbraModConverter.Windows.Components;
 
 /// <summary>Output options, readiness, Preview/Apply buttons and the result banner.</summary>
 internal sealed class ActionPanels(ConverterSession session, Configuration config, ConfirmDialog confirm)
@@ -218,9 +218,9 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
     {
         var what = record.Mode == ConversionOutputMode.NewMod
             ? $"The new mod '{Path.GetFileName(record.PublishedPath)}' will be removed from Penumbra. " +
-              "Its folder is moved into the hidden .apic-backups folder, not deleted."
+              "Its folder is moved into the hidden .apmc-backups folder, not deleted."
             : $"'{record.SourceModName}' will be restored to how it was before this conversion. " +
-              "Any changes made to it since then are lost; the converted version is moved into the hidden .apic-backups folder.";
+              "Any changes made to it since then are lost; the converted version is moved into the hidden .apmc-backups folder.";
         confirm.Request($"Revert: {record.Description}?", what, "Revert", () => session.Revert(record.Id));
     }
 }

@@ -4,12 +4,12 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraItemConverter.Windows.Ui;
+namespace AdvancedPenumbraModConverter.Windows.Ui;
 
 /// <summary>One modal confirmation at a time, drawn by the owning window.</summary>
 internal sealed class ConfirmDialog
 {
-    private const string PopupId = "Confirm###APICConfirm";
+    private const string PopupId = "Confirm###APMCConfirm";
 
     private string _title = string.Empty;
     private string _message = string.Empty;

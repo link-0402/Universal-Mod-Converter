@@ -1,9 +1,9 @@
 using System.Numerics;
-using AdvancedPenumbraItemConverter.Session;
+using AdvancedPenumbraModConverter.Session;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 
-namespace AdvancedPenumbraItemConverter.Windows.Ui;
+namespace AdvancedPenumbraModConverter.Windows.Ui;
 
 /// <summary>
 /// Semantic colours and spacing. Base colours come from the active Dalamud style so the
