@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace AdvancedPenumbraModConverter.Windows.Ui;
+namespace UniversalModConverter.Windows.Ui;
 
 /// <summary>
 /// Human titles for the plan's diagnostic codes. The codes are how the converter talks to

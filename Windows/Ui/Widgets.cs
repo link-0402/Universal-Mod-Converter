@@ -6,7 +6,7 @@ using Dalamud.Interface.Components;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraModConverter.Windows.Ui;
+namespace UniversalModConverter.Windows.Ui;
 
 /// <summary>Small reusable drawing helpers shared by the window components.</summary>
 internal static class Widgets
@@ -41,7 +41,7 @@ internal static class Widgets
             catch (Exception ex)
             {
                 MissingIcons.Add(iconId);
-                Plugin.Log.Debug(ex, "[APMC] Game icon {0} is unavailable.", iconId);
+                Plugin.Log.Debug(ex, "[UMC] Game icon {0} is unavailable.", iconId);
             }
         }
         ImGui.Dummy(new Vector2(size));

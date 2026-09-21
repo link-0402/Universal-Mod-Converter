@@ -4,7 +4,7 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Services;
 
-namespace AdvancedPenumbraModConverter.Services;
+namespace UniversalModConverter.Services;
 
 /// <summary>
 /// Thin wrapper around Penumbra's IPC channel.
@@ -64,14 +64,14 @@ public sealed class PenumbraIpcService : IDisposable
             _initializedSub = pi.GetIpcSubscriber<object>("Penumbra.Initialized");
             _initializedSub.Subscribe(OnPenumbraInitialized);
         }
-        catch (Exception ex) { _log.Debug(ex, "[APMC] Could not subscribe to Penumbra.Initialized"); }
+        catch (Exception ex) { _log.Debug(ex, "[UMC] Could not subscribe to Penumbra.Initialized"); }
 
         try
         {
             _disposedSub = pi.GetIpcSubscriber<object>("Penumbra.Disposed");
             _disposedSub.Subscribe(OnPenumbraDisposed);
         }
-        catch (Exception ex) { _log.Debug(ex, "[APMC] Could not subscribe to Penumbra.Disposed"); }
+        catch (Exception ex) { _log.Debug(ex, "[UMC] Could not subscribe to Penumbra.Disposed"); }
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -107,14 +107,14 @@ public sealed class PenumbraIpcService : IDisposable
     public string? GetModDirectory()
     {
         try   { return _getModDirectory.InvokeFunc(); }
-        catch (Exception ex) { _log.Warning(ex, "[APMC] GetModDirectory failed"); return null; }
+        catch (Exception ex) { _log.Warning(ex, "[UMC] GetModDirectory failed"); return null; }
     }
 
     /// <summary>Returns a dict of modDirectory → modName for all known mods.</summary>
     public Dictionary<string, string>? GetModList()
     {
         try   { return _getModList.InvokeFunc(); }
-        catch (Exception ex) { _log.Warning(ex, "[APMC] GetModList failed"); return null; }
+        catch (Exception ex) { _log.Warning(ex, "[UMC] GetModList failed"); return null; }
     }
 
     /// <summary>
@@ -128,10 +128,10 @@ public sealed class PenumbraIpcService : IDisposable
         {
             var rc = (PenumbraApiEc)_reloadMod.InvokeFunc(modDirectory, modName);
             if (rc != PenumbraApiEc.Success)
-                _log.Warning($"[APMC] ReloadMod returned {rc} for '{modDirectory}'");
+                _log.Warning($"[UMC] ReloadMod returned {rc} for '{modDirectory}'");
             return rc == PenumbraApiEc.Success;
         }
-        catch (Exception ex) { _log.Warning(ex, "[APMC] ReloadMod failed"); return false; }
+        catch (Exception ex) { _log.Warning(ex, "[UMC] ReloadMod failed"); return false; }
     }
 
     /// <summary>
@@ -143,23 +143,23 @@ public sealed class PenumbraIpcService : IDisposable
         try
         {
             var rc = (PenumbraApiEc)_addTemporaryModAll.InvokeFunc(tag, paths, string.Empty, priority);
-            if (rc != PenumbraApiEc.Success) _log.Warning($"[APMC] AddTemporaryModAll returned {rc}");
+            if (rc != PenumbraApiEc.Success) _log.Warning($"[UMC] AddTemporaryModAll returned {rc}");
             return rc == PenumbraApiEc.Success;
         }
-        catch (Exception ex) { _log.Warning(ex, "[APMC] AddTemporaryModAll failed"); return false; }
+        catch (Exception ex) { _log.Warning(ex, "[UMC] AddTemporaryModAll failed"); return false; }
     }
 
     public void RemoveTemporaryModAll(string tag, int priority)
     {
         try { _removeTemporaryModAll.InvokeFunc(tag, priority); }
-        catch (Exception ex) { _log.Warning(ex, "[APMC] RemoveTemporaryModAll failed"); }
+        catch (Exception ex) { _log.Warning(ex, "[UMC] RemoveTemporaryModAll failed"); }
     }
 
     /// <summary>Redraws a game object (0 is the local player) so file changes show.</summary>
     public void RedrawObject(int objectIndex)
     {
         try { _redrawObject.InvokeAction(objectIndex, 0); }
-        catch (Exception ex) { _log.Warning(ex, "[APMC] RedrawObject failed"); }
+        catch (Exception ex) { _log.Warning(ex, "[UMC] RedrawObject failed"); }
     }
 
     /// <summary>
@@ -174,10 +174,10 @@ public sealed class PenumbraIpcService : IDisposable
         {
             var rc = (PenumbraApiEc)_addMod.InvokeFunc(modDirectory);
             if (rc != PenumbraApiEc.Success && rc != PenumbraApiEc.NothingDone)
-                _log.Warning($"[APMC] AddMod returned {rc} for '{modDirectory}'");
+                _log.Warning($"[UMC] AddMod returned {rc} for '{modDirectory}'");
             return rc == PenumbraApiEc.Success || rc == PenumbraApiEc.NothingDone;
         }
-        catch (Exception ex) { _log.Warning(ex, "[APMC] AddMod failed"); return false; }
+        catch (Exception ex) { _log.Warning(ex, "[UMC] AddMod failed"); return false; }
     }
 
     /// <summary>
@@ -191,10 +191,10 @@ public sealed class PenumbraIpcService : IDisposable
         {
             var rc = (PenumbraApiEc)_deleteMod.InvokeFunc(modDirectory, modName);
             if (rc != PenumbraApiEc.Success && rc != PenumbraApiEc.NothingDone)
-                _log.Warning($"[APMC] DeleteMod returned {rc} for '{modDirectory}'");
+                _log.Warning($"[UMC] DeleteMod returned {rc} for '{modDirectory}'");
             return rc == PenumbraApiEc.Success || rc == PenumbraApiEc.NothingDone;
         }
-        catch (Exception ex) { _log.Warning(ex, "[APMC] DeleteMod failed"); return false; }
+        catch (Exception ex) { _log.Warning(ex, "[UMC] DeleteMod failed"); return false; }
     }
 
     /// <summary>
@@ -208,7 +208,7 @@ public sealed class PenumbraIpcService : IDisposable
             var (ret, fullPath, _, _) = _getModPath.InvokeFunc(modDirectory, modName);
             return ((PenumbraApiEc)ret == PenumbraApiEc.Success, fullPath);
         }
-        catch (Exception ex) { _log.Warning(ex, "[APMC] GetModPath failed"); return (false, string.Empty); }
+        catch (Exception ex) { _log.Warning(ex, "[UMC] GetModPath failed"); return (false, string.Empty); }
     }
 
     /// <summary>
@@ -217,7 +217,7 @@ public sealed class PenumbraIpcService : IDisposable
     public Dictionary<Guid, string>? GetCollections()
     {
         try   { return _getCollections.InvokeFunc(); }
-        catch (Exception ex) { _log.Debug(ex, "[APMC] GetCollections failed"); return null; }
+        catch (Exception ex) { _log.Debug(ex, "[UMC] GetCollections failed"); return null; }
     }
 
     /// <summary>
@@ -234,7 +234,7 @@ public sealed class PenumbraIpcService : IDisposable
         }
         catch (Exception ex)
         {
-            _log.Debug(ex, "[APMC] GetCollectionForObject failed for index {0}", gameObjectIndex);
+            _log.Debug(ex, "[UMC] GetCollectionForObject failed for index {0}", gameObjectIndex);
             return null;
         }
     }

@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 using Dalamud.Plugin.Services;
 
-namespace AdvancedPenumbraModConverter.Services;
+namespace UniversalModConverter.Services;
 
 /// <summary>
 /// Keeps the backup folder from growing without bound, and finishes conversions the plugin
@@ -51,7 +51,7 @@ public sealed class BackupMaintenanceService(
 
         if (!string.IsNullOrWhiteSpace(penumbraRoot))
             try { Add(ModConverterService.BackupRoot(penumbraRoot!, configuration.BackupDirectory, create: false)); }
-            catch (Exception ex) { log.Warning(ex, "[APMC] Could not resolve the backup root."); }
+            catch (Exception ex) { log.Warning(ex, "[UMC] Could not resolve the backup root."); }
 
         // A backup written before the root moved, or under a Penumbra directory that is not
         // the current one, is still ours to clean up.
@@ -106,7 +106,7 @@ public sealed class BackupMaintenanceService(
         }
 
         if (deleted.Count == 0) return SweepResult.Empty;
-        log.Information("[APMC] Removed {0} expired backup folder(s), {1}.", deleted.Count, Describe(bytes));
+        log.Information("[UMC] Removed {0} expired backup folder(s), {1}.", deleted.Count, Describe(bytes));
 
         var pruned = configuration.History
             .Where(record => Matches(record.RecoveryPath, deleted) || Matches(record.RevertedOutputPath, deleted))
@@ -126,7 +126,7 @@ public sealed class BackupMaintenanceService(
         var handled = 0;
         var now = DateTime.UtcNow;
 
-        foreach (var journal in SafeEnumerateFiles(penumbraRoot, ".*.apmc-recovery-*.json"))
+        foreach (var journal in SafeEnumerateFiles(penumbraRoot, ".*.umc-recovery-*.json"))
         {
             try
             {
@@ -140,7 +140,7 @@ public sealed class BackupMaintenanceService(
                     !string.IsNullOrEmpty(backup) && Directory.Exists(backup))
                 {
                     Directory.Move(backup, source);
-                    log.Warning("[APMC] An interrupted conversion was rolled back: restored {0}.", source);
+                    log.Warning("[UMC] An interrupted conversion was rolled back: restored {0}.", source);
                 }
 
                 File.Delete(journal);
@@ -148,16 +148,16 @@ public sealed class BackupMaintenanceService(
             }
             catch (Exception ex)
             {
-                log.Warning(ex, "[APMC] Could not process the recovery journal {0}.", journal);
+                log.Warning(ex, "[UMC] Could not process the recovery journal {0}.", journal);
             }
         }
 
-        foreach (var stage in SafeEnumerateDirectories(penumbraRoot, ".*.apmc-stage-*")
-                     .Concat(SafeEnumerateDirectories(penumbraRoot, ".*.apmc-failed-*")))
+        foreach (var stage in SafeEnumerateDirectories(penumbraRoot, ".*.umc-stage-*")
+                     .Concat(SafeEnumerateDirectories(penumbraRoot, ".*.umc-failed-*")))
         {
             if (now - Directory.GetLastWriteTimeUtc(stage) < OrphanGrace) continue;
             if (!TryDelete(stage)) continue;
-            log.Information("[APMC] Removed the leftover staging folder {0}.", stage);
+            log.Information("[UMC] Removed the leftover staging folder {0}.", stage);
             handled++;
         }
 
@@ -211,7 +211,7 @@ public sealed class BackupMaintenanceService(
         }
         catch (Exception ex)
         {
-            log.Warning(ex, "[APMC] Could not delete {0}.", folder);
+            log.Warning(ex, "[UMC] Could not delete {0}.", folder);
             return false;
         }
     }

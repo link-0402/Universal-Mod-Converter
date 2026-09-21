@@ -1,14 +1,14 @@
 using System;
 using System.Numerics;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows.Components;
-using AdvancedPenumbraModConverter.Windows.Ui;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows.Components;
+using UniversalModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 
-namespace AdvancedPenumbraModConverter.Windows;
+namespace UniversalModConverter.Windows;
 
 /// <summary>
 /// Primary plugin window. A resizable mod browser on the left; on the right the conversion
@@ -40,7 +40,7 @@ public sealed class MainWindow : Window, IDisposable
     private object? _lastTask;
 
     public MainWindow(Plugin plugin) : base(
-        "Advanced Penumbra Mod Converter###APMCMain",
+        "Universal Mod Converter###UMCMain",
         ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         _plugin  = plugin;

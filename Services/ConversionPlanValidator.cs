@@ -1,10 +1,10 @@
 using System;
 using System.IO;
 using System.Linq;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Models;
+using UniversalModConverter.Core;
+using UniversalModConverter.Models;
 
-namespace AdvancedPenumbraModConverter.Services;
+namespace UniversalModConverter.Services;
 
 internal static class ConversionPlanValidator
 {

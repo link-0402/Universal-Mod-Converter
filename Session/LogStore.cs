@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
-namespace AdvancedPenumbraModConverter.Session;
+namespace UniversalModConverter.Session;
 
 public enum LogLevel
 {
@@ -48,7 +48,7 @@ public sealed class LogStore
         _entries.Add(new LogEntry(DateTime.Now, level, message, _operation));
         if (_entries.Count > MaxEntries) _entries.RemoveRange(0, _entries.Count - MaxEntries);
         Revision++;
-        Plugin.Log.Information("[APMC] {0}", message);
+        Plugin.Log.Information("[UMC] {0}", message);
     }
 
     public void Clear()

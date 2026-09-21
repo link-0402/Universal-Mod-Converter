@@ -1,11 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Models;
-using AdvancedPenumbraModConverter.Services;
+using UniversalModConverter.Core;
+using UniversalModConverter.Models;
+using UniversalModConverter.Services;
 
-namespace AdvancedPenumbraModConverter.Session;
+namespace UniversalModConverter.Session;
 
 /// <summary>
 /// Converting several things in one pass. The queue holds conversions the user has locked in;

@@ -1,16 +1,16 @@
 using System;
 using System.IO;
 using System.Linq;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Services;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows.Ui;
+using UniversalModConverter.Core;
+using UniversalModConverter.Services;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 
-namespace AdvancedPenumbraModConverter.Windows;
+namespace UniversalModConverter.Windows;
 
 public sealed class ConfigWindow : Window, IDisposable
 {
@@ -21,7 +21,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private bool _measuring;
 
     public ConfigWindow(Plugin plugin) : base(
-        "Advanced Penumbra Mod Converter — Settings###APMCConfig",
+        "Universal Mod Converter — Settings###UMCConfig",
         ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoCollapse)
     {
         _plugin = plugin;
@@ -159,7 +159,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private string DefaultLocationHint()
         => ModConverterService.SameVolume(Path.GetTempPath(), PenumbraRoot() ?? Path.GetTempPath())
             ? "Default: the system temp folder"
-            : "Default: a hidden .apmc-backups folder next to the mods";
+            : "Default: a hidden .umc-backups folder next to the mods";
 
     private string? PenumbraRoot()
         => _plugin.PenumbraIpc.IsAvailable ? _plugin.PenumbraIpc.GetModDirectory() : null;

@@ -2,10 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 using Dalamud.Plugin.Services;
 
-namespace AdvancedPenumbraModConverter.Services;
+namespace UniversalModConverter.Services;
 
 /// <summary>
 /// Shows the Mesh groups choices on the player's character: while the preview is on, the
@@ -20,7 +20,7 @@ namespace AdvancedPenumbraModConverter.Services;
 /// </summary>
 public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog log) : IDisposable
 {
-    private const string Tag = "Advanced Penumbra Mod Converter part preview";
+    private const string Tag = "Universal Mod Converter part preview";
 
     /// <summary>High enough to win over any ordinary mod that replaces the same model.</summary>
     private const int Priority = 9999;
@@ -31,7 +31,7 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
     /// <summary>How long without a request (tab left, window closed, preview off) before the model is restored.</summary>
     private static readonly TimeSpan LeaveDelay = TimeSpan.FromMilliseconds(400);
 
-    private readonly string _folder = Path.Combine(Path.GetTempPath(), "AdvancedPenumbraModConverter-preview");
+    private readonly string _folder = Path.Combine(Path.GetTempPath(), "UniversalModConverter-preview");
 
     private (IReadOnlyList<GearOutputModel> Models, Dictionary<string, MeshRemoval> Removals)? _requested;
     private string? _requestedKey;
@@ -112,7 +112,7 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
             }
             catch (Exception ex)
             {
-                log.Warning(ex, "[APMC] Could not build the mesh preview for {0}", model.SourceFile);
+                log.Warning(ex, "[UMC] Could not build the mesh preview for {0}", model.SourceFile);
             }
         }
 
@@ -161,7 +161,7 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
         }
         catch (Exception ex)
         {
-            log.Debug(ex, "[APMC] Could not remove the mesh preview folder.");
+            log.Debug(ex, "[UMC] Could not remove the mesh preview folder.");
         }
     }
 }

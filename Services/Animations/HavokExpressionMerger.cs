@@ -1,12 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.Havok.Animation.Animation;
 using FFXIVClientStructs.Havok.Common.Base.Types;
 
-namespace AdvancedPenumbraModConverter.Services.Animations;
+namespace UniversalModConverter.Services.Animations;
 
 /// <summary>
 /// Copies facial animation bindings from one .pap's Havok container into another's, using the

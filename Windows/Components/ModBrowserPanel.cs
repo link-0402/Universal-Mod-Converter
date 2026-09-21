@@ -2,13 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows.Ui;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraModConverter.Windows.Components;
+namespace UniversalModConverter.Windows.Components;
 
 /// <summary>Left pane: Penumbra's mod list, or a folder path when Penumbra is unavailable.</summary>
 internal sealed class ModBrowserPanel(ConverterSession session)

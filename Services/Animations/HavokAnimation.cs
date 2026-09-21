@@ -9,7 +9,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.Havok.Animation;
 using FFXIVClientStructs.Havok.Animation.Animation;
@@ -25,7 +25,7 @@ using FFXIVClientStructs.Havok.Common.Base.Types;
 using FFXIVClientStructs.Havok.Common.Serialize.Resource;
 using FFXIVClientStructs.Havok.Common.Serialize.Util;
 
-namespace AdvancedPenumbraModConverter.Services.Animations;
+namespace UniversalModConverter.Services.Animations;
 
 /// <summary>
 /// The game's Havok runtime, used to decode, build and serialize animations. Every member
@@ -225,7 +225,7 @@ internal sealed unsafe class HavokAnimation
 
         public byte[] Save()
         {
-            var path = Path.Combine(Path.GetTempPath(), $"apmc-{Guid.NewGuid():N}.hkx");
+            var path = Path.Combine(Path.GetTempPath(), $"umc-{Guid.NewGuid():N}.hkx");
             try
             {
                 SaveObject(Root, "hkRootLevelContainer", path);

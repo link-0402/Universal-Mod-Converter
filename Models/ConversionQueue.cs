@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 
-namespace AdvancedPenumbraModConverter.Models;
+namespace UniversalModConverter.Models;
 
 /// <summary>
 /// One conversion waiting to be run together with the others. It carries its own

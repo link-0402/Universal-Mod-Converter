@@ -1,10 +1,10 @@
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
 using Character = FFXIVClientStructs.FFXIV.Client.Game.Character.Character;
 
-namespace AdvancedPenumbraModConverter.Services;
+namespace UniversalModConverter.Services;
 
 /// <summary>
 /// What the local player visibly wears. Read from the drawn model, which is what Glamourer and

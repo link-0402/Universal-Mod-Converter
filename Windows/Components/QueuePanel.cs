@@ -1,14 +1,14 @@
 using System;
 using System.Linq;
 using System.Numerics;
-using AdvancedPenumbraModConverter.Models;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows.Ui;
+using UniversalModConverter.Models;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraModConverter.Windows.Components;
+namespace UniversalModConverter.Windows.Components;
 
 /// <summary>
 /// The conversion plan: what Preview and Apply work on, each entry shown as source icon →

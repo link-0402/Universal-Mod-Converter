@@ -2,10 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Services;
+using UniversalModConverter.Core;
+using UniversalModConverter.Services;
 
-namespace AdvancedPenumbraModConverter.Session;
+namespace UniversalModConverter.Session;
 
 public enum ExpressionSourceKind
 {

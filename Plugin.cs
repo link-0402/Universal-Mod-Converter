@@ -6,12 +6,12 @@ using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Interface.Windowing;
-using AdvancedPenumbraModConverter.Services;
-using AdvancedPenumbraModConverter.Services.Animations;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows;
+using UniversalModConverter.Services;
+using UniversalModConverter.Services.Animations;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows;
 
-namespace AdvancedPenumbraModConverter;
+namespace UniversalModConverter;
 
 public sealed class Plugin : IDalamudPlugin
 {
@@ -40,13 +40,13 @@ public sealed class Plugin : IDalamudPlugin
 
     private int _maintenanceRunning;
 
-    public   readonly WindowSystem WindowSystem = new("AdvancedPenumbraModConverter");
+    public   readonly WindowSystem WindowSystem = new("UniversalModConverter");
     private  ConfigWindow          ConfigWindow  { get; }
     private  MainWindow            MainWindow    { get; }
     private  MergeWindow           MergeWindow   { get; }
 
-    private const string CommandName    = "/apmc";
-    private const string CommandConfig  = "/apmcconfig";
+    private const string CommandName    = "/umc";
+    private const string CommandConfig  = "/umcconfig";
 
     public Plugin()
     {
@@ -78,11 +78,11 @@ public sealed class Plugin : IDalamudPlugin
         // ── Commands ──────────────────────────────────────────────────────────
         CommandManager.AddHandler(CommandName, new CommandInfo(OnMainCommand)
         {
-            HelpMessage = "Open the Advanced Penumbra Mod Converter window."
+            HelpMessage = "Open the Universal Mod Converter window."
         });
         CommandManager.AddHandler(CommandConfig, new CommandInfo(OnConfigCommand)
         {
-            HelpMessage = "Open the Advanced Penumbra Mod Converter configuration."
+            HelpMessage = "Open the Universal Mod Converter configuration."
         });
 
         // ── UI hooks ──────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ public sealed class Plugin : IDalamudPlugin
         // Anything a previous session left behind is cleaned up once, at startup.
         RunBackupMaintenance(includeOrphans: true);
 
-        Log.Information("[APMC] Advanced Penumbra Mod Converter loaded.");
+        Log.Information("[UMC] Universal Mod Converter loaded.");
     }
 
     /// <summary>
@@ -129,7 +129,7 @@ public sealed class Plugin : IDalamudPlugin
             }
             catch (Exception ex)
             {
-                Log.Warning(ex, "[APMC] Backup maintenance failed.");
+                Log.Warning(ex, "[UMC] Backup maintenance failed.");
             }
             finally
             {
@@ -181,7 +181,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnPenumbraStateChanged()
     {
-        Log.Information("[APMC] Penumbra availability changed.");
+        Log.Information("[UMC] Penumbra availability changed.");
         Session.Runner.Post(() =>
         {
             Session.RefreshPenumbraState();

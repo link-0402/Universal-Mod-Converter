@@ -4,16 +4,16 @@ using System.Collections.Immutable;
 using System.Linq;
 using System.Numerics;
 using System.Text.RegularExpressions;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Models;
-using AdvancedPenumbraModConverter.Services;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows.Ui;
+using UniversalModConverter.Core;
+using UniversalModConverter.Models;
+using UniversalModConverter.Services;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraModConverter.Windows.Components;
+namespace UniversalModConverter.Windows.Components;
 
 /// <summary>
 /// The mesh groups of every model the output ships for the target item, with a Keep

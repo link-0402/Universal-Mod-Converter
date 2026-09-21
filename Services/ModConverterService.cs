@@ -6,11 +6,11 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Models;
+using UniversalModConverter.Core;
+using UniversalModConverter.Models;
 using Dalamud.Plugin.Services;
 
-namespace AdvancedPenumbraModConverter.Services;
+namespace UniversalModConverter.Services;
 
 /// <summary>
 /// Plans, applies and verifies conversions of a Penumbra mod.
@@ -21,10 +21,10 @@ namespace AdvancedPenumbraModConverter.Services;
 /// </summary>
 public sealed class ModConverterService
 {
-    private const string BackupFolderName = ".apmc-backups";
+    private const string BackupFolderName = ".umc-backups";
 
     /// <summary>Backups under the system temp folder live here, all Penumbra roots together.</summary>
-    internal const string TempBackupFolderName = "AdvancedPenumbraModConverter-backups";
+    internal const string TempBackupFolderName = "UniversalModConverter-backups";
 
     private readonly IPluginLog           _log;
     private readonly IGameFileProvider    _gameFiles;
@@ -139,14 +139,14 @@ public sealed class ModConverterService
             task.ErrorMessage = task.HasBlockers
                 ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
                 : null;
-            _log.Information("[APMC] Planned {0} -> {1} ({2}): {3} path(s), {4} file operation(s), {5} diagnostic(s).",
+            _log.Information("[UMC] Planned {0} -> {1} ({2}): {3} path(s), {4} file operation(s), {5} diagnostic(s).",
                 request.Source, request.Target, request.Mode, plan.GamePathMap.Count, plan.Files.Count, plan.Diagnostics.Count);
         }
         catch (Exception ex)
         {
             task.ErrorMessage = ex.Message;
             task.Diagnostics.Add(new PlanDiagnostic("planning_failed", ex.Message, true));
-            _log.Error(ex, "[APMC] PlanConversion failed");
+            _log.Error(ex, "[UMC] PlanConversion failed");
         }
     }
 
@@ -211,7 +211,7 @@ public sealed class ModConverterService
         task.ErrorMessage = task.HasBlockers
             ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
             : null;
-        _log.Information("[APMC] Planned a run of {0} conversion(s) ({1}): {2} file operation(s), {3} diagnostic(s).",
+        _log.Information("[UMC] Planned a run of {0} conversion(s) ({1}): {2} file operation(s), {3} diagnostic(s).",
             plan.Entries.Count(e => !e.Rejected), task.OutputMode, plan.Files.Count, task.Diagnostics.Count);
     }
 
@@ -278,7 +278,7 @@ public sealed class ModConverterService
         task.ErrorMessage = task.HasBlockers
             ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
             : null;
-        _log.Information("[APMC] Planned animation {0} ({1}): {2} file operation(s), {3} diagnostic(s).",
+        _log.Information("[UMC] Planned animation {0} ({1}): {2} file operation(s), {3} diagnostic(s).",
             request.Description, request.Mode, plan.Files.Count, plan.Diagnostics.Count);
     }
 
@@ -294,7 +294,7 @@ public sealed class ModConverterService
             }
             catch (Exception ex)
             {
-                _log.Warning(ex, "[APMC] The race tree could not be read; animations will not inherit between races.");
+                _log.Warning(ex, "[UMC] The race tree could not be read; animations will not inherit between races.");
             }
         }
         return _pbd?.GetParentRace(race);
@@ -369,7 +369,7 @@ public sealed class ModConverterService
         task.ResultStatus = ConversionResultStatus.NotStarted;
         task.ErrorMessage = null;
 
-        void Log(string msg) { onLog?.Invoke(msg); _log.Information("[APMC] {0}", msg); }
+        void Log(string msg) { onLog?.Invoke(msg); _log.Information("[UMC] {0}", msg); }
 
         string? stageDir = null;
         string? backupDir = null;
@@ -382,9 +382,9 @@ public sealed class ModConverterService
             var parent = Path.GetDirectoryName(sourceDir) ?? throw new InvalidOperationException("The mod has no parent directory.");
             var name = Path.GetFileName(sourceDir);
             var id = Guid.NewGuid().ToString("N");
-            stageDir = Path.Combine(parent, $".{name}.apmc-stage-{id}");
+            stageDir = Path.Combine(parent, $".{name}.umc-stage-{id}");
             backupDir = Path.Combine(BackupRoot(parent, _configuration?.BackupDirectory), $"{name}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{id[..8]}");
-            task.JournalPath = Path.Combine(parent, $".{name}.apmc-recovery-{id}.json");
+            task.JournalPath = Path.Combine(parent, $".{name}.umc-recovery-{id}.json");
 
             Log($"Staging complete mod shadow: {stageDir}");
             CopyDirectory(sourceDir, stageDir);
@@ -440,7 +440,7 @@ public sealed class ModConverterService
             if (stageDir != null && Directory.Exists(stageDir))
                 try { Directory.Delete(stageDir, true); } catch { }
             task.ErrorMessage = ex.Message;
-            _log.Error(ex, "[APMC] ApplyConversion failed");
+            _log.Error(ex, "[UMC] ApplyConversion failed");
             onLog?.Invoke($"Error: {ex.Message}");
         }
     }
@@ -537,7 +537,7 @@ public sealed class ModConverterService
         {
             if (task.RecoveryPath is not { } backup || !Directory.Exists(backup)) return false;
             var current = Path.GetFullPath(task.ModDirectory).TrimEnd('\\', '/');
-            var failed = current + $".apmc-failed-{Guid.NewGuid():N}";
+            var failed = current + $".umc-failed-{Guid.NewGuid():N}";
             if (Directory.Exists(current)) Directory.Move(current, failed);
             Directory.Move(backup, current);
             try { if (Directory.Exists(failed)) Directory.Delete(failed, true); } catch { }
@@ -578,7 +578,7 @@ public sealed class ModConverterService
         task.ResultStatus = ConversionResultStatus.NotStarted;
         task.ErrorMessage = null;
         string? stageDir = null;
-        void Log(string msg) { onLog?.Invoke(msg); _log.Information("[APMC] {0}", msg); }
+        void Log(string msg) { onLog?.Invoke(msg); _log.Information("[UMC] {0}", msg); }
         try
         {
             EnsurePlanIsCurrent(task, newMod: true);
@@ -587,7 +587,7 @@ public sealed class ModConverterService
             if (Directory.Exists(finalDir) || File.Exists(finalDir))
                 throw new IOException($"The output path already exists: {finalDir}");
             var parent = Path.GetDirectoryName(finalDir) ?? throw new InvalidOperationException("The output path has no parent.");
-            stageDir = Path.Combine(parent, $".{Path.GetFileName(finalDir)}.apmc-stage-{Guid.NewGuid():N}");
+            stageDir = Path.Combine(parent, $".{Path.GetFileName(finalDir)}.umc-stage-{Guid.NewGuid():N}");
             if (task.MergedPlan is { } merged)
             {
                 GearConversionExecutor.WriteNewMod(merged, task.ModDirectory, stageDir, modDisplayName, Log);
@@ -624,7 +624,7 @@ public sealed class ModConverterService
             task.ResultStatus = ConversionResultStatus.Failed;
             task.ErrorMessage = ex.Message;
             onLog?.Invoke($"Error: {ex.Message}");
-            _log.Error(ex, "[APMC] Atomic new-mod publication failed");
+            _log.Error(ex, "[UMC] Atomic new-mod publication failed");
             return null;
         }
     }
@@ -635,13 +635,13 @@ public sealed class ModConverterService
     /// </summary>
     public string PublishMerge(ModMergePlan plan, string newModDir, Action<string>? onLog = null)
     {
-        void Log(string msg) { onLog?.Invoke(msg); _log.Information("[APMC] {0}", msg); }
+        void Log(string msg) { onLog?.Invoke(msg); _log.Information("[UMC] {0}", msg); }
 
         var finalDir = Path.GetFullPath(newModDir).TrimEnd('\\', '/');
         if (Directory.Exists(finalDir) || File.Exists(finalDir))
             throw new IOException($"The output path already exists: {finalDir}");
         var parent = Path.GetDirectoryName(finalDir) ?? throw new InvalidOperationException("The output path has no parent.");
-        var stageDir = Path.Combine(parent, $".{Path.GetFileName(finalDir)}.apmc-stage-{Guid.NewGuid():N}");
+        var stageDir = Path.Combine(parent, $".{Path.GetFileName(finalDir)}.umc-stage-{Guid.NewGuid():N}");
         try
         {
             ModMerger.Write(plan, stageDir, Log);
@@ -838,7 +838,7 @@ public sealed class ModConverterService
         }
         catch (Exception ex)
         {
-            _log.Error(ex, "[APMC] VerifyConversion failed");
+            _log.Error(ex, "[UMC] VerifyConversion failed");
             hits.Add(new LeftoverHit { FilePath = modDirectory, HitType = "error", Detail = $"Verification failed: {ex.Message}" });
         }
 
@@ -955,7 +955,7 @@ public sealed class ModConverterService
             }
             catch (Exception ex)
             {
-                _log.Warning(ex, "[APMC] Could not remove empty customization dir {0}", directory);
+                _log.Warning(ex, "[UMC] Could not remove empty customization dir {0}", directory);
             }
         }
     }

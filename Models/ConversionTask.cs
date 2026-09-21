@@ -1,7 +1,7 @@
 using System.Collections.Generic;
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 
-namespace AdvancedPenumbraModConverter.Models;
+namespace UniversalModConverter.Models;
 
 /// <summary>Represents a single planned item conversion and all the changes it entails.</summary>
 public class ConversionTask

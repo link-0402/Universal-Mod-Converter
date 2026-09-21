@@ -2,10 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Services;
+using UniversalModConverter.Core;
+using UniversalModConverter.Services;
 
-namespace AdvancedPenumbraModConverter.Session;
+namespace UniversalModConverter.Session;
 
 /// <summary>Target selection for animations: swapping idles and emotes, and retargeting between races.</summary>
 public sealed partial class ConverterSession

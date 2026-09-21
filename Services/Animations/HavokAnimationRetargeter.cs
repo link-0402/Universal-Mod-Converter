@@ -5,14 +5,14 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.Havok.Animation.Animation;
 using FFXIVClientStructs.Havok.Animation.Rig;
 using FFXIVClientStructs.Havok.Common.Base.Math.QsTransform;
 using FFXIVClientStructs.Havok.Common.Base.Types;
 
-namespace AdvancedPenumbraModConverter.Services.Animations;
+namespace UniversalModConverter.Services.Animations;
 
 /// <summary>
 /// Retargets a PAP with the game's own Havok runtime: every body animation is sampled on the

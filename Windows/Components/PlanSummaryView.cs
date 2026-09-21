@@ -1,8 +1,8 @@
-using AdvancedPenumbraModConverter.Models;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows.Ui;
+using UniversalModConverter.Models;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows.Ui;
 
-namespace AdvancedPenumbraModConverter.Windows.Components;
+namespace UniversalModConverter.Windows.Components;
 
 /// <summary>
 /// The Plan tab without Advanced details. What gets converted is listed in the conversion plan

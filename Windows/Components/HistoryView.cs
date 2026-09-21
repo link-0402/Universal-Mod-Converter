@@ -1,14 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows.Ui;
+using UniversalModConverter.Core;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraModConverter.Windows.Components;
+namespace UniversalModConverter.Windows.Components;
 
 /// <summary>Past conversions with a Revert action.</summary>
 internal sealed class HistoryView(ConverterSession session, ActionPanels actions)

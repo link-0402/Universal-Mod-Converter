@@ -2,15 +2,15 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows.Ui;
+using UniversalModConverter.Core;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 
-namespace AdvancedPenumbraModConverter.Windows;
+namespace UniversalModConverter.Windows;
 
 /// <summary>
 /// Merges two modpacks into one new mod. Some mods ship split — a base pack with the materials
@@ -28,7 +28,7 @@ public sealed class MergeWindow : Window, IDisposable
     private string _secondPath = string.Empty;
     private string _name = string.Empty;
 
-    public MergeWindow(Plugin plugin) : base("Merge modpacks###APMCMerge", ImGuiWindowFlags.NoCollapse)
+    public MergeWindow(Plugin plugin) : base("Merge modpacks###UMCMerge", ImGuiWindowFlags.NoCollapse)
     {
         _merge = plugin.Merge;
         _session = plugin.Session;

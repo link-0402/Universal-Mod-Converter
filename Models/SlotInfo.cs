@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 
-namespace AdvancedPenumbraModConverter.Models;
+namespace UniversalModConverter.Models;
 
 /// <summary>Identifies an equipment slot using Penumbra/FFXIV naming conventions.</summary>
 public enum EquipSlot

@@ -5,11 +5,11 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Models;
+using UniversalModConverter.Core;
+using UniversalModConverter.Models;
 using Dalamud.Plugin.Services;
 
-namespace AdvancedPenumbraModConverter.Services;
+namespace UniversalModConverter.Services;
 
 internal sealed partial class CustomizationPlanner(GameDataService? gameData, IPluginLog log,
     SkeletonHierarchyService? skeletons = null)
@@ -768,7 +768,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         }
 
         if (task.PlannedMdlChanges.Count > 0)
-            log.Information("[APMC] Planned parsed MDL rewrite for {0} file(s), including {1} racial deformation(s).",
+            log.Information("[UMC] Planned parsed MDL rewrite for {0} file(s), including {1} racial deformation(s).",
                 task.PlannedMdlChanges.Count, task.PlannedMdlChanges.Count(change => change.GeometryConverted));
     }
 

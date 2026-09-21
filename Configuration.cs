@@ -1,9 +1,9 @@
 using Dalamud.Configuration;
 using System;
 using System.Collections.Generic;
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 
-namespace AdvancedPenumbraModConverter;
+namespace UniversalModConverter;
 
 [Serializable]
 public class Configuration : IPluginConfiguration
@@ -42,7 +42,7 @@ public class Configuration : IPluginConfiguration
 
     /// <summary>
     /// Where in-place originals and reverted outputs are kept. Empty means the default: the
-    /// system temp folder, or a hidden .apmc-backups folder beside the mods when temp is on
+    /// system temp folder, or a hidden .umc-backups folder beside the mods when temp is on
     /// another volume (publishing moves whole directories, which cannot cross volumes).
     /// </summary>
     public string BackupDirectory { get; set; } = string.Empty;

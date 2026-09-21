@@ -1,14 +1,14 @@
 using System;
 using System.Linq;
 using System.Numerics;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Services;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows.Ui;
+using UniversalModConverter.Core;
+using UniversalModConverter.Services;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraModConverter.Windows.Components;
+namespace UniversalModConverter.Windows.Components;
 
 /// <summary>The "To" card for animations: swap an idle or emote, or retarget to other races.</summary>
 internal sealed class AnimationTargetPanel(ConverterSession session)

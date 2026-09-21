@@ -3,11 +3,11 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 using Dalamud.Plugin.Services;
 using Lumina.Excel.Sheets;
 
-namespace AdvancedPenumbraModConverter.Services;
+namespace UniversalModConverter.Services;
 
 /// <summary>One body animation an emote plays: its position in the emote's timeline list and its PAP key.</summary>
 public sealed record EmoteTimeline(int Index, string Key)
@@ -119,7 +119,7 @@ public sealed class AnimationCatalog(IDataManager data, IPluginLog log)
             }
             catch (Exception ex)
             {
-                log.Warning(ex, "[APMC] Could not read the emote list.");
+                log.Warning(ex, "[UMC] Could not read the emote list.");
             }
 
             var byLocation = new Dictionary<string, List<EmoteInfo>>(StringComparer.Ordinal);

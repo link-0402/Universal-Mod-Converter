@@ -31,13 +31,13 @@ jobs:
           Expand-Archive -Path $archive -DestinationPath $dalamudHome -Force
 
       - name: Restore dependencies
-        run: dotnet restore AdvancedPenumbraModConverter.sln
+        run: dotnet restore UniversalModConverter.sln
 
       - name: Build
-        run: dotnet build AdvancedPenumbraModConverter.sln --configuration Release --no-restore
+        run: dotnet build UniversalModConverter.sln --configuration Release --no-restore
 
       - name: Run tests
-        run: dotnet run --project AdvancedPenumbraModConverter.Tests --configuration Release --no-build
+        run: dotnet run --project UniversalModConverter.Tests --configuration Release --no-build
 
       - name: Prepare release asset
         shell: pwsh
@@ -45,20 +45,20 @@ jobs:
           $artifactDirectory = Join-Path $PWD 'release-assets'
           New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
           $package = @(
-            'bin/Release/AdvancedPenumbraModConverter/latest.zip',
-            'bin/x64/Release/AdvancedPenumbraModConverter/latest.zip'
+            'bin/Release/UniversalModConverter/latest.zip',
+            'bin/x64/Release/UniversalModConverter/latest.zip'
           ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
           if (-not $package) {
             throw 'Dalamud package was not produced.'
           }
-          Copy-Item -LiteralPath $package -Destination (Join-Path $artifactDirectory 'AdvancedPenumbraModConverter.zip') -Force
+          Copy-Item -LiteralPath $package -Destination (Join-Path $artifactDirectory 'UniversalModConverter.zip') -Force
           Copy-Item -LiteralPath $package -Destination (Join-Path $artifactDirectory 'latest.zip') -Force
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release-assets/AdvancedPenumbraModConverter.zip
+            release-assets/UniversalModConverter.zip
             release-assets/latest.zip
           generate_release_notes: true
           token: ${{ secrets.GITHUB_TOKEN }}

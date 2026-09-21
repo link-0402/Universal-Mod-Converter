@@ -1,11 +1,11 @@
 using System;
 using System.IO;
 using System.Linq;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Models;
-using AdvancedPenumbraModConverter.Services;
+using UniversalModConverter.Core;
+using UniversalModConverter.Models;
+using UniversalModConverter.Services;
 
-namespace AdvancedPenumbraModConverter.Session;
+namespace UniversalModConverter.Session;
 
 /// <summary>
 /// State of the Merge modpacks window: two modpacks, which one wins on a conflict, and the name

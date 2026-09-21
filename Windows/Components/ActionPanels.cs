@@ -2,14 +2,14 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows.Ui;
+using UniversalModConverter.Core;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraModConverter.Windows.Components;
+namespace UniversalModConverter.Windows.Components;
 
 /// <summary>Output options, readiness, Preview/Apply buttons and the result banner.</summary>
 internal sealed class ActionPanels(ConverterSession session, Configuration config, ConfirmDialog confirm)

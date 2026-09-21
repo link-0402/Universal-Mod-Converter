@@ -3,12 +3,12 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Models;
+using UniversalModConverter.Core;
+using UniversalModConverter.Models;
 using Dalamud.Plugin.Services;
 using Lumina.Excel.Sheets;
 
-namespace AdvancedPenumbraModConverter.Services;
+namespace UniversalModConverter.Services;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DTOs
@@ -135,7 +135,7 @@ public sealed class GameDataService : IGameFileProvider
         try { return _data.GetFile(gamePath)?.Data; }
         catch (Exception ex)
         {
-            _log.Warning(ex, "[APMC] Could not read game file {0}", gamePath);
+            _log.Warning(ex, "[UMC] Could not read game file {0}", gamePath);
             return null;
         }
     }
@@ -284,7 +284,7 @@ public sealed class GameDataService : IGameFileProvider
         }
         catch (Exception ex)
         {
-            _log.Warning(ex, "[APMC] Could not read the character creation sheets; all existing customization models are offered.");
+            _log.Warning(ex, "[UMC] Could not read the character creation sheets; all existing customization models are offered.");
             return new();
         }
 
@@ -302,7 +302,7 @@ public sealed class GameDataService : IGameFileProvider
                 })
                 .ToArray();
         }
-        _log.Information("[APMC] Player customization options: {0} race/kind combination(s).", table.Count);
+        _log.Information("[UMC] Player customization options: {0} race/kind combination(s).", table.Count);
         return table;
     }
 
@@ -505,7 +505,7 @@ public sealed class GameDataService : IGameFileProvider
         }
         catch (Exception ex)
         {
-            _log.Warning(ex, "[APMC] ScanModForItems failed for {0}", modDir);
+            _log.Warning(ex, "[UMC] ScanModForItems failed for {0}", modDir);
         }
 
         // Resolve names from game data
@@ -670,11 +670,11 @@ public sealed class GameDataService : IGameFileProvider
         }
         catch (Exception ex)
         {
-            _log.Warning(ex, "[APMC] Failed to build item name cache");
+            _log.Warning(ex, "[UMC] Failed to build item name cache");
         }
 
         done:
-        _log.Information("[APMC] Item cache built: {0} equipment/accessory items", list.Count);
+        _log.Information("[UMC] Item cache built: {0} equipment/accessory items", list.Count);
         return list;
     }
 

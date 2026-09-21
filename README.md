@@ -1,4 +1,4 @@
-# Advanced Penumbra Mod Converter
+# Universal Mod Converter
 
 A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](https://github.com/xivdev/Penumbra) mods to a different item, slot or race, keeping all of the mod's options and toggles intact. It also swaps idle and emote animations and retargets animations to other races.
 
@@ -22,13 +22,13 @@ The plugin is distributed through the shared [DalamudPlugins](https://github.com
    https://raw.githubusercontent.com/link-0402/DalamudPlugins/main/repo.json
    ```
 3. On the same tab, enable **Get plugin testing builds**.
-4. Find **Advanced Penumbra Mod Converter** in `/xlplugins` and install it.
+4. Find **Universal Mod Converter** in `/xlplugins` and install it.
 
 Penumbra must be installed. Without it the plugin still works on mod folders you enter by path, but new mods have to be added to Penumbra by hand.
 
 ## Using it
 
-Open the window with `/apmc` (settings: `/apmcconfig` or the cog icon).
+Open the window with `/umc` (settings: `/umcconfig` or the cog icon).
 
 1. **Pick a mod** in the browser on the left, or enter a folder path under **Other folder**.
 2. **From:** choose the item, hair, face, tail, ear or animation the mod replaces. Mods that touch several items list each one; nothing is guessed.
@@ -87,7 +87,7 @@ When a converted item uses a material or texture that exists neither in the mod 
 - **Adding to a mod** writes the same way, but nothing is moved or deleted: the converted paths are added next to the original's, in the same options, so the toggles the mod already has control both. Where a converted file needs different contents — a model or material with paths inside it — it gets its own copy and the original is left alone. The one exception is an **IMC option group**, which carries a single item identifier and so cannot drive two items; the converted item gets its own copy of that group, and the plan says so.
 - **Reverting never deletes anything itself.** The reverted output is moved into that same backup folder.
 - **Backups expire.** They are kept for 14 days, and the newest 10 are kept regardless of age; both limits are configurable in Settings, along with a "Clean up now" button and how much space backups currently use. A backup you could still revert to is never deleted, however old it is — once a backup does expire, the History tab says so instead of offering a revert that cannot work.
-- **The backup folder is configurable** in Settings. By default it's the system temp folder, so the machine can reclaim the space too; when temp is on a different drive than the Penumbra mod directory it falls back to a hidden `.apmc-backups` folder beside the mods, because publishing a conversion moves whole folders and a move cannot cross drives. Set a custom path to keep backups somewhere else instead.
+- **The backup folder is configurable** in Settings. By default it's the system temp folder, so the machine can reclaim the space too; when temp is on a different drive than the Penumbra mod directory it falls back to a hidden `.umc-backups` folder beside the mods, because publishing a conversion moves whole folders and a move cannot cross drives. Set a custom path to keep backups somewhere else instead.
 - **A crash is cleaned up on the next start.** Leftover staging folders are removed, and a conversion interrupted between the two folder moves is rolled back to the original.
 - **Status is reported in two parts:** writing the output to disk, and Penumbra loading it. An output Penumbra couldn't load is shown with its path and a retry button.
 

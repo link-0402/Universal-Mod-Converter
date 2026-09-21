@@ -2,16 +2,16 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Models;
-using AdvancedPenumbraModConverter.Services;
-using AdvancedPenumbraModConverter.Session;
-using AdvancedPenumbraModConverter.Windows.Ui;
+using UniversalModConverter.Core;
+using UniversalModConverter.Models;
+using UniversalModConverter.Services;
+using UniversalModConverter.Session;
+using UniversalModConverter.Windows.Ui;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 
-namespace AdvancedPenumbraModConverter.Windows.Components;
+namespace UniversalModConverter.Windows.Components;
 
 /// <summary>The previewed plan: diagnostics first, then one filterable table per change category.</summary>
 internal sealed class PlanView(ConverterSession session, Configuration config)

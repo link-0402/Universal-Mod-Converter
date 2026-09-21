@@ -1,12 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using AdvancedPenumbraModConverter.Core;
+using UniversalModConverter.Core;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Services;
 
-namespace AdvancedPenumbraModConverter.Services;
+namespace UniversalModConverter.Services;
 
 /// <summary>
 /// The one Glamourer call the converter needs: putting an item on the local player, so the
@@ -41,12 +41,12 @@ public sealed class GlamourerIpcService(IDalamudPluginInterface pi, IPluginLog l
             var rc = slot == GearSlot.Glasses
                 ? _setBonusItem.InvokeFunc(0, 1, itemId, 0, ApplyOnceEquipment)
                 : _setItem.InvokeFunc(0, ApiSlot(slot), itemId, new List<byte>(stains), 0, ApplyOnceEquipment);
-            if (rc != 0) log.Warning($"[APMC] Glamourer SetItem returned {rc} for item {itemId} ({slot}).");
+            if (rc != 0) log.Warning($"[UMC] Glamourer SetItem returned {rc} for item {itemId} ({slot}).");
             return rc == 0;
         }
         catch (Exception ex)
         {
-            log.Warning(ex, "[APMC] Glamourer SetItem failed");
+            log.Warning(ex, "[UMC] Glamourer SetItem failed");
             return false;
         }
     }

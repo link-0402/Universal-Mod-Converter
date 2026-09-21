@@ -3,11 +3,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using AdvancedPenumbraModConverter.Core;
-using AdvancedPenumbraModConverter.Models;
-using AdvancedPenumbraModConverter.Services;
+using UniversalModConverter.Core;
+using UniversalModConverter.Models;
+using UniversalModConverter.Services;
 
-namespace AdvancedPenumbraModConverter.Session;
+namespace UniversalModConverter.Session;
 
 public sealed record ModEntry(string Name, string Directory, string Folder);
 
@@ -1120,7 +1120,7 @@ public sealed partial class ConverterSession
         }
         catch (Exception ex)
         {
-            Plugin.Log.Warning(ex, "[APMC] Could not open {0}", path);
+            Plugin.Log.Warning(ex, "[UMC] Could not open {0}", path);
         }
     }
 
