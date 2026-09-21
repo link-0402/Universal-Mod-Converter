@@ -2,7 +2,7 @@
 
 A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](https://github.com/xivdev/Penumbra) mods to a different item, slot or race, keeping all of the mod's options and toggles intact. It also swaps idle and emote animations and retargets animations to other races.
 
-> **Testing build.** The plugin is published as a testing-only plugin and is under active development. Use **Create a new mod** (the default) so your source mod is never touched, and report anything that looks wrong.
+> **Tip:** Use **Create a new mod** (the default) so your source mod is never touched, and report anything that looks wrong.
 
 ## What it does
 
@@ -21,8 +21,7 @@ The plugin is distributed through the shared [DalamudPlugins](https://github.com
    ```
    https://raw.githubusercontent.com/link-0402/DalamudPlugins/main/repo.json
    ```
-3. On the same tab, enable **Get plugin testing builds**.
-4. Find **Universal Mod Converter** in `/xlplugins` and install it.
+3. Find **Universal Mod Converter** in `/xlplugins` and install it.
 
 Penumbra must be installed. Without it the plugin still works on mod folders you enter by path, but new mods have to be added to Penumbra by hand.
 
