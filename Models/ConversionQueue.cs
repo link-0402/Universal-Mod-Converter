@@ -15,6 +15,13 @@ public sealed class QueuedConversion
 
     public AssetKind Kind { get; init; } = AssetKind.Gear;
 
+    /// <summary>
+    /// Whether the source root replaces nothing but textures. Only such a root can be added to
+    /// this mod without disturbing the original, because only a texture can be shared by an
+    /// extra key rather than rewritten in place.
+    /// </summary>
+    public bool IsTextureOnly { get; init; }
+
     /// <summary>What the queue row says: "Body e0164 → e0200".</summary>
     public string Description { get; init; } = string.Empty;
 

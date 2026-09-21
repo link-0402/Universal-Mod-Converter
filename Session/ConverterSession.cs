@@ -541,14 +541,13 @@ public sealed partial class ConverterSession
     /// <summary>
     /// Why the converted item cannot be added beside the original, or null. Hair, face, tail
     /// and Viera-ear conversions rewrite their model and material files in place, which would
-    /// retarget the original as well, so they still have to replace it. A texture-only root that
-    /// keeps the source race or adds further targets only ever adds paths, so it is exempt.
+    /// retarget the original as well, so they still have to replace it. A texture-only root is
+    /// exempt: adding it to this mod always keeps the source race working alongside the target.
     /// </summary>
     public string? AddToModBlockReason
-        => _queue.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind) &&
-                                       !(e.Task.KeepSourcePaths || e.Task.ExtraTargets.Count > 0)) is { } entry
+        => _queue.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind) && !e.IsTextureOnly) is { } entry
             ? $"{CustomizationKinds.Get(entry.Kind).DisplayName} conversions replace the original; " +
-              "create a new mod to keep it, or keep the source race (or add further targets) to keep it working here."
+              "create a new mod to keep it."
             : null;
 
     public void SetOutputMode(ConversionOutputMode mode)

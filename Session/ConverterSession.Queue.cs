@@ -49,11 +49,12 @@ public sealed partial class ConverterSession
 
         _queue.Add(new QueuedConversion
         {
-            Kind        = task.Kind,
-            Description = Describe(source),
-            Source      = SideOf(source),
-            Target      = TargetSide(source),
-            Task        = task,
+            Kind          = task.Kind,
+            IsTextureOnly = source.IsTextureOnly,
+            Description   = Describe(source),
+            Source        = SideOf(source),
+            Target        = TargetSide(source),
+            Task          = task,
         });
         if (OutputMode == ConversionOutputMode.AddToMod && AddToModBlockReason != null)
             SetOutputMode(ConversionOutputMode.NewMod);

@@ -47,7 +47,22 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         var extraTargets = ReadExtraTargets(task, targetKind, source, target);
         var resources = ReadResources(root);
-        var keys = new KeyRules(source, target, resources, extraTargets, task.KeepSourcePaths || extraTargets.Count > 0);
+
+        // The output mode decides whether the source stays, not the checkbox: adding to this mod
+        // always keeps the original working (its whole point), converting in place always retires
+        // it (the target above replaces it), and only creating a new mod leaves the choice to the
+        // user. This only ever applies to a texture-only root; anything else cannot be shared, and
+        // the check just below rejects it regardless of output mode.
+        var isTextureOnly = CustomizationDetection.IsTextureOnly(PenumbraMod.Load(root), source);
+        var keepSource = isTextureOnly
+            ? task.OutputMode switch
+              {
+                  ConversionOutputMode.AddToMod => true,
+                  ConversionOutputMode.InPlace  => false,
+                  _                              => task.KeepSourcePaths || extraTargets.Count > 0,
+              }
+            : task.KeepSourcePaths || extraTargets.Count > 0;
+        var keys = new KeyRules(source, target, resources, extraTargets, keepSource);
         var assets = DiscoverAssets(root, resources.Files, source);
         if (assets.Count == 0)
             throw new InvalidDataException($"No {descriptor.DisplayName.ToLowerInvariant()} root matched " +

@@ -369,10 +369,23 @@ internal sealed class ConversionCards(ConverterSession session)
                     DrawFanOutRace(kind, race);
         }
 
-        var keep = session.KeepSourcePaths;
-        if (ImGui.Checkbox("Keep the original race too", ref keep)) session.SetKeepSourcePaths(keep);
-        Widgets.Tooltip($"Leave {ConverterSession.RaceLabel(source.GenderRace ?? 0)} with these textures " +
-                        "instead of moving them away.");
+        var sourceRace = ConverterSession.RaceLabel(source.GenderRace ?? 0);
+        switch (session.OutputMode)
+        {
+            // Add to this mod always keeps the source working beside the target, and convert in
+            // place always retires it; only building a new mod leaves the choice to the checkbox.
+            case ConversionOutputMode.AddToMod:
+                Widgets.MutedWrapped($"{sourceRace} keeps working: adding to this mod never removes it.");
+                break;
+            case ConversionOutputMode.InPlace:
+                Widgets.MutedWrapped($"{sourceRace}'s own textures will be replaced by the target above.");
+                break;
+            default:
+                var keep = session.KeepSourcePaths;
+                if (ImGui.Checkbox("Keep the original race too", ref keep)) session.SetKeepSourcePaths(keep);
+                Widgets.Tooltip($"Leave {sourceRace} with these textures instead of moving them away.");
+                break;
+        }
     }
 
     /// <summary>
