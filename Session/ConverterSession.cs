@@ -385,15 +385,10 @@ public sealed partial class ConverterSession
             var races = AllowedTargetRaces;
             TargetRace = source.GenderRace is { } race && races.Contains(race) ? race : races.FirstOrDefault();
             _fixTargetId = true;
-            if (source.IsTextureOnly)
-            {
-                // The mod already has this race working; start with it ticked so nothing is
-                // silently dropped unless the user unticks it.
-                if (source.GenderRace is { } sourceRace) _textureTargets.Add((sourceRace, (ushort)TargetCustomizationId));
-                // Convert in place has nothing left to mean once every target becomes its own
-                // toggleable option group: there is no more "in place" to replace.
-                if (OutputMode == ConversionOutputMode.InPlace) SetOutputMode(ConversionOutputMode.NewMod);
-            }
+            // The mod already has this race working; start with it ticked so nothing is
+            // silently dropped unless the user unticks it.
+            if (source.IsTextureOnly && source.GenderRace is { } sourceRace)
+                _textureTargets.Add((sourceRace, (ushort)TargetCustomizationId));
         }
         else
             ReloadCandidates();
@@ -549,17 +544,9 @@ public sealed partial class ConverterSession
               "create a new mod to keep it."
             : null;
 
-    /// <summary>
-    /// Whether "Convert in place" still means anything for the current selection or plan. A
-    /// texture-only root always becomes new toggleable option groups now, so there is no single
-    /// existing assignment left to replace in place.
-    /// </summary>
-    public bool CanConvertInPlace => !(CanFanOutTextures || _queue.Any(e => e.IsTextureOnly));
-
     public void SetOutputMode(ConversionOutputMode mode)
     {
         if (mode == ConversionOutputMode.AddToMod && AddToModBlockReason != null) return;
-        if (mode == ConversionOutputMode.InPlace && !CanConvertInPlace) return;
         if (mode == OutputMode) return;
         OutputMode = mode;
         Config.OutputMode = mode;

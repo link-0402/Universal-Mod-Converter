@@ -42,12 +42,18 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         task.SourceRoot = descriptor.Root(sourceRace, oldId);
 
         // A texture has no paths inside it, so the very same file can serve every race and ID
-        // chosen for it; it always becomes one new multi-select option group per race, the way an
-        // idle animation becomes one option per slot. Anything else (a model or material) carries
-        // its race and ID inside it, so it can only ever have a single target.
+        // chosen for it. Adding to this mod (or building a new one) turns every race into its own
+        // new multi-select option group, the way an idle animation becomes one option per slot;
+        // converting in place instead adds the same paths straight into whatever container the
+        // source already lives in, governed by whatever toggle (if any) already governs it.
+        // Anything else (a model or material) carries its race and ID inside it, so it can only
+        // ever have a single target, in place or not.
         if (CustomizationDetection.IsTextureOnly(PenumbraMod.Load(root), source))
         {
-            PlanTextureGroups(task, descriptor, targetKind, targetDescriptor, source, targetRace, newId, root);
+            if (task.OutputMode == ConversionOutputMode.InPlace)
+                PlanTextureInPlace(task, descriptor, targetKind, targetDescriptor, source, targetRace, newId, root);
+            else
+                PlanTextureGroups(task, descriptor, targetKind, targetDescriptor, source, targetRace, newId, root);
             return;
         }
 
@@ -113,17 +119,12 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
     }
 
     /// <summary>
-    /// Builds one new multi-select option group per target race, with one option per ID chosen
-    /// for that race (most kinds ever offer one; a face can have several). The source's own keys
-    /// are pulled out of wherever they currently live — Default, or any option — because the new
-    /// groups provide them from here on, the same way an idle animation moved into a slot group
-    /// stops being served from Default. The source root itself is just another target: including
-    /// it keeps it working, as its own toggleable option beside the others; leaving it out moves
-    /// it away entirely.
+    /// Validates every (race, ID) the conversion writes to: the primary target plus every extra,
+    /// deduplicated. Throws the same way a single-target conversion would for an invalid one.
     /// </summary>
-    private void PlanTextureGroups(ConversionTask task, CustomizationKindDescriptor descriptor,
-        AssetKind targetKind, CustomizationKindDescriptor targetDescriptor, CustomizationPathEndpoint source,
-        ushort primaryRace, ushort primaryId, string root)
+    private static List<CustomizationPathEndpoint> ResolveTargets(ConversionTask task, AssetKind targetKind,
+        CustomizationKindDescriptor targetDescriptor, CustomizationPathEndpoint source,
+        ushort primaryRace, ushort primaryId)
     {
         var targets = new List<CustomizationPathEndpoint>();
         void AddTarget(ushort race, ushort id)
@@ -141,18 +142,41 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             AddTarget(extra.GenderRace ?? primaryRace, extra.ModelId);
         if (targets.Count == 0)
             throw new InvalidDataException("Choose at least one race to convert to.");
+        return targets;
+    }
 
-        var resources = ReadResources(root);
+    /// <summary>The source root's own Files entries, wherever in the mod they live.</summary>
+    private static List<KeyValuePair<string, string>> ResolveSourceFiles(ConversionTask task,
+        ModResourceIndex resources, CustomizationKindDescriptor descriptor, CustomizationPathEndpoint source)
+    {
         var sourceFiles = resources.Files.Where(f => CustomizationPaths.Contains(f.Key, source)).ToList();
         if (sourceFiles.Count == 0)
             throw new InvalidDataException($"No {descriptor.DisplayName.ToLowerInvariant()} root matched " +
                                            $"c{source.GenderRace:D4}/{descriptor.Token(source.ModelId)}.");
         foreach (var (gamePath, _) in resources.FileSwaps.Where(f => CustomizationPaths.Contains(f.Key, source)))
-            task.Diagnostics.Add(new PlanDiagnostic("file_swap",
-                $"The file swap for {gamePath} is not carried into the new option groups.", false));
+            task.Diagnostics.Add(new PlanDiagnostic("file_swap", $"The file swap for {gamePath} is not converted.", false));
 
         task.AllAssetFiles.Clear();
         task.AllAssetFiles.AddRange(sourceFiles.Select(f => f.Value).Distinct(StringComparer.OrdinalIgnoreCase));
+        return sourceFiles;
+    }
+
+    /// <summary>
+    /// Builds one new multi-select option group per target race, with one option per ID chosen
+    /// for that race (most kinds ever offer one; a face can have several). The source's own keys
+    /// are pulled out of wherever they currently live — Default, or any option — because the new
+    /// groups provide them from here on, the same way an idle animation moved into a slot group
+    /// stops being served from Default. The source root itself is just another target: including
+    /// it keeps it working, as its own toggleable option beside the others; leaving it out moves
+    /// it away entirely.
+    /// </summary>
+    private void PlanTextureGroups(ConversionTask task, CustomizationKindDescriptor descriptor,
+        AssetKind targetKind, CustomizationKindDescriptor targetDescriptor, CustomizationPathEndpoint source,
+        ushort primaryRace, ushort primaryId, string root)
+    {
+        var targets = ResolveTargets(task, targetKind, targetDescriptor, source, primaryRace, primaryId);
+        var resources = ReadResources(root);
+        var sourceFiles = ResolveSourceFiles(task, resources, descriptor, source);
 
         RemoveSourceKeys(task, root, source);
 
@@ -211,6 +235,84 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                 OldValue = $"New group '{name}'",
                 NewValue = group.ToJsonString(),
             });
+        }
+    }
+
+    /// <summary>
+    /// Adds every extra target's rewritten keys straight into whatever container the source's own
+    /// keys already live in — Default, or an existing option — right alongside them, governed by
+    /// whatever toggle (if any) already governs that container. No new group is created. Unticking
+    /// the source removes its own keys from there instead of leaving them in place.
+    /// </summary>
+    private void PlanTextureInPlace(ConversionTask task, CustomizationKindDescriptor descriptor,
+        AssetKind targetKind, CustomizationKindDescriptor targetDescriptor, CustomizationPathEndpoint source,
+        ushort primaryRace, ushort primaryId, string root)
+    {
+        var targets = ResolveTargets(task, targetKind, targetDescriptor, source, primaryRace, primaryId);
+        var resources = ReadResources(root);
+        ResolveSourceFiles(task, resources, descriptor, source);
+
+        var keepsSource = targets.Contains(source);
+        var extras = targets.Where(t => t != source).ToList();
+        AddKeysInPlace(task, root, source, extras, keepsSource);
+    }
+
+    private static void AddKeysInPlace(ConversionTask task, string root, CustomizationPathEndpoint source,
+        IReadOnlyList<CustomizationPathEndpoint> extras, bool keepsSource)
+    {
+        foreach (var jsonFile in PenumbraMod.DefinitionFiles(root).Where(File.Exists))
+        {
+            var node = Parse(jsonFile);
+            if (node == null) continue;
+            var changes = new List<JsonFieldChange>();
+            Walk(node, "<root>", changes);
+            if (changes.Count == 0) continue;
+            var planned = task.PlannedJsonChanges.FirstOrDefault(j => string.Equals(j.FilePath, jsonFile, StringComparison.OrdinalIgnoreCase));
+            if (planned == null) task.PlannedJsonChanges.Add(planned = new PlannedJsonChange { FilePath = jsonFile });
+            planned.Changes.AddRange(changes);
+        }
+
+        void Walk(JsonNode? node, string path, List<JsonFieldChange> changes)
+        {
+            if (node is JsonObject obj)
+            {
+                foreach (var (key, value) in obj.ToList())
+                {
+                    if (key == "Files" && value is JsonObject dict)
+                    {
+                        var matches = dict.Where(kv => CustomizationPaths.Contains(kv.Key, source)).ToList();
+                        if (matches.Count > 0)
+                        {
+                            var additions = new JsonObject();
+                            foreach (var (dictKey, dictValue) in matches)
+                            {
+                                if (!keepsSource)
+                                    changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[key]", OldValue = dictKey, ChangeType = "path_key_delete" });
+                                if (dictValue is not JsonValue v || !v.TryGetValue<string>(out var local)) continue;
+                                foreach (var extra in extras)
+                                {
+                                    var rewritten = CustomizationPaths.Rewrite(dictKey, source, extra);
+                                    if (!dict.ContainsKey(rewritten) && !additions.ContainsKey(rewritten)) additions[rewritten] = local;
+                                }
+                            }
+                            if (additions.Count > 0)
+                                changes.Add(new JsonFieldChange { JsonPath = path, ChangeType = "dependency_files", NewValue = additions.ToJsonString() });
+                        }
+                        continue;
+                    }
+                    if (key == "FileSwaps" && value is JsonObject swaps)
+                    {
+                        if (!keepsSource)
+                            foreach (var (dictKey, _) in swaps.ToList())
+                                if (CustomizationPaths.Contains(dictKey, source))
+                                    changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[key]", OldValue = dictKey, ChangeType = "path_key_delete" });
+                        continue;
+                    }
+                    Walk(value, path + "." + key, changes);
+                }
+            }
+            else if (node is JsonArray array)
+                for (var i = 0; i < array.Count; i++) Walk(array[i], $"{path}[{i}]", changes);
         }
     }
 

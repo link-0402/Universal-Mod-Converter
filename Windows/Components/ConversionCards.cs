@@ -343,8 +343,12 @@ internal sealed class ConversionCards(ConverterSession session)
     private void DrawTextureTargetList()
     {
         ImGui.TextUnformatted("Convert to");
-        Widgets.Tooltip("Everything ticked below becomes its own toggleable option in a new group built for its " +
-                        "race. Untick the source's own race to move it away instead of keeping it.");
+        Widgets.Tooltip(session.OutputMode == ConversionOutputMode.InPlace
+            ? "Everything ticked below is added straight into whatever option already has the source's own " +
+              "paths, right alongside them. Untick the source's own race to remove it from there instead of " +
+              "leaving it."
+            : "Everything ticked below becomes its own toggleable option in a new group built for its race. " +
+              "Untick the source's own race to move it away instead of keeping it.");
 
         var kind  = session.TargetCustomizationKind;
         var races = session.AllowedTargetRaces.OrderBy(r => r).ToList();

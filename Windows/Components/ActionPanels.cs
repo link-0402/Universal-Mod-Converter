@@ -39,19 +39,15 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         Widgets.Badge("Keeps the original", Theme.Info);
         if (additiveBlock != null) Widgets.Tooltip(additiveBlock);
 
-        if (session.CanConvertInPlace)
-        {
-            if (ImGui.RadioButton("Convert in place", mode == ConversionOutputMode.InPlace))
-                session.SetOutputMode(ConversionOutputMode.InPlace);
-            ImGui.SameLine();
-            Widgets.Badge("Advanced", Theme.Warning);
-        }
+        if (ImGui.RadioButton("Convert in place", mode == ConversionOutputMode.InPlace))
+            session.SetOutputMode(ConversionOutputMode.InPlace);
+        ImGui.SameLine();
+        Widgets.Badge("Advanced", Theme.Warning);
 
         if (mode == ConversionOutputMode.AddToMod)
         {
-            Widgets.MutedWrapped("The original item keeps working. The converted paths are added to the same " +
-                                 "options, so the toggles this mod already has control both. The mod as it is " +
-                                 "now is kept as a backup.");
+            Widgets.MutedWrapped("The original item keeps working. Each race ticked becomes its own new toggle " +
+                                 "group in this mod. The mod as it is now is kept as a backup.");
             return;
         }
 
