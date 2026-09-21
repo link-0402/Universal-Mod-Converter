@@ -1,7 +1,7 @@
 {
   "Author": "Luci",
   "Name": "Universal Mod Converter",
-  "Description": "Convert gear, facewear, hair, face, tail and Viera-ear assets in Penumbra mods to other items, slots and races, swap idle and emote animations (optionally as an option group of idle slots), retarget animations to other races, and merge two modpacks into one. Supports the Penumbra 1.7+ mod format, retargets game paths, model/material references and metadata, previews every change, and can revert conversions.",
+  "Description": "Convert gear, facewear, hair, face, tail, Viera-ear and skin assets in Penumbra mods to other items, slots and races, swap idle and emote animations (optionally as an option group of idle slots), retarget animations to other races, and merge two modpacks into one. Supports the Penumbra 1.7+ mod format, retargets game paths, model/material references and metadata, previews every change, and can revert conversions.",
   "Punchline": "Move Penumbra mods to other items, slots and races.",
   "Tags": [
     "penumbra",
