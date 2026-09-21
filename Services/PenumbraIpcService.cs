@@ -27,6 +27,9 @@ public sealed class PenumbraIpcService : IDisposable
     private readonly ICallGateSubscriber<string, string, (int, string, bool, bool)>                    _getModPath;
     private readonly ICallGateSubscriber<Dictionary<Guid, string>>                                            _getCollections;
     private readonly ICallGateSubscriber<int, (bool ObjectValid, bool IndividualSet, (Guid Id, string Name))> _getCollectionForObject;
+    private readonly ICallGateSubscriber<string, Dictionary<string, string>, string, int, int>            _addTemporaryModAll;
+    private readonly ICallGateSubscriber<string, int, int>                                                _removeTemporaryModAll;
+    private readonly ICallGateSubscriber<int, int, object>                                                _redrawObject;
 
     // ── Events ────────────────────────────────────────────────────────────────
     /// <summary>Raised when Penumbra signals it has fully initialised.</summary>
@@ -51,6 +54,9 @@ public sealed class PenumbraIpcService : IDisposable
         _getModPath      = pi.GetIpcSubscriber<string, string, (int, string, bool, bool)>("Penumbra.GetModPath.V5");
         _getCollections         = pi.GetIpcSubscriber<Dictionary<Guid, string>>("Penumbra.GetCollections.V5");
         _getCollectionForObject = pi.GetIpcSubscriber<int, (bool, bool, (Guid, string))>("Penumbra.GetCollectionForObject.V5");
+        _addTemporaryModAll     = pi.GetIpcSubscriber<string, Dictionary<string, string>, string, int, int>("Penumbra.AddTemporaryModAll.V5");
+        _removeTemporaryModAll  = pi.GetIpcSubscriber<string, int, int>("Penumbra.RemoveTemporaryModAll.V5");
+        _redrawObject           = pi.GetIpcSubscriber<int, int, object>("Penumbra.RedrawObject.V5");
 
         // Subscribe to lifecycle events
         try
@@ -126,6 +132,34 @@ public sealed class PenumbraIpcService : IDisposable
             return rc == PenumbraApiEc.Success;
         }
         catch (Exception ex) { _log.Warning(ex, "[APMC] ReloadMod failed"); return false; }
+    }
+
+    /// <summary>
+    /// Adds a temporary mod to every collection: <paramref name="paths"/> maps game paths to
+    /// files on disk. Replaces an earlier temporary mod with the same tag and priority.
+    /// </summary>
+    public bool AddTemporaryModAll(string tag, Dictionary<string, string> paths, int priority)
+    {
+        try
+        {
+            var rc = (PenumbraApiEc)_addTemporaryModAll.InvokeFunc(tag, paths, string.Empty, priority);
+            if (rc != PenumbraApiEc.Success) _log.Warning($"[APMC] AddTemporaryModAll returned {rc}");
+            return rc == PenumbraApiEc.Success;
+        }
+        catch (Exception ex) { _log.Warning(ex, "[APMC] AddTemporaryModAll failed"); return false; }
+    }
+
+    public void RemoveTemporaryModAll(string tag, int priority)
+    {
+        try { _removeTemporaryModAll.InvokeFunc(tag, priority); }
+        catch (Exception ex) { _log.Warning(ex, "[APMC] RemoveTemporaryModAll failed"); }
+    }
+
+    /// <summary>Redraws a game object (0 is the local player) so file changes show.</summary>
+    public void RedrawObject(int objectIndex)
+    {
+        try { _redrawObject.InvokeAction(objectIndex, 0); }
+        catch (Exception ex) { _log.Warning(ex, "[APMC] RedrawObject failed"); }
     }
 
     /// <summary>

@@ -47,7 +47,8 @@ internal sealed class HistoryView(ConverterSession session, ActionPanels actions
         ImGui.TableSetupColumn("When", ImGuiTableColumnFlags.WidthFixed, 110f * Theme.Scale);
         ImGui.TableSetupColumn("Conversion", ImGuiTableColumnFlags.WidthStretch);
         ImGui.TableSetupColumn("Status", ImGuiTableColumnFlags.WidthFixed, 90f * Theme.Scale);
-        ImGui.TableSetupColumn("##Actions", ImGuiTableColumnFlags.WidthFixed, ImGui.GetFrameHeight() * 2 + ImGui.GetStyle().ItemSpacing.X);
+        ImGui.TableSetupColumn("##Actions", ImGuiTableColumnFlags.WidthFixed,
+            ImGui.GetFrameHeight() * 2 + ImGui.GetStyle().ItemSpacing.X + ImGui.GetStyle().CellPadding.X * 2);
         ImGui.TableHeadersRow();
 
         for (var i = 0; i < records.Count; i++)
@@ -61,11 +62,17 @@ internal sealed class HistoryView(ConverterSession session, ActionPanels actions
 
             ImGui.TableNextColumn();
             ImGui.TextWrapped(record.Description);
-            Widgets.Badge(record.Mode == ConversionOutputMode.NewMod ? "New mod" : "In place", Theme.Muted);
+            Widgets.Badge(PlanView.OutputModeBadge(record.Mode), Theme.Muted);
             ImGui.SameLine();
-            Widgets.Muted(record.Mode == ConversionOutputMode.NewMod
+            Widgets.Muted(record.Mode.IsNewMod()
                 ? $"{record.SourceModName} → {Path.GetFileName(record.PublishedPath)}"
                 : record.SourceModName);
+            if (record.Entries.Count > 1)
+            {
+                ImGui.SameLine();
+                Widgets.Badge($"{record.Entries.Count} conversions", Theme.Info);
+                Widgets.Tooltip(string.Join("\n", record.Entries));
+            }
 
             ImGui.TableNextColumn();
             var (reason, folderExists) = _status.TryGetValue(record.Id, out var status) ? status : (null, false);

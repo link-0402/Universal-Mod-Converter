@@ -20,6 +20,7 @@ public sealed record CustomizationKindDescriptor(
         AssetKind.Hair     => "hir",
         AssetKind.Face     => "fac",
         AssetKind.Tail     => "til",
+        AssetKind.Body     => "top",
         _                  => "zer",
     };
 
@@ -50,7 +51,8 @@ public static class CustomizationTargets
     public static ImmutableArray<ushort> AllowedRaces(AssetKind sourceKind, ushort sourceRace, AssetKind targetKind)
         => CustomizationKinds.Get(targetKind).AllowedGenderRaces
             .Where(race => IsLalafell(race) == IsLalafell(sourceRace))
-            .Where(race => targetKind != AssetKind.Face || IsFemale(race) == IsFemale(sourceRace))
+            .Where(race => targetKind is not (AssetKind.Face or AssetKind.Body) ||
+                           IsFemale(race) == IsFemale(sourceRace))
             .ToImmutableArray();
 
     /// <summary>Why <paramref name="targetRace"/> is not a valid target, or null.</summary>
@@ -58,11 +60,13 @@ public static class CustomizationTargets
     {
         if (IsLalafell(targetRace) != IsLalafell(sourceRace))
             return "Lalafell can only be converted to and from other Lalafell.";
-        if (targetKind == AssetKind.Face && IsFemale(targetRace) != IsFemale(sourceRace))
-            return "Faces cannot be converted between genders.";
+        if (targetKind is AssetKind.Face or AssetKind.Body && IsFemale(targetRace) != IsFemale(sourceRace))
+            return targetKind == AssetKind.Body
+                ? "Skin textures cannot be converted between genders: the bodies are shaped differently."
+                : "Faces cannot be converted between genders.";
         return AllowedRaces(sourceKind, sourceRace, targetKind).Contains(targetRace)
             ? null
-            : $"{CustomizationKinds.Get(targetKind).DisplayName} is not valid for c{targetRace:D4}.";
+            : $"{CustomizationKinds.Get(targetKind).DisplayName} is not valid for {RaceNames.Describe(targetRace)}.";
     }
 }
 
@@ -80,6 +84,7 @@ public static class CustomizationKinds
                 [701, 801, 1301, 1401, 1501, 1601]),
             new CustomizationKindDescriptor(AssetKind.VieraEar, "Viera Ear", "zear", 'z', false,
                 [1701, 1801]),
+            new CustomizationKindDescriptor(AssetKind.Body, "Skin", "body", 'b', false, AllPlayable),
         }.ToImmutableDictionary(descriptor => descriptor.Kind);
 
     public static IEnumerable<CustomizationKindDescriptor> All => Descriptors.Values;
@@ -102,7 +107,7 @@ public static class CustomizationKinds
 
 public static partial class CustomizationPaths
 {
-    [GeneratedRegex(@"(?<![A-Za-z0-9])c(?<race>\d{4})(?<s1>[/\\]+)obj(?<s2>[/\\]+)(?<directory>hair|face|tail|zear)(?<s3>[/\\]+)(?<prefix>[hftz])(?<id>\d{4})(?!\d)",
+    [GeneratedRegex(@"(?<![A-Za-z0-9])c(?<race>\d{4})(?<s1>[/\\]+)obj(?<s2>[/\\]+)(?<directory>hair|face|tail|zear|body)(?<s3>[/\\]+)(?<prefix>[hftzb])(?<id>\d{4})(?!\d)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex EndpointRegex();
 
@@ -279,7 +284,7 @@ public static partial class CustomizationPaths
     public static int[] MaterialVariants(CustomizationPathEndpoint endpoint) => endpoint.Kind switch
     {
         AssetKind.Tail when IsHrothgarTail(endpoint) => [1, 2, 3, 4, 5],
-        AssetKind.Tail or AssetKind.Hair => [1],
+        AssetKind.Tail or AssetKind.Hair or AssetKind.Body => [1],
         _ => [],
     };
 

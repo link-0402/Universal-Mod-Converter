@@ -1,6 +1,6 @@
 namespace AdvancedPenumbraModConverter.Core;
 
-/// <summary>Finds the hair, face, tail and Viera-ear roots a mod changes.</summary>
+/// <summary>Finds the hair, face, tail, Viera-ear and skin roots a mod changes.</summary>
 public static class CustomizationDetection
 {
     /// <summary>
@@ -34,6 +34,26 @@ public static class CustomizationDetection
             .Select(root => root.Key)
             .OrderBy(root => root.Kind).ThenBy(root => root.GenderRace).ThenBy(root => root.ModelId)
             .ToList();
+    }
+
+    /// <summary>
+    /// True when the mod replaces only textures under this root. A skin or face retexture is
+    /// exactly that, and it is the case where one file can serve several races or face IDs,
+    /// because a texture has no paths inside it to retarget.
+    /// </summary>
+    public static bool IsTextureOnly(PenumbraMod mod, CustomizationPathEndpoint endpoint)
+    {
+        var any = false;
+        foreach (var container in mod.Containers)
+        foreach (var (gamePath, _) in container.FileEntries().Concat(container.SwapEntries()))
+        {
+            var normalized = GamePath.Normalize(gamePath);
+            if (!CustomizationPaths.Contains(normalized, endpoint)) continue;
+            any = true;
+            if (!normalized.EndsWith(".tex", StringComparison.Ordinal)) return false;
+        }
+
+        return any;
     }
 
     private static bool IsBorrowedTextureRoot(CustomizationPathEndpoint endpoint, HashSet<string> keys,

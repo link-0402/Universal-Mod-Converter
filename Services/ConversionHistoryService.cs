@@ -8,9 +8,10 @@ using AdvancedPenumbraModConverter.Models;
 namespace AdvancedPenumbraModConverter.Services;
 
 /// <summary>
-/// Remembers published conversions and reverts them. A revert never deletes anything: the
-/// converted output is moved into the hidden <c>.apmc-backups</c> folder, and for in-place
-/// conversions the original is moved back from there.
+/// Remembers published conversions and reverts them. A revert itself never deletes anything:
+/// the converted output is moved into the backup folder, and for in-place conversions the
+/// original is moved back from there. Backups do expire afterwards, which
+/// <see cref="BackupMaintenanceService"/> handles and <see cref="RevertBlockReason"/> reports.
 /// </summary>
 public sealed class ConversionHistoryService(Configuration configuration)
 {
@@ -22,12 +23,13 @@ public sealed class ConversionHistoryService(Configuration configuration)
     {
         var record = new ConversionRecord
         {
+            Entries            = task.Entries.Where(e => !e.Rejected).Select(e => e.Description).ToList(),
             Mode               = task.OutputMode,
             Description        = description,
             SourceModName      = sourceModName,
             SourceModDirectory = Normalize(task.ModDirectory),
             PublishedPath      = Normalize(task.PublishedPath ?? task.ModDirectory),
-            RecoveryPath       = task.OutputMode == ConversionOutputMode.InPlace ? task.RecoveryPath : null,
+            RecoveryPath       = task.OutputMode.EditsSourceMod() ? task.RecoveryPath : null,
         };
         configuration.History.Insert(0, record);
         if (configuration.History.Count > MaxRecords)
@@ -44,13 +46,16 @@ public sealed class ConversionHistoryService(Configuration configuration)
         if (record.IsReverted) return "Already reverted.";
         if (!Directory.Exists(record.PublishedPath))
             return $"The converted mod no longer exists: {record.PublishedPath}";
-        if (record.Mode == ConversionOutputMode.NewMod) return null;
+        if (record.Mode.IsNewMod()) return null;
 
         if (string.IsNullOrEmpty(record.RecoveryPath) || !Directory.Exists(record.RecoveryPath))
-            return "The original mod's recovery copy is missing.";
-        // Reverting an older in-place conversion would silently discard every later one.
+            return record.BackupPrunedUtc.HasValue
+                ? $"The backup of the original was cleaned up on {record.BackupPrunedUtc:yyyy-MM-dd}, " +
+                  "so this conversion can no longer be undone."
+                : "The backup of the original is missing, so this conversion can no longer be undone.";
+        // Reverting an older conversion of this mod would silently discard every later one.
         var latest = configuration.History.FirstOrDefault(r =>
-            r.Mode == ConversionOutputMode.InPlace && !r.IsReverted &&
+            r.Mode.EditsSourceMod() && !r.IsReverted &&
             string.Equals(r.SourceModDirectory, record.SourceModDirectory, StringComparison.OrdinalIgnoreCase));
         return latest == record ? null : "A later in-place conversion of this mod must be reverted first.";
     }
@@ -69,7 +74,7 @@ public sealed class ConversionHistoryService(Configuration configuration)
         if (string.IsNullOrEmpty(parent)) return new RevertResult(false, "The converted mod has no parent directory.", null, null);
 
         var name     = Path.GetFileName(published);
-        var parked   = Path.Combine(ModConverterService.BackupRoot(parent),
+        var parked   = Path.Combine(ModConverterService.BackupRoot(parent, configuration.BackupDirectory),
             $"{name}-reverted-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}");
         var moved    = false;
         try
@@ -78,13 +83,13 @@ public sealed class ConversionHistoryService(Configuration configuration)
             moved = true;
             log($"Moved converted output to {parked}");
 
-            if (record.Mode == ConversionOutputMode.InPlace)
+            if (record.Mode.EditsSourceMod())
             {
                 Directory.Move(record.RecoveryPath!, published);
                 log($"Restored the original mod from {record.RecoveryPath}");
             }
 
-            var message = record.Mode == ConversionOutputMode.NewMod
+            var message = record.Mode.IsNewMod()
                 ? $"Removed '{name}'. A copy was kept at {parked}."
                 : $"Restored the original '{name}'. The converted version was kept at {parked}.";
             return new RevertResult(true, message, name, parked);
@@ -104,6 +109,16 @@ public sealed class ConversionHistoryService(Configuration configuration)
         if (!result.Success) return;
         record.RevertedUtc        = DateTime.UtcNow;
         record.RevertedOutputPath = result.ParkedPath;
+        configuration.Save();
+    }
+
+    /// <summary>Notes that the backups of these conversions expired, so Revert explains itself.</summary>
+    public void MarkBackupsPruned(IReadOnlyList<Guid> ids)
+    {
+        if (ids.Count == 0) return;
+        var now = DateTime.UtcNow;
+        foreach (var record in configuration.History.Where(r => ids.Contains(r.Id) && !r.BackupPrunedUtc.HasValue))
+            record.BackupPrunedUtc = now;
         configuration.Save();
     }
 

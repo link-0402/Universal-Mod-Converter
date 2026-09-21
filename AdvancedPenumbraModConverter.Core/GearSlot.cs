@@ -33,6 +33,38 @@ public readonly record struct GearItem(GearSlot Slot, ushort SetId, ushort Varia
 /// </summary>
 public static class GearSlots
 {
+    /// <summary>Lower-case display name for messages, e.g. "legs", "right ring".</summary>
+    public static string Label(this GearSlot slot) => slot switch
+    {
+        GearSlot.Ears    => "earring",
+        GearSlot.RFinger => "right ring",
+        GearSlot.LFinger => "left ring",
+        GearSlot.Glasses => "facewear",
+        _                => slot.ToString().ToLowerInvariant(),
+    };
+
+    /// <summary>Slots whose models are worn on the body and shaped to it: body, hands, legs and feet.</summary>
+    public static bool IsBodyShaped(this GearSlot slot)
+        => slot is GearSlot.Body or GearSlot.Hands or GearSlot.Legs or GearSlot.Feet;
+
+    /// <summary>Slots whose models may carry body parts, pubes or piercings: the body-shaped ones and head gear.</summary>
+    public static bool MayCarryBodyParts(this GearSlot slot) => slot.IsBodyShaped() || slot == GearSlot.Head;
+
+    /// <summary>
+    /// What changing slots means for the model, in at most two short sentences, or null when
+    /// there is nothing worth saying. The model is not swapped for one of the target slot, which
+    /// only matters where the target slot is itself shaped to the body; body parts, pubes and
+    /// piercings are left out, which only matters where the source slot can have them.
+    /// </summary>
+    public static string? CrossSlotNote(GearSlot from, GearSlot to)
+    {
+        if (from == to) return null;
+        var parts = new List<string>(2);
+        if (to.IsBodyShaped()) parts.Add($"This will not turn the {from.Label()} model into a {to.Label()} model.");
+        if (from.MayCarryBodyParts()) parts.Add("Body parts, pubes and piercings are left out automatically.");
+        return parts.Count == 0 ? null : string.Join(" ", parts);
+    }
+
     public static bool IsAccessory(this GearSlot slot)
         => slot is GearSlot.Ears or GearSlot.Neck or GearSlot.Wrists or GearSlot.RFinger or GearSlot.LFinger;
 
@@ -109,7 +141,7 @@ public static class GearSlots
     };
 
     public static string EqdpFile(this GearSlot slot, ushort genderRace)
-        => $"chara/xls/equipmentdeformerparameter/c{genderRace:D4}{(slot.IsAccessory() ? "a" : string.Empty)}.eqdp";
+        => $"chara/xls/charadb/{(slot.IsAccessory() ? "accessory" : "equipment")}deformerparameter/c{genderRace:D4}.eqdp";
 
     public static string ImcFile(GearItem item)
         => $"{item.Root}/{item.PathEndpoint.Token}.imc";
@@ -124,7 +156,10 @@ public static class GearSlots
         => $"{item.Root}/vfx/eff/ve{vfxId:D4}.avfx";
 }
 
-/// <summary>Playable gender/race codes and their Penumbra enum spellings.</summary>
+/// <summary>
+/// Playable gender/race codes and the spellings Penumbra writes into mod JSON. For names to
+/// show a user, see <see cref="RaceNames"/>; the two differ on purpose.
+/// </summary>
 public static class GenderRaces
 {
     private static readonly string[] Races =

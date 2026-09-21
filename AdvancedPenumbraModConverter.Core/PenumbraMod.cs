@@ -5,17 +5,11 @@ using System.Text.Json.Nodes;
 
 namespace AdvancedPenumbraModConverter.Core;
 
-public enum PenumbraModFormat
-{
-    /// <summary>FileVersion 3 and older: meta.json, default_mod.json and group_*.json files.</summary>
-    Legacy,
-
-    /// <summary>
-    /// FileVersion 4 (Penumbra 1.7+): every container lives in meta.json under
-    /// <c>DefaultData</c> and <c>Groups</c>; groups and options carry GUIDs.
-    /// </summary>
-    Unified,
-}
+/// <summary>
+/// A mod written in the pre-1.7 Penumbra layout, which this converter no longer reads.
+/// Its message is written for the user and needs no further explanation.
+/// </summary>
+public sealed class OutdatedModFormatException(string message) : IOException(message);
 
 /// <summary>Stable address of a data container: group index (-1 = default) and container index.</summary>
 public readonly record struct ContainerAddress(int Group, int Index)
@@ -30,9 +24,14 @@ public readonly record struct ContainerAddress(int Group, int Index)
 /// </summary>
 public sealed class PenumbraMod
 {
+    /// <summary>
+    /// The only layout this converter reads or writes: every container lives in meta.json
+    /// under <c>DefaultData</c> and <c>Groups</c>, and groups and options carry GUIDs.
+    /// Penumbra migrated every installed mod to it on the 1.7 release.
+    /// </summary>
     public const int UnifiedFileVersion = 4;
+
     public const string MetaFileName = "meta.json";
-    public const string LegacyDefaultFileName = "default_mod.json";
 
     internal static readonly JsonDocumentOptions ReadOptions = new()
     {
@@ -46,15 +45,12 @@ public sealed class PenumbraMod
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
-    private PenumbraMod(PenumbraModFormat format, JsonObject meta, JsonObject defaultNode, List<ModGroup> groups)
+    private PenumbraMod(JsonObject meta, JsonObject defaultNode, List<ModGroup> groups)
     {
-        Format = format;
         Meta = meta;
         Groups = groups;
         Default = new ModContainer(defaultNode, null, ContainerAddress.Default);
     }
-
-    public PenumbraModFormat Format { get; }
 
     /// <summary>meta.json without the DefaultData and Groups properties.</summary>
     public JsonObject Meta { get; }
@@ -62,8 +58,6 @@ public sealed class PenumbraMod
     public ModContainer Default { get; }
 
     public List<ModGroup> Groups { get; }
-
-    public int FileVersion => Json.GetInt(Meta["FileVersion"], 0);
 
     public string Name => Json.GetString(Meta["Name"]) ?? string.Empty;
 
@@ -101,54 +95,28 @@ public sealed class PenumbraMod
         if (version > UnifiedFileVersion)
             throw new InvalidDataException(
                 $"Mod metadata version {version} is newer than the supported version {UnifiedFileVersion}.");
+        if (version < UnifiedFileVersion)
+            throw new OutdatedModFormatException(
+                "This mod still uses the pre-1.7 Penumbra layout. Open it in Penumbra once so it is updated, " +
+                "then convert it.");
 
-        if (version >= UnifiedFileVersion)
+        var defaultNode = Detach(meta, "DefaultData") as JsonObject ?? new JsonObject();
+        var groups = new List<ModGroup>();
+        if (Detach(meta, "Groups") is JsonArray array)
         {
-            var defaultNode = Detach(meta, "DefaultData") as JsonObject ?? new JsonObject();
-            var groups = new List<ModGroup>();
-            if (Detach(meta, "Groups") is JsonArray array)
-            {
-                var nodes = array.ToList();
-                array.Clear();
-                foreach (var node in nodes)
-                    if (node is JsonObject group)
-                        groups.Add(new ModGroup(group, groups.Count, null));
-            }
-
-            return new PenumbraMod(PenumbraModFormat.Unified, meta, defaultNode, groups);
+            var nodes = array.ToList();
+            array.Clear();
+            foreach (var node in nodes)
+                if (node is JsonObject group)
+                    groups.Add(new ModGroup(group, groups.Count));
         }
 
-        var defaultPath = Path.Combine(directory, LegacyDefaultFileName);
-        var legacyDefault = File.Exists(defaultPath) ? ParseObject(defaultPath) : new JsonObject();
-        var legacyGroups = new List<ModGroup>();
-        foreach (var file in LegacyGroupFiles(directory))
-            legacyGroups.Add(new ModGroup(ParseObject(file), legacyGroups.Count, Path.GetFileName(file)));
-        return new PenumbraMod(PenumbraModFormat.Legacy, meta, legacyDefault, legacyGroups);
+        return new PenumbraMod(meta, defaultNode, groups);
     }
 
     /// <summary>The JSON files that define this mod's data (used for fingerprinting).</summary>
     public static IReadOnlyList<string> DefinitionFiles(string directory)
-    {
-        var meta = Path.Combine(directory, MetaFileName);
-        var files = new List<string> { meta };
-        if (File.Exists(meta))
-        {
-            try
-            {
-                if (Json.GetInt(ParseObject(meta)["FileVersion"], 0) >= UnifiedFileVersion) return files;
-            }
-            catch (Exception) { /* malformed meta: include the legacy files as well */ }
-        }
-
-        var defaultPath = Path.Combine(directory, LegacyDefaultFileName);
-        if (File.Exists(defaultPath)) files.Add(defaultPath);
-        files.AddRange(LegacyGroupFiles(directory));
-        return files;
-    }
-
-    private static IEnumerable<string> LegacyGroupFiles(string directory)
-        => System.IO.Directory.EnumerateFiles(directory, "group_*.json", SearchOption.TopDirectoryOnly)
-            .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase);
+        => [Path.Combine(directory, MetaFileName)];
 
     internal static JsonObject ParseObject(string path)
     {
@@ -177,8 +145,8 @@ public sealed class PenumbraMod
     /// <summary>A deep copy whose containers have the same addresses as this mod's.</summary>
     public PenumbraMod Clone()
     {
-        var groups = Groups.Select((g, i) => new ModGroup((JsonObject)g.Node.DeepClone(), i, g.LegacyFileName)).ToList();
-        return new PenumbraMod(Format, (JsonObject)Meta.DeepClone(), (JsonObject)Default.Node.DeepClone(), groups);
+        var groups = Groups.Select((g, i) => new ModGroup((JsonObject)g.Node.DeepClone(), i)).ToList();
+        return new PenumbraMod((JsonObject)Meta.DeepClone(), (JsonObject)Default.Node.DeepClone(), groups);
     }
 
     /// <summary>
@@ -192,76 +160,76 @@ public sealed class PenumbraMod
         return clone;
     }
 
+    // ── Snapshots ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The definition as text, so a change to it can be undone. Used when several conversions
+    /// build one mod together and one of them turns out to conflict with an earlier one: its
+    /// edits have to come back out without disturbing the edits that were accepted.
+    /// </summary>
+    public ModSnapshot Snapshot()
+        => new(Serialize(Meta), Serialize(Default.Node), Groups.Select(g => Serialize(g.Node)).ToList());
+
+    /// <summary>
+    /// Puts the definition back to <paramref name="snapshot"/>. The <see cref="Meta"/> and
+    /// <see cref="Default"/> objects are refilled rather than replaced, and the groups go back
+    /// into the same list, so every <see cref="ContainerAddress"/> handed out so far still
+    /// resolves.
+    /// </summary>
+    public void Restore(ModSnapshot snapshot)
+    {
+        Refill(Meta, snapshot.Meta);
+        Refill(Default.Node, snapshot.Default);
+        Groups.Clear();
+        foreach (var text in snapshot.Groups)
+            Groups.Add(new ModGroup(ParseText(text), Groups.Count));
+    }
+
+    private static void Refill(JsonObject target, string json)
+    {
+        target.Clear();
+        var parsed = ParseText(json);
+        // A JSON node has one parent, so each value is detached before it is re-parented.
+        foreach (var key in parsed.Select(property => property.Key).ToList())
+        {
+            var value = parsed[key];
+            parsed.Remove(key);
+            target[key] = value;
+        }
+    }
+
+    private static JsonObject ParseText(string json)
+        => JsonNode.Parse(json, new JsonNodeOptions(), ReadOptions) as JsonObject
+           ?? throw new InvalidDataException("A mod snapshot must hold a JSON object.");
+
     // ── Saving ──────────────────────────────────────────────────────────────
 
     /// <summary>Writes the definition files for this mod into <paramref name="directory"/>.</summary>
     public void Save(string directory)
-    {
-        if (Format == PenumbraModFormat.Unified)
+        => WriteJson(Path.Combine(directory, MetaFileName), writer =>
         {
-            WriteJson(Path.Combine(directory, MetaFileName), writer =>
+            writer.WriteStartObject();
+            foreach (var (key, value) in Meta)
             {
-                writer.WriteStartObject();
-                foreach (var (key, value) in Meta)
-                {
-                    writer.WritePropertyName(key);
-                    WriteNode(writer, value);
-                }
+                writer.WritePropertyName(key);
+                WriteNode(writer, value);
+            }
 
-                if (!Default.IsEmpty)
-                {
-                    writer.WritePropertyName("DefaultData");
-                    Default.Node.WriteTo(writer);
-                }
+            if (!Default.IsEmpty)
+            {
+                writer.WritePropertyName("DefaultData");
+                Default.Node.WriteTo(writer);
+            }
 
-                if (Groups.Count > 0)
-                {
-                    writer.WriteStartArray("Groups");
-                    foreach (var group in Groups) group.Node.WriteTo(writer);
-                    writer.WriteEndArray();
-                }
+            if (Groups.Count > 0)
+            {
+                writer.WriteStartArray("Groups");
+                foreach (var group in Groups) group.Node.WriteTo(writer);
+                writer.WriteEndArray();
+            }
 
-                writer.WriteEndObject();
-            });
-            return;
-        }
-
-        WriteJson(Path.Combine(directory, MetaFileName), w => Meta.WriteTo(w));
-        WriteJson(Path.Combine(directory, LegacyDefaultFileName), w => Default.Node.WriteTo(w));
-
-        var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        for (var i = 0; i < Groups.Count; i++)
-        {
-            var group = Groups[i];
-            group.LegacyFileName ??= LegacyGroupFileName(i, group.Name);
-            if (!written.Add(group.LegacyFileName))
-                group.LegacyFileName = LegacyGroupFileName(i, group.Name + "_" + i);
-            written.Add(group.LegacyFileName);
-            WriteJson(Path.Combine(directory, group.LegacyFileName), w => group.Node.WriteTo(w));
-        }
-
-        // Penumbra loads every group_*.json file, so stale ones must not survive.
-        foreach (var stale in LegacyGroupFiles(directory).Where(f => !written.Contains(Path.GetFileName(f))).ToList())
-            File.Delete(stale);
-    }
-
-    /// <summary>Renumbers legacy group files sequentially (Penumbra orders groups by file name).</summary>
-    public void RenumberLegacyGroupFiles()
-    {
-        for (var i = 0; i < Groups.Count; i++)
-            Groups[i].LegacyFileName = LegacyGroupFileName(i, Groups[i].Name);
-    }
-
-    public static string LegacyGroupFileName(int index, string name)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var builder = new StringBuilder();
-        foreach (var c in name.ToLowerInvariant())
-            builder.Append(Array.IndexOf(invalid, c) >= 0 || char.IsControl(c) ? '_' : c);
-        var safe = builder.ToString().Trim(' ', '.');
-        if (safe.Length == 0) safe = "group";
-        return $"group_{index + 1:D3}_{safe}.json";
-    }
+            writer.WriteEndObject();
+        });
 
     private static void WriteNode(Utf8JsonWriter writer, JsonNode? value)
     {
@@ -286,13 +254,15 @@ public sealed class PenumbraMod
     }
 }
 
+/// <summary>A mod definition captured as text, for <see cref="PenumbraMod.Restore"/>.</summary>
+public sealed record ModSnapshot(string Meta, string Default, IReadOnlyList<string> Groups);
+
 public sealed class ModGroup
 {
-    internal ModGroup(JsonObject node, int index, string? legacyFileName)
+    internal ModGroup(JsonObject node, int index)
     {
         Node = node;
         Index = index;
-        LegacyFileName = legacyFileName;
         var list = new List<ModContainer>();
         var array = IsCombining ? node["Containers"] as JsonArray
             : IsImc ? null
@@ -307,8 +277,6 @@ public sealed class ModGroup
     public JsonObject Node { get; }
 
     public int Index { get; }
-
-    public string? LegacyFileName { get; set; }
 
     public string Type => Json.GetString(Node["Type"]) ?? "Single";
 

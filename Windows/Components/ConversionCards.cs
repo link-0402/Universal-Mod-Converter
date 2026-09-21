@@ -20,6 +20,7 @@ internal sealed class ConversionCards(ConverterSession session)
     private readonly AnimationTargetPanel _animation = new(session);
 
     private string _targetFilter = string.Empty;
+    private string _sourceFilter = string.Empty;
 
     public void Draw()
     {
@@ -88,39 +89,79 @@ internal sealed class ConversionCards(ConverterSession session)
             return;
         }
 
-        if (session.DetectedItems.Count > 1)
+        if (session.DetectedItems.Count == 1)
         {
-            Widgets.Muted($"{session.DetectedItems.Count} convertible roots in this mod:");
-            ImGui.SetNextItemWidth(-1);
-            var preview = session.Source is { } current ? SourceLabel(current) : "Select a source…";
-            using (var combo = ImRaii.Combo("##Source", preview, ImGuiComboFlags.HeightLarge))
-            {
-                if (combo.Success)
-                {
-                    for (var i = 0; i < session.DetectedItems.Count; i++)
-                    {
-                        var item = session.DetectedItems[i];
-                        using var id = ImRaii.PushId(i);
-                        if (ImGui.Selectable(SourceLabel(item), i == session.SourceIndex))
-                            session.SelectSource(i);
-                        if (i == session.SourceIndex) ImGui.SetItemDefaultFocus();
-                    }
-                }
-            }
-            ImGui.Spacing();
-        }
-
-        if (session.Source is not { } source)
-        {
-            Widgets.MutedWrapped("Pick the item this mod replaces that you want to move.");
+            DrawItemSummary(session.DetectedItems[0]);
+            DrawSourceDetails(session.DetectedItems[0]);
             return;
         }
 
-        DrawItemSummary(source);
+        DrawSourceList();
+        if (session.Source is { } selected)
+        {
+            ImGui.Spacing();
+            DrawSourceDetails(selected);
+        }
+        else
+            Widgets.MutedWrapped("Pick the item this mod replaces that you want to move.");
     }
 
-    private static string SourceLabel(DetectedItem item)
-        => $"[{KindLabel(item)}] {item.ItemName}  ·  {IdLabel(item)}";
+    /// <summary>
+    /// Every convertible root in the mod, shown the way the selected one is: icon, name and
+    /// model ID. A dropdown hid what the mod actually contains behind a click.
+    /// </summary>
+    private void DrawSourceList()
+    {
+        var items = session.DetectedItems;
+        Widgets.Muted($"{items.Count} convertible roots in this mod:");
+
+        if (items.Count > 6)
+        {
+            ImGui.SetNextItemWidth(-1);
+            ImGui.InputTextWithHint("##SourceFilter", "Filter by name, type or ID…", ref _sourceFilter, 128);
+        }
+
+        var filter = _sourceFilter;
+        var filtered = items
+            .Select((item, index) => (Item: item, Index: index))
+            .Where(e => filter.Length == 0 ||
+                        e.Item.ItemName.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                        IdLabel(e.Item).Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                        KindLabel(e.Item).Contains(filter, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        // Leave room for the detail lines below without letting the list collapse.
+        var rowHeight = ImGui.GetTextLineHeight() * 1.5f;
+        var spacing   = ImGui.GetStyle().ItemSpacing.Y;
+        var available = ImGui.GetContentRegionAvail().Y - ImGui.GetTextLineHeightWithSpacing() * 3;
+        var height    = Math.Clamp(filtered.Count * (rowHeight + spacing) + ImGui.GetStyle().FramePadding.Y * 2,
+            rowHeight * 2, Math.Max(rowHeight * 3, available));
+
+        using var list = ImRaii.Child("##SourceList", new Vector2(-1, height), true);
+        if (!list.Success) return;
+        if (filtered.Count == 0)
+        {
+            Widgets.Muted("No root matches.");
+            return;
+        }
+
+        Widgets.Clipped(filtered.Count, rowHeight + spacing, row =>
+        {
+            var (item, index) = filtered[row];
+            using var id = ImRaii.PushId(index);
+            var start = ImGui.GetCursorPos();
+            if (ImGui.Selectable("##row", index == session.SourceIndex, ImGuiSelectableFlags.None, new Vector2(0, rowHeight)))
+                session.SelectSource(index);
+            ImGui.SetCursorPos(start);
+            DrawKindIcon(item, rowHeight);
+            ImGui.SameLine();
+            ImGui.SetCursorPosY(start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2);
+            ImGui.TextUnformatted(item.ItemName);
+            var idText = $"{KindLabel(item)} · {IdLabel(item)}";
+            ImGui.SameLine(ImGui.GetContentRegionMax().X - ImGui.CalcTextSize(idText).X);
+            Widgets.Muted(idText);
+        });
+    }
 
     private static string KindLabel(DetectedItem item) => item switch
     {
@@ -143,26 +184,32 @@ internal sealed class ConversionCards(ConverterSession session)
         _ => $"{(item.IsAccessory ? 'a' : 'e')}{item.ModelIdDisplay}",
     };
 
+    /// <summary>The game icon, or a glyph standing in for a root the game has no icon for.</summary>
+    private static void DrawKindIcon(DetectedItem item, float size)
+    {
+        if (!item.IsCustomization && (item.Animation == null || item.Icon != 0))
+        {
+            Widgets.GameIcon(item.Icon, size);
+            return;
+        }
+
+        using (ImRaii.PushColor(ImGuiCol.Text, Theme.Muted))
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var glyph = item.Kind switch
+            {
+                AssetKind.Hair      => FontAwesomeIcon.Cut,
+                AssetKind.Face      => FontAwesomeIcon.UserCircle,
+                AssetKind.Animation => FontAwesomeIcon.Running,
+                _                   => FontAwesomeIcon.Paw,
+            };
+            ImGui.Button(glyph.ToIconString() + "##kind", new Vector2(size));
+        }
+    }
+
     private static void DrawItemSummary(DetectedItem source)
     {
-        var iconSize = ImGui.GetTextLineHeight() * 2.6f;
-        if (source.IsCustomization || source.Animation != null && source.Icon == 0)
-        {
-            using (ImRaii.PushColor(ImGuiCol.Text, Theme.Muted))
-            using (ImRaii.PushFont(UiBuilder.IconFont))
-            {
-                var glyph = source.Kind switch
-                {
-                    AssetKind.Hair => FontAwesomeIcon.Cut,
-                    AssetKind.Face => FontAwesomeIcon.UserCircle,
-                    AssetKind.Animation => FontAwesomeIcon.Running,
-                    _              => FontAwesomeIcon.Paw,
-                };
-                ImGui.Button(glyph.ToIconString() + "##kind", new Vector2(iconSize));
-            }
-        }
-        else
-            Widgets.GameIcon(source.Icon, iconSize);
+        DrawKindIcon(source, ImGui.GetTextLineHeight() * 2.6f);
 
         ImGui.SameLine();
         using (ImRaii.Group())
@@ -172,20 +219,20 @@ internal sealed class ConversionCards(ConverterSession session)
             ImGui.SameLine();
             Widgets.Badge(IdLabel(source), Theme.Info);
         }
+    }
 
+    private static void DrawSourceDetails(DetectedItem source)
+    {
         if (source.Animation is { } animation)
         {
-            ImGui.Spacing();
             Widgets.MutedWrapped(string.Join("\n", animation.Locations));
-            Widgets.MutedWrapped("Races in the mod: " + string.Join(", ", animation.Races.Select(r => $"c{r:D4}")));
+            Widgets.MutedWrapped("Races in the mod: " +
+                                 string.Join(", ", animation.Races.Select(ConverterSession.RaceLabel)));
         }
 
         if (source.IsAmbiguous)
-        {
-            ImGui.Spacing();
             Widgets.ColoredWrapped(Theme.Warning,
                 "Several game items share this model; the conversion applies to all of them.");
-        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -225,13 +272,12 @@ internal sealed class ConversionCards(ConverterSession session)
         if (ImGui.InputTextWithHint("##TargetFilter", "Filter by name or model ID…", ref _targetFilter, 128))
             session.SetTargetFilter(_targetFilter);
 
-        if (session.Source is { } source && session.TargetSlot != source.Slot)
+        if (session.Source is { } source &&
+            GearSlots.CrossSlotNote(SlotInfo.ToGearSlot(source.Slot), SlotInfo.ToGearSlot(session.TargetSlot)) is { } note)
         {
-            Widgets.Icon(FontAwesomeIcon.ExclamationTriangle, Theme.Warning);
+            Widgets.Icon(FontAwesomeIcon.InfoCircle, Theme.Info);
             ImGui.SameLine();
-            Widgets.ColoredWrapped(Theme.Warning,
-                $"The model keeps its {SlotInfo.DisplayLabelMap[source.Slot].ToLowerInvariant()} mesh: changing slots does not reshape it. " +
-                "After previewing, remove the parts you don't want in the Mesh groups tab.");
+            Widgets.ColoredWrapped(Theme.Info, note);
         }
 
         // The chosen item stays visible even when the filter hides it.
@@ -287,6 +333,43 @@ internal sealed class ConversionCards(ConverterSession session)
         });
     }
 
+    /// <summary>
+    /// Textures carry no paths inside them, so one file can serve several races at once. The
+    /// option only appears for a root the mod replaces nothing but textures in, because a model
+    /// or material would have to differ per race and cannot be shared.
+    /// </summary>
+    private void DrawTextureFanOut(DetectedItem source, float labelWidth)
+    {
+        if (!session.CanFanOutTextures) return;
+
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("Also for");
+        ImGui.SameLine(labelWidth);
+
+        var extras = session.ExtraTargetRaces;
+        var label = extras.Count == 0
+            ? "Only the race above"
+            : string.Join(", ", extras.Select(ConverterSession.RaceLabel));
+        ImGui.SetNextItemWidth(-1);
+        using (var combo = ImRaii.Combo("##ExtraRaces", label, ImGuiComboFlags.HeightLarge))
+        {
+            if (combo.Success)
+                foreach (var race in session.AllowedTargetRaces.Where(r => r != session.TargetRace))
+                {
+                    var on = extras.Contains(race);
+                    if (ImGui.Checkbox(RaceNames.Describe(race), ref on)) session.SetExtraTargetRace(race, on);
+                }
+        }
+        Widgets.Tooltip("The same textures are written for these races as well. The mod replaces only " +
+                        "textures here, so one file can serve all of them.");
+
+        var keep = session.KeepSourcePaths;
+        ImGui.SameLine(labelWidth);
+        if (ImGui.Checkbox("Keep the original race too", ref keep)) session.SetKeepSourcePaths(keep);
+        Widgets.Tooltip($"Leave {ConverterSession.RaceLabel(source.GenderRace ?? 0)} with these textures " +
+                        "instead of moving them away.");
+    }
+
     private void DrawCustomizationTarget(DetectedItem source)
     {
         var labelWidth = 70f * Theme.Scale;
@@ -314,12 +397,14 @@ internal sealed class ConversionCards(ConverterSession session)
         {
             if (combo.Success)
                 foreach (var race in session.AllowedTargetRaces)
-                    if (ImGui.Selectable($"{ConverterSession.RaceLabel(race)}  (c{race:D4})", race == session.TargetRace))
+                    if (ImGui.Selectable(RaceNames.Describe(race), race == session.TargetRace))
                         session.SetTargetRace(race);
         }
-        Widgets.Tooltip(source.Kind == AssetKind.Face
-            ? "Races with this kind of asset. Lalafell convert only among Lalafell, and faces keep their gender."
+        Widgets.Tooltip(source.Kind is AssetKind.Face or AssetKind.Body
+            ? "Races with this kind of asset. Lalafell convert only among Lalafell, and faces and skins keep their gender."
             : "Races with this kind of asset. Lalafell convert only among Lalafell.");
+
+        DrawTextureFanOut(source, labelWidth);
 
         var kindName = session.TargetCustomizationKind == AssetKind.VieraEar
             ? "Ears"

@@ -49,6 +49,13 @@ public sealed class DetectedItem
 
     /// <summary>Game icon of the resolved item, 0 when unknown or for customization roots.</summary>
     public uint   Icon            { get; init; }
+
+    /// <summary>
+    /// Customization roots only: the mod replaces nothing but textures here. Such a root can be
+    /// offered to several races or model IDs at once, because a texture holds no paths that
+    /// would have to differ between them.
+    /// </summary>
+    public bool   IsTextureOnly   { get; init; }
 }
 
 /// <summary>A face, hair, tail or ear ID a player can choose.</summary>
@@ -395,7 +402,7 @@ public sealed class GameDataService : IGameFileProvider
         if (string.IsNullOrWhiteSpace(query)) return new();
 
         var q     = query.Trim();
-        var cache = GetItemCache().Where(i => i.Slot == slot);
+        var cache = GetItemCache().Where(i => FitsSlot(i, slot));
 
         var starts   = cache
             .Where(i => i.Name.StartsWith(q, StringComparison.OrdinalIgnoreCase))
@@ -421,9 +428,37 @@ public sealed class GameDataService : IGameFileProvider
     /// </summary>
     public List<GameItem> GetAllItemsForSlot(EquipSlot slot)
         => GetItemCache()
-            .Where(i => i.Slot == slot)
+            .Where(i => FitsSlot(i, slot))
             .OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
+
+    /// <summary>
+    /// Whether <paramref name="item"/> can be worn in <paramref name="slot"/>. Rings fit either
+    /// finger: the game files one ring model with a <c>_rir</c> and a <c>_ril</c> version, and its
+    /// items allow both hands, though the item list records them under the right ring.
+    /// </summary>
+    public static bool FitsSlot(GameItem item, EquipSlot slot)
+        => item.Slot == slot || IsRing(item.Slot) && IsRing(slot);
+
+    private static bool FitsSlot(GameItem item, GearSlot slot)
+        => SlotInfo.ToGearSlot(item.Slot) == slot ||
+           IsRing(item.Slot) && slot is GearSlot.RFinger or GearSlot.LFinger;
+
+    private static bool IsRing(EquipSlot slot) => slot is EquipSlot.RingRight or EquipSlot.RingLeft;
+
+    /// <summary>
+    /// An item that shows <paramref name="item"/>: the same slot, set and variant, or any variant
+    /// of the set when none matches. Null while the item list loads or when nothing matches.
+    /// </summary>
+    public GameItem? FindItem(GearItem item)
+    {
+        if (!ItemsReady) return null;
+        var candidates = GetItemCache()
+            .Where(i => i.ModelId == item.SetId && FitsSlot(i, item.Slot))
+            .OrderBy(i => i.RowId)
+            .ToList();
+        return candidates.FirstOrDefault(i => i.Variant == item.Variant) ?? candidates.FirstOrDefault();
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Mod scan
@@ -441,7 +476,7 @@ public sealed class GameDataService : IGameFileProvider
 
         // Key: (slot, 4-digit-id), Value: isAccessory
         var found = new Dictionary<(EquipSlot, string), bool>();
-        var custom = new HashSet<(AssetKind Kind, ushort Race, string Id)>();
+        var custom = new HashSet<(AssetKind Kind, ushort Race, string Id, bool TextureOnly)>();
         var animations = new List<AnimationSource>();
 
         try
@@ -463,7 +498,8 @@ public sealed class GameDataService : IGameFileProvider
             }
 
             foreach (var root in CustomizationDetection.FindRoots(mod, modDir))
-                custom.Add((root.Kind, root.GenderRace, root.ModelId.ToString("D4")));
+                custom.Add((root.Kind, root.GenderRace, root.ModelId.ToString("D4"),
+                    CustomizationDetection.IsTextureOnly(mod, root)));
 
             animations = Animations.Scan(mod);
         }
@@ -487,7 +523,7 @@ public sealed class GameDataService : IGameFileProvider
                 : new[] { slot };
             foreach (var logicalSlot in logicalSlots)
             {
-                var matches = cache.Where(i => i.ModelId == modelId && i.Slot == logicalSlot).ToList();
+                var matches = cache.Where(i => i.ModelId == modelId && FitsSlot(i, logicalSlot)).ToList();
                 if (logicalSlot == EquipSlot.Facewear && matches.Count == 0) continue;
                 if (matches.Count == 0)
                 {
@@ -529,6 +565,7 @@ public sealed class GameDataService : IGameFileProvider
                 Slot          = EquipSlot.Head,
                 ModelIdPadded = entry.Id,
                 GenderRace    = entry.Race,
+                IsTextureOnly = entry.TextureOnly,
                 ItemName      = DescribeCustomization(entry.Kind, entry.Race, ushort.Parse(entry.Id)),
             });
 

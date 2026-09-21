@@ -107,6 +107,69 @@ public class ConversionTask
     /// </summary>
     public Dictionary<string, MeshRemoval> MeshRemovals { get; } = new(System.StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Output models whose body-material groups were already switched off by default, so that a
+    /// group the user ticked back on stays on when the plan is previewed again.
+    /// </summary>
+    public HashSet<string> MeshDefaultsApplied { get; } = new(System.StringComparer.OrdinalIgnoreCase);
+
+    // ── Extra targets ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Customization textures only: further races or model IDs the same files are offered
+    /// under, on top of <see cref="TargetGenderRace"/> and <see cref="NewIdPadded"/>. One
+    /// texture can serve all of them because a texture holds no paths to retarget.
+    /// </summary>
+    public List<ConversionEndpoint> ExtraTargets { get; } = new();
+
+    /// <summary>
+    /// Keep the source paths as well instead of moving them, so the original race or face ID
+    /// still gets the textures. Implied whenever <see cref="ExtraTargets"/> is used.
+    /// </summary>
+    public bool KeepSourcePaths { get; set; }
+
+    // ── Runs of several conversions ──────────────────────────────────────────
+
+    /// <summary>
+    /// The conversions of this run. Empty for a single conversion, which keeps using the
+    /// scalar inputs above.
+    /// </summary>
+    public List<QueuedConversion> Entries { get; } = new();
+
+    /// <summary>The plan the whole run produced; set only when <see cref="Entries"/> is used.</summary>
+    public MergedModPlan? MergedPlan { get; set; }
+
+    public bool IsQueue => Entries.Count > 0;
+
+    /// <summary>
+    /// A fresh task with the same inputs and nothing planned. A plan entry keeps its task as
+    /// the record of what was chosen; each preview plans a copy, so the view never mistakes a
+    /// re-planned task for the one it already drew.
+    /// </summary>
+    public ConversionTask CloneInputs()
+    {
+        var copy = new ConversionTask
+        {
+            Kind                    = Kind,
+            OutputMode              = OutputMode,
+            AnimationRequest        = AnimationRequest,
+            TargetCustomizationKind = TargetCustomizationKind,
+            SourceGenderRace        = SourceGenderRace,
+            TargetGenderRace        = TargetGenderRace,
+            ModDirectory            = ModDirectory,
+            Slot                    = Slot,
+            OldIdPadded             = OldIdPadded,
+            NewIdPadded             = NewIdPadded,
+            IgnoreSlot              = IgnoreSlot,
+            TargetSlot              = TargetSlot,
+            TargetVariant           = TargetVariant,
+            SourceVariant           = SourceVariant,
+            KeepSourcePaths         = KeepSourcePaths,
+        };
+        copy.ExtraTargets.AddRange(ExtraTargets);
+        return copy;
+    }
+
     // ── State ────────────────────────────────────────────────────────────────
 
     public bool IsPlanned    { get; set; } = false;

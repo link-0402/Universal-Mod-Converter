@@ -45,12 +45,6 @@ public sealed partial class ConverterSession
         EquipSlot.Facewear,
     ];
 
-    private static readonly string[] RaceNames =
-    [
-        "Midlander", "Highlander", "Elezen", "Miqo'te", "Roegadyn",
-        "Lalafell", "Au Ra", "Hrothgar", "Viera",
-    ];
-
     private readonly Plugin _plugin;
     private bool _initialized;
     private DateTime _lastPenumbraPoll = DateTime.MinValue;
@@ -58,7 +52,7 @@ public sealed partial class ConverterSession
     public ConverterSession(Plugin plugin)
     {
         _plugin    = plugin;
-        OutputMode = plugin.Configuration.CreateNewMod ? ConversionOutputMode.NewMod : ConversionOutputMode.InPlace;
+        OutputMode = plugin.Configuration.OutputMode;
     }
 
     public BackgroundRunner Runner { get; } = new();
@@ -76,7 +70,6 @@ public sealed partial class ConverterSession
 
     public string ModDirectory { get; private set; } = string.Empty;
     public string? ModError { get; private set; }
-    public PenumbraModFormat? ModFormat { get; private set; }
     public IReadOnlyList<DetectedItem> DetectedItems { get; private set; } = [];
     public int SourceIndex { get; private set; } = -1;
     private bool _scanPending;
@@ -105,6 +98,40 @@ public sealed partial class ConverterSession
     public ushort TargetRace { get; private set; } = 101;
     public int TargetCustomizationId { get; private set; } = 1;
 
+    /// <summary>
+    /// Texture-only customization roots: further races the same textures are also written for.
+    /// The primary target is never in here.
+    /// </summary>
+    private readonly SortedSet<ushort> _extraTargetRaces = [];
+
+    public IReadOnlyCollection<ushort> ExtraTargetRaces => _extraTargetRaces;
+
+    /// <summary>Texture-only roots: keep the source race's paths as well as writing the targets.</summary>
+    public bool KeepSourcePaths { get; private set; }
+
+    /// <summary>Whether the selected root can be written for several races at once.</summary>
+    public bool CanFanOutTextures => Source is { IsCustomization: true, IsTextureOnly: true };
+
+    public void SetExtraTargetRace(ushort race, bool on)
+    {
+        if (race == TargetRace || !AllowedTargetRaces.Contains(race)) return;
+        if (on ? !_extraTargetRaces.Add(race) : !_extraTargetRaces.Remove(race)) return;
+        MarkDirty();
+    }
+
+    public void SetKeepSourcePaths(bool keep)
+    {
+        if (keep == KeepSourcePaths) return;
+        KeepSourcePaths = keep;
+        MarkDirty();
+    }
+
+    private void ClearFanOut()
+    {
+        _extraTargetRaces.Clear();
+        KeepSourcePaths = false;
+    }
+
     // ── Output ───────────────────────────────────────────────────────────────
 
     public ConversionOutputMode OutputMode { get; private set; }
@@ -125,12 +152,18 @@ public sealed partial class ConverterSession
 
     public ConversionTask Task { get; private set; } = new();
     private int _inputsVersion;
+
+    /// <summary>
+    /// Bumped by what the plan is made of — its entries, the output mode, the mod. The From and
+    /// To cards only choose what to add next, so changing them does not make a preview stale.
+    /// </summary>
+    private int _planVersion;
     private int _plannedVersion = -1;
     private int _autoPreviewVersion = -1;
     private DateTime _lastInputChange = DateTime.MinValue;
 
     /// <summary>A plan exists and was made from exactly the current inputs.</summary>
-    public bool PlanIsCurrent => Task.IsPlanned && _plannedVersion == _inputsVersion;
+    public bool PlanIsCurrent => Task.IsPlanned && _plannedVersion == _planVersion;
 
     public ResultBanner? Result { get; set; }
 
@@ -172,12 +205,12 @@ public sealed partial class ConverterSession
             return;
         }
 
-        // Retargeting rebuilds every animation, which is too slow to redo on each change.
-        var slowPreview = Source?.Animation != null && AnimationOperation == AnimationOperation.Retarget;
-        if (Config.AutoRefreshPreview && !slowPreview && !PlanIsCurrent && _autoPreviewVersion != _inputsVersion &&
+        // The preview follows the plan: only adding, removing or switching entries, the output
+        // mode and the mod change it, so even a slow retarget is not redone on every click.
+        if (!PlanIsCurrent && _autoPreviewVersion != _planVersion &&
             DateTime.UtcNow - _lastInputChange > AutoPreviewDelay && PreviewBlockReason == null)
         {
-            _autoPreviewVersion = _inputsVersion;
+            _autoPreviewVersion = _planVersion;
             Preview();
         }
     }
@@ -211,8 +244,24 @@ public sealed partial class ConverterSession
     // Readiness
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Why Preview cannot run right now, or null.</summary>
+    /// <summary>
+    /// Why Preview cannot run right now, or null. Once conversions have been queued they are
+    /// what gets previewed, so the cards only have to be complete when the queue is empty.
+    /// </summary>
     public string? PreviewBlockReason
+    {
+        get
+        {
+            if (Runner.IsBusy) return "Wait for the current operation to finish.";
+            if (!HasMod) return "Select a mod.";
+            if (ModError != null) return ModError;
+            if (_queue.Count == 0) return "Add a conversion to the plan first.";
+            return _queue.Any(e => e.Enabled) ? null : "Enable at least one conversion in the plan.";
+        }
+    }
+
+    /// <summary>Why the source and target chosen in the cards are not a complete conversion, or null.</summary>
+    public string? SelectionBlockReason
     {
         get
         {
@@ -239,11 +288,11 @@ public sealed partial class ConverterSession
         get
         {
             if (PreviewBlockReason is { } reason) return reason;
-            if (!Task.IsPlanned) return "Preview the conversion first.";
-            if (!PlanIsCurrent) return "The inputs changed since the preview. Preview again.";
+            if (!Task.IsPlanned || !PlanIsCurrent) return "Updating the preview…";
             if (Task.HasBlockers) return "The plan has blockers. Resolve them first.";
             if (Task.IsApplied) return "This plan was already applied.";
-            if (OutputMode == ConversionOutputMode.NewMod)
+            if (_queue.Count > 0 && _queue.All(e => !e.Enabled)) return "Enable at least one conversion in the list.";
+            if (OutputMode.IsNewMod())
             {
                 if (string.IsNullOrWhiteSpace(NewModName)) return "Enter a name for the new mod.";
                 if (NewModPath is not { } path) return "Cannot determine where to create the new mod.";
@@ -268,13 +317,13 @@ public sealed partial class ConverterSession
         ModDirectory  = directory;
         UpdateModName();
         ModError      = null;
-        ModFormat     = null;
         DetectedItems = [];
         SourceIndex   = -1;
         ClearGearTarget();
+        _queue.Clear();
         Task          = new ConversionTask();
         Result        = null;
-        MarkDirty();
+        MarkPlanDirty();
 
         Config.LastModDirectory = directory;
         Config.Save();
@@ -295,14 +344,12 @@ public sealed partial class ConverterSession
         Runner.TryRun("Scanning mod…", () =>
         {
             var (ok, error) = _plugin.Converter.ValidateModDirectory(directory);
-            if (!ok) return (Error: error, Format: (PenumbraModFormat?)null, Items: new List<DetectedItem>());
-            var format = PenumbraMod.Load(directory).Format;
-            return (Error: (string?)null, Format: (PenumbraModFormat?)format, Items: GameData.ScanModForItems(directory));
+            if (!ok) return (Error: error, Items: new List<DetectedItem>());
+            return (Error: (string?)null, Items: GameData.ScanModForItems(directory));
         }, result =>
         {
             if (!SamePath(directory, ModDirectory)) return; // another mod was selected meanwhile
             ModError      = result.Error;
-            ModFormat     = result.Format;
             DetectedItems = result.Items;
             SourceIndex   = -1;
             ClearGearTarget();
@@ -332,6 +379,7 @@ public sealed partial class ConverterSession
         var source  = DetectedItems[index];
         TargetSlot  = source.Slot;
         ClearGearTarget();
+        ClearFanOut();
         if (source.Animation is { } animation)
             ResetAnimationTarget(animation);
         else if (source.IsCustomization)
@@ -398,6 +446,7 @@ public sealed partial class ConverterSession
     {
         if (race == TargetRace || !AllowedTargetRaces.Contains(race)) return;
         TargetRace = race;
+        _extraTargetRaces.Remove(race);
         _fixTargetId = true;
         MarkDirty();
     }
@@ -482,13 +531,25 @@ public sealed partial class ConverterSession
     // Output
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Why the converted item cannot be added beside the original, or null. Hair, face, tail
+    /// and Viera-ear conversions rewrite their model and material files in place, which would
+    /// retarget the original as well, so they still have to replace it.
+    /// </summary>
+    public string? AddToModBlockReason
+        => _queue.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind)) is { } entry
+            ? $"{CustomizationKinds.Get(entry.Kind).DisplayName} conversions replace the original; " +
+              "create a new mod to keep it."
+            : null;
+
     public void SetOutputMode(ConversionOutputMode mode)
     {
+        if (mode == ConversionOutputMode.AddToMod && AddToModBlockReason != null) return;
         if (mode == OutputMode) return;
         OutputMode = mode;
-        Config.CreateNewMod = mode == ConversionOutputMode.NewMod;
+        Config.OutputMode = mode;
         Config.Save();
-        MarkDirty(); // The gear plan depends on the output mode.
+        MarkPlanDirty(); // The gear plan depends on the output mode.
     }
 
     public void SetNewModName(string name)
@@ -506,15 +567,20 @@ public sealed partial class ConverterSession
     private void RefreshDefaultNewModName()
     {
         if (!_newModNameIsDefault) return;
-        var label = Source switch
+        var label = _queue.Count switch
         {
-            null => string.Empty,
-            { Animation: { } animation } => AnimationNameLabel(animation),
-            { IsCustomization: true } => $"{RaceLabel(TargetRace)} {TargetOptionLabel}",
-            _ when TargetItem != null => $"{SlotInfo.DisplayLabelMap[TargetSlot]} {TargetItem.Name}",
-            _ => SlotInfo.DisplayLabelMap[TargetSlot],
+            0 => string.Empty,
+            1 => _queue[0].Target.Name,
+            _ => $"{_queue.Count} conversions",
         };
         NewModName = HasMod ? (label.Length == 0 ? ModName : $"{ModName} ({label})") : string.Empty;
+    }
+
+    /// <summary>The plan itself changed: its entries, the output mode or the mod.</summary>
+    private void MarkPlanDirty()
+    {
+        _planVersion++;
+        MarkDirty();
     }
 
     private void MarkDirty()
@@ -528,12 +594,18 @@ public sealed partial class ConverterSession
     // Preview
     // ─────────────────────────────────────────────────────────────────────────
 
-    public void Preview()
+    /// <summary>The conversion the current inputs describe, ready to plan.</summary>
+    private ConversionTask BuildTask(DetectedItem source)
     {
-        if (PreviewBlockReason != null || Source is not { } source) return;
+        var task = BuildTaskCore(source);
+        AddExtraTargets(task, source);
+        return task;
+    }
 
+    private ConversionTask BuildTaskCore(DetectedItem source)
+    {
         var target = TargetItem;
-        var task = source.Animation is { } animation
+        return source.Animation is { } animation
             ? new ConversionTask
             {
                 Kind             = AssetKind.Animation,
@@ -554,11 +626,43 @@ public sealed partial class ConverterSession
                 SourceVariant           = source.Variant,
                 SourceGenderRace        = source.GenderRace,
                 TargetGenderRace        = source.IsCustomization ? TargetRace : null,
+                KeepSourcePaths         = source is { IsCustomization: true, IsTextureOnly: true } && KeepSourcePaths,
                 TargetSlot              = !source.IsCustomization && TargetSlot != source.Slot ? TargetSlot : null,
             };
-        if (task.Kind == AssetKind.Animation && task.AnimationRequest == null) return;
-        var version     = _inputsVersion;
-        var description = Describe(source);
+    }
+
+    /// <summary>Adds the extra races a texture-only root is also written for.</summary>
+    private void AddExtraTargets(ConversionTask task, DetectedItem source)
+    {
+        if (source is not { IsCustomization: true, IsTextureOnly: true }) return;
+        foreach (var race in _extraTargetRaces.Where(r => r != TargetRace))
+            task.ExtraTargets.Add(new ConversionEndpoint(TargetCustomizationKind, (ushort)TargetCustomizationId,
+                GenderRace: race));
+    }
+
+    public void Preview()
+    {
+        if (PreviewBlockReason != null) return;
+
+        ConversionTask task;
+        string description;
+        var enabled = _queue.Where(e => e.Enabled).ToList();
+        if (enabled.Count == 1)
+        {
+            // One conversion needs no merging: it runs the way it always has, with everything
+            // a single conversion supports, customization and mesh editing included.
+            task = enabled[0].Task.CloneInputs();
+            task.OutputMode = OutputMode;
+            description = enabled[0].Description;
+        }
+        else
+        {
+            task = new ConversionTask { ModDirectory = ModDirectory, OutputMode = OutputMode };
+            task.Entries.AddRange(enabled);
+            description = DescribeQueue();
+        }
+
+        var version = _planVersion;
         Result = null;
 
         Runner.TryRun("Planning…", () =>
@@ -568,11 +672,14 @@ public sealed partial class ConverterSession
         }, planned =>
         {
             CarryOverMeshRemovals(Task, planned);
+            ApplyForcedMeshRemovals(planned);
             Task = planned;
             _plannedVersion = version;
             if (planned.IsPlanned)
             {
-                var counts = planned.GearPlan is { } plan
+                var counts = planned.MergedPlan is { } merged
+                    ? $"{merged.Entries.Count(e => !e.Rejected)} conversion(s), {merged.Files.Count} file operation(s)"
+                    : planned.GearPlan is { } plan
                     ? $"{plan.Changes.Count} change(s), {plan.Files.Count} file operation(s)"
                     : planned.AnimationPlan is { } animationPlan
                     ? $"{animationPlan.Changes.Count} change(s), {animationPlan.Files.Count} file operation(s)"
@@ -603,14 +710,75 @@ public sealed partial class ConverterSession
     /// <summary>Why mesh groups cannot be edited right now, or null.</summary>
     public string? MeshEditBlockReason
         => Runner.IsBusy ? "Wait for the current operation to finish."
-            : Task.IsApplied ? "This plan was already applied. Preview again to make another conversion."
+            : Task.IsApplied ? "This plan was already applied. Add a conversion to the plan to make another."
             : null;
+
+    /// <summary>
+    /// Whether <paramref name="group"/> can never be kept: a body material (skin, bibo, pubes,
+    /// piercings) on an accessory. Only equipment slots send those to the character's body; an
+    /// accessory looks for them in its own folder, never finds them, and then draws nothing of
+    /// the model at all. Such groups are switched off when the plan is made and stay off.
+    /// </summary>
+    public bool IsMeshGroupForced(GearOutputModel model, int group)
+        => IsMeshGroupForced(Task, model, group);
+
+    private static bool IsMeshGroupForced(ConversionTask task, GearOutputModel model, int group)
+        => task.GearPlan?.Request.Target.IsAccessory == true &&
+           group >= 0 && group < model.Groups.Count && model.Groups[group].IsSkin;
+
+    /// <summary>
+    /// Whether <paramref name="group"/> starts switched off: a body material (skin, bibo, pubes,
+    /// piercings) in a model that changes slots. Those are the old slot's body parts, which would
+    /// show where the new item sits. Unlike <see cref="IsMeshGroupForced"/>, the user may tick it
+    /// back on.
+    /// </summary>
+    public bool IsMeshGroupOffByDefault(GearOutputModel model, int group)
+        => IsMeshGroupOffByDefault(Task, model, group);
+
+    private static bool IsMeshGroupOffByDefault(ConversionTask task, GearOutputModel model, int group)
+        => task.GearPlan is { } plan && plan.Request.Source.Slot != plan.Request.Target.Slot &&
+           group >= 0 && group < model.Groups.Count && model.Groups[group].IsSkin;
+
+    /// <summary>
+    /// Switches off every group that cannot be kept, and, the first time a model is planned,
+    /// every group that starts off; never so many that the model would be left empty.
+    /// </summary>
+    private static void ApplyForcedMeshRemovals(ConversionTask task)
+    {
+        foreach (var model in task.OutputModels.Where(m => m.Editable))
+        {
+            var firstTime = task.MeshDefaultsApplied.Add(model.Local);
+            var forced = Enumerable.Range(0, model.Groups.Count)
+                .Where(g => IsMeshGroupForced(task, model, g) || firstTime && IsMeshGroupOffByDefault(task, model, g))
+                .ToList();
+            if (forced.Count == 0) continue;
+            var (groups, parts) = CurrentRemoval(task, model);
+            groups.UnionWith(forced);
+            parts.RemoveWhere(p => forced.Contains(p.Group));
+            StoreRemoval(task, model, groups, parts);
+        }
+    }
 
     public bool IsMeshGroupRemoved(GearOutputModel model, int group)
         => Task.MeshRemovals.TryGetValue(model.Local, out var removal) && removal.Groups.Contains(group);
 
     public int RemovedMeshGroupCount(GearOutputModel model)
         => Task.MeshRemovals.TryGetValue(model.Local, out var removal) ? removal.Groups.Length : 0;
+
+    public bool IsMeshPartRemoved(GearOutputModel model, int group, int part)
+        => Task.MeshRemovals.TryGetValue(model.Local, out var removal) &&
+           (removal.Groups.Contains(group) || removal.PartsOrEmpty.Contains(new MeshPartRef(group, part)));
+
+    /// <summary>How many parts of <paramref name="group"/> are left out, counting a removed group as all of them.</summary>
+    public int RemovedMeshPartCount(GearOutputModel model, int group)
+    {
+        if (!Task.MeshRemovals.TryGetValue(model.Local, out var removal) || group < 0 || group >= model.Groups.Count) return 0;
+        return removal.Groups.Contains(group) ? model.Groups[group].Parts : removal.PartsOrEmpty.Count(p => p.Group == group);
+    }
+
+    /// <summary>Parts left out of groups that stay, over the whole model.</summary>
+    public int RemovedMeshPartCount(GearOutputModel model)
+        => Task.MeshRemovals.TryGetValue(model.Local, out var removal) ? removal.PartsOrEmpty.Length : 0;
 
     /// <summary>
     /// Keeps or removes mesh group <paramref name="group"/> in every given model. A model
@@ -621,20 +789,63 @@ public sealed partial class ConverterSession
         if (MeshEditBlockReason != null) return;
         foreach (var model in models)
         {
-            if (!model.Editable || group < 0 || group >= model.Groups.Count) continue;
-            var groups = Task.MeshRemovals.TryGetValue(model.Local, out var current) ? current.Groups.ToHashSet() : new HashSet<int>();
+            if (!model.Editable || group < 0 || group >= model.Groups.Count || IsMeshGroupForced(model, group)) continue;
+            var (groups, parts) = CurrentRemoval(Task, model);
+            parts.RemoveWhere(p => p.Group == group);
             if (removed) groups.Add(group);
             else groups.Remove(group);
-            if (groups.Count >= model.Groups.Count) continue;
-            if (groups.Count == 0) Task.MeshRemovals.Remove(model.Local);
-            else Task.MeshRemovals[model.Local] = new MeshRemoval([.. groups.Order()], model.Groups.Count);
+            StoreRemoval(Task, model, groups, parts);
         }
+    }
+
+    /// <summary>
+    /// Keeps or removes one part of a mesh group in every given model. Removing a group's last
+    /// part removes the group; keeping a part of a removed group brings the group back with
+    /// only that part.
+    /// </summary>
+    public void SetMeshPartRemoved(IEnumerable<GearOutputModel> models, int group, int part, bool removed)
+    {
+        if (MeshEditBlockReason != null) return;
+        foreach (var model in models)
+        {
+            if (!model.Editable || group < 0 || group >= model.Groups.Count || part < 0 || part >= model.Groups[group].Parts ||
+                IsMeshGroupForced(model, group))
+                continue;
+            var (groups, parts) = CurrentRemoval(Task, model);
+            if (groups.Remove(group))
+                for (var p = 0; p < model.Groups[group].Parts; p++) parts.Add(new MeshPartRef(group, p));
+
+            var target = new MeshPartRef(group, part);
+            if (removed) parts.Add(target);
+            else parts.Remove(target);
+
+            if (parts.Count(p => p.Group == group) >= model.Groups[group].Parts)
+            {
+                parts.RemoveWhere(p => p.Group == group);
+                groups.Add(group);
+            }
+            StoreRemoval(Task, model, groups, parts);
+        }
+    }
+
+    private static (HashSet<int> Groups, HashSet<MeshPartRef> Parts) CurrentRemoval(ConversionTask task, GearOutputModel model)
+        => task.MeshRemovals.TryGetValue(model.Local, out var current)
+            ? (current.Groups.ToHashSet(), current.PartsOrEmpty.ToHashSet())
+            : ([], []);
+
+    private static void StoreRemoval(ConversionTask task, GearOutputModel model, HashSet<int> groups, HashSet<MeshPartRef> parts)
+    {
+        if (groups.Count >= model.Groups.Count) return; // A model keeps at least one group.
+        if (groups.Count == 0 && parts.Count == 0) task.MeshRemovals.Remove(model.Local);
+        else task.MeshRemovals[model.Local] = new MeshRemoval([.. groups.Order()], model.Groups.Count,
+            [.. parts.OrderBy(p => p.Group).ThenBy(p => p.Part)]);
     }
 
     public void KeepAllMeshGroups(IEnumerable<GearOutputModel> models)
     {
         if (MeshEditBlockReason != null) return;
         foreach (var model in models) Task.MeshRemovals.Remove(model.Local);
+        ApplyForcedMeshRemovals(Task);
     }
 
     /// <summary>Re-previewing keeps removals for output models whose layout did not change.</summary>
@@ -645,10 +856,16 @@ public sealed partial class ConverterSession
             var before = previous.OutputModels.FirstOrDefault(m => string.Equals(m.Local, local, StringComparison.OrdinalIgnoreCase));
             var after  = planned.OutputModels.FirstOrDefault(m => string.Equals(m.Local, local, StringComparison.OrdinalIgnoreCase));
             if (before == null || after is not { Editable: true } || after.Groups.Count != removal.ExpectedGroupCount ||
-                !before.Groups.Select(g => g.Material).SequenceEqual(after.Groups.Select(g => g.Material)))
+                !before.Groups.Select(g => (g.Material, g.Parts)).SequenceEqual(after.Groups.Select(g => (g.Material, g.Parts))))
                 continue;
             planned.MeshRemovals[after.Local] = removal;
         }
+        // A model whose layout survived keeps what the user made of its defaults.
+        foreach (var local in previous.MeshDefaultsApplied)
+            if (planned.OutputModels.FirstOrDefault(m => string.Equals(m.Local, local, StringComparison.OrdinalIgnoreCase)) is { } after &&
+                previous.OutputModels.FirstOrDefault(m => string.Equals(m.Local, local, StringComparison.OrdinalIgnoreCase)) is { } before &&
+                before.Groups.Select(g => (g.Material, g.Parts)).SequenceEqual(after.Groups.Select(g => (g.Material, g.Parts))))
+                planned.MeshDefaultsApplied.Add(after.Local);
     }
 
     /// <summary>Short description of the current conversion, e.g. "Body 0164-1 → Hands 0200-1".</summary>
@@ -668,19 +885,22 @@ public sealed partial class ConverterSession
 
     public void Apply()
     {
-        if (ApplyBlockReason != null || Source is not { } source) return;
+        if (ApplyBlockReason != null) return;
+        var enabledEntries = _queue.Where(e => e.Enabled).ToList();
+        if (enabledEntries.Count == 0) return;
 
         var task        = Task;
-        var isNewMod    = OutputMode == ConversionOutputMode.NewMod;
+        var isNewMod    = OutputMode.IsNewMod();
         var newModDir   = NewModPath;
         var newModName  = NewModName.Trim();
         var sourceName  = ModName;
-        var description = Describe(source);
+        var description = enabledEntries.Count == 1 ? enabledEntries[0].Description : DescribeQueue();
         Result = null;
         Log.BeginOperation(isConversion: true);
-        Log.Add($"Converting {description} ({(isNewMod ? $"new mod '{newModName}'" : "in place")})…");
+        Log.Add($"Converting {description} ({OutputModeLabel(OutputMode, newModName)})…");
         if (task.MeshRemovals.Count > 0)
-            Log.Add($"Removing {task.MeshRemovals.Values.Sum(r => r.Groups.Length)} mesh group(s) from {task.MeshRemovals.Count} model(s).");
+            Log.Add($"Removing {task.MeshRemovals.Values.Sum(r => r.Groups.Length)} mesh group(s) and " +
+                    $"{task.MeshRemovals.Values.Sum(r => r.PartsOrEmpty.Length)} single part(s) from {task.MeshRemovals.Count} model(s).");
 
         void Post(string message) => Runner.Post(() => Log.Add(message));
 
@@ -702,6 +922,8 @@ public sealed partial class ConverterSession
         {
             if (result.Output == null)
             {
+                // Whatever went wrong, the plan it was made from is spent; preview it afresh.
+                MarkPlanDirty();
                 Result = new ResultBanner(BannerKind.Error,
                     task.ResultStatus == ConversionResultStatus.RolledBack ? "Conversion rolled back" : "Conversion failed",
                     task.ErrorMessage ?? "See the log for details.");
@@ -723,6 +945,7 @@ public sealed partial class ConverterSession
         Config.LastNewModName = name;
         var record = History.Record(task, description, sourceName);
         var folder = Path.GetFileName(outputDir);
+        ClearQueue();
 
         if (!PenumbraAvailable)
         {
@@ -785,6 +1008,8 @@ public sealed partial class ConverterSession
 
         _plugin.Converter.ConfirmInPlace(task, Log.Add);
         var record = History.Record(task, description, sourceName);
+        _plugin.RunBackupMaintenance();
+        ClearQueue();
         Log.Add(LogLevel.Success, $"Converted {description} in place.");
         Result = new ResultBanner(problems > 0 ? BannerKind.Warning : BannerKind.Success, "Mod converted in place",
             (PenumbraAvailable ? "The mod was reloaded in Penumbra." : "Reload the mod in Penumbra to see the change.") +
@@ -837,6 +1062,7 @@ public sealed partial class ConverterSession
         Runner.TryRun("Reverting…", () => History.Revert(record, msg => Runner.Post(() => Log.Add(msg))), result =>
         {
             History.MarkReverted(record, result);
+            _plugin.RunBackupMaintenance();
             if (!result.Success)
             {
                 Result = new ResultBanner(BannerKind.Error, "Revert failed", result.Message);
@@ -847,7 +1073,7 @@ public sealed partial class ConverterSession
             {
                 // The new mod's folder was already moved away, so this only unregisters it.
                 // A restored in-place mod is reloaded so Penumbra picks up the original again.
-                var updated = record.Mode == ConversionOutputMode.NewMod && !Directory.Exists(record.PublishedPath)
+                var updated = record.Mode.IsNewMod() && !Directory.Exists(record.PublishedPath)
                     ? _plugin.PenumbraIpc.DeleteMod(folder)
                     : _plugin.PenumbraIpc.ReloadMod(folder);
                 if (!updated)
@@ -857,7 +1083,7 @@ public sealed partial class ConverterSession
 
             Log.Add(LogLevel.Success, result.Message);
 
-            if (record.Mode == ConversionOutputMode.NewMod && SamePath(record.PublishedPath, ModDirectory))
+            if (record.Mode.IsNewMod() && SamePath(record.PublishedPath, ModDirectory))
                 SelectMod(record.SourceModDirectory);
             else if (SamePath(record.SourceModDirectory, ModDirectory))
             {
@@ -876,12 +1102,15 @@ public sealed partial class ConverterSession
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    public static string RaceLabel(ushort genderRace)
+    public static string RaceLabel(ushort genderRace) => RaceNames.Name(genderRace);
+
+    /// <summary>How a conversion describes its destination in the log.</summary>
+    public static string OutputModeLabel(ConversionOutputMode mode, string newModName) => mode switch
     {
-        var index = genderRace / 100 - 1;
-        if (genderRace % 100 != 1 || index < 0 || index >= RaceNames.Length * 2) return $"c{genderRace:D4}";
-        return $"{RaceNames[index / 2]} {(index % 2 == 0 ? "Male" : "Female")}";
-    }
+        ConversionOutputMode.NewMod   => $"new mod '{newModName}'",
+        ConversionOutputMode.AddToMod => "added to this mod",
+        _                             => "in place",
+    };
 
     public static void OpenFolder(string path)
     {

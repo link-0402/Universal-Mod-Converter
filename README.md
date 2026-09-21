@@ -9,6 +9,7 @@ A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](ht
 - **Gear and facewear:** retarget a modded item to any other wearable item, including a different slot (for example body → hands). Weapons are not supported.
 - **Hair, faces, tails and Viera ears:** retarget to another ID and/or another race, with the model reshaped for the target race. Tails and Viera ears can convert into each other.
 - **Animations:** move an idle to another idle slot (optionally as a Penumbra option group with one option per slot), move an emote's animations to another emote, and retarget body animations to other races' skeletons.
+- **Merge modpacks:** combine two modpacks — for example a base mod with materials and textures and a separate pack of upscaled models — into one new mod, with an explicit choice of which one wins where both change the same file.
 - **Safe by default:** everything is previewed before anything is written, output is built in a staging folder and verified, and every conversion can be reverted.
 
 ## Installation
@@ -34,51 +35,60 @@ Open the window with `/apmc` (settings: `/apmcconfig` or the cog icon).
 3. **To:**
    - Gear: choose the slot and the target item.
    - Hair, faces, tails and ears: choose the target race and one of the options players can pick for it, e.g. "Face 101 (Keeper of the Moon)".
-4. **Output:** keep **Create a new mod** (recommended), or choose **Convert in place** to edit the mod itself.
-5. **Review:** the conversion previews automatically once the inputs are complete. The line above the buttons always says what is still missing.
-   - **Plan** lists every change, with blockers and warnings first.
+4. **Add selection to conversion plan.** Repeat steps 2–4 for anything else to convert in the same pass.
+5. **Output:** keep **Create a new mod** (recommended), choose **Add to this mod** to put the converted item beside the original, or **Convert in place** to replace the original.
+6. **Review:** the plan is previewed automatically whenever it changes; there is nothing to click. The line above the button always says what is still missing.
+   - **Plan** lists what to check, with problems first; **Advanced details** lists every change.
    - **Mesh groups** (gear) lets you leave parts of the model out, see [Changing slots](#changing-slots).
-6. Click **Create new mod** or **Convert in place**. The result is verified the way the game would load it, and the new or updated mod is loaded in Penumbra.
+7. Click **Create new mod**, **Add to this mod** or **Convert in place**. The result is verified the way the game would load it, and the new or updated mod is loaded in Penumbra.
 
-Changed your mind? Click **Revert** on the result, or in the **History** tab. Reverting a new mod removes it from Penumbra; reverting an in-place conversion restores the original mod.
+### The conversion plan
 
-Scanning, previewing, converting and reverting all run in the background, so the game keeps running while large models are processed.
+Nothing is converted until it is in the **conversion plan**, the card right under the item pickers. Set up a conversion in the From and To cards and click **Add selection to conversion plan**; the cards are then free for the next one, and changing them never affects what is already planned. Preview and Apply work on the plan only, so even a single conversion is confirmed by adding it. Each entry shows its source and target with their icons, and can be switched off or removed; **Clear the plan** at the top of the card removes them all.
 
-## Changing slots
+Several entries are planned against the mod as it is on disk and merged into a single pass, so one apply produces one result and one entry in **History**, revertable as a whole. Two entries that would undo each other — the same item converted twice, the same game path claimed twice, the same file written by one and moved by another — cannot run together: the overlapping one is marked in the plan with the reason, and nothing is written until you remove one of them. Different slots of the same gear set are different items and convert together fine. A hair, face, tail or Viera-ear conversion has to be the plan's only entry.
 
-Converting between slots changes which item loads the model. **It does not change the model itself:** a body model converted to hands still contains the whole body mesh and is drawn whenever the hands item is worn.
+The **Plan** tab lists what to check before applying; **Advanced details** adds the tables of game paths, metadata entries and file operations behind the plan.
 
-After the preview, the **Mesh groups** tab lists every model the new item will use, with each mesh group's material, triangle count, parts and attributes. Skin meshes are marked. Untick the groups that don't belong on the new slot. Race versions of the same model are grouped and edited together.
+### Skin and face textures
 
-Every model keeps at least one mesh group. MDL v5 models, and files an in-place conversion shares with other items, can't be edited.
+Skin textures (`chara/human/cXXXX/obj/body/…`) are detected like hair, faces, tails and Viera ears, and convert to other races the same way; skins and faces stay within their gender, because the bodies and faces are shaped differently. When a skin or face root in the mod holds **only textures**, the target card offers **Also for**: the same textures are written for further races too, all pointing at the one file — a texture has no paths inside it, so nothing has to differ between races. **Keep the original race too** leaves the source race with the textures instead of moving them. A root that also replaces a model or material cannot be shared this way, because those files name their race inside them; convert it to a single target instead.
 
-## Hair, faces, tails and ears
+### Facial expressions
 
-- **Only player options are offered.** The options come from the game's character creation data, not hard-coded ranges, so NPC-only faces, hairs and tails are excluded. Unlockable hairstyles are included. When only one clan can pick an option, the clan is named.
-- **Race rules:** Lalafell convert only to other Lalafell, and faces stay within the same gender. These rules are also enforced when planning, not just in the UI.
-- **Cross-race conversions** reshape the model along the game's race tree (`human.pbd`), one step at a time, matching TexTools' conversion order. A bone that can't be resolved is left unchanged and reported instead of blocking the conversion. Racial reshaping requires MDL v6; same-race conversions also work with MDL v5.
-- **Shared materials** are resolved the way the game loads them. For example, hairs 101–200 share the Midlander materials, and Hrothgar tails share the `t0001` root. Shared materials are copied, never moved or overwritten, so other races keep working.
-- **Extra skeletons** (EST / physics bones) of hair and faces are carried over explicitly for the target. A skeleton that doesn't exist for the target race is reported.
-- **Tails ↔ Viera ears** rename the part and material layout. Real tails use tail bones that Viera don't have; this is reported.
+A pose's face lives inside the same `.pap` as extra animations, one per face type, named after the body animation they play with. **Also attach a facial expression** (on a swap or retarget) or **Only add an expression** copies those facial animations from a donor into the converted animation, renames them after its body animation, and leaves every existing animation in the file byte for byte. The donor is either a game emote — read for each race from that race's own file, since every race animates a different face — or any `.pap` with a face in another installed Penumbra mod. A face type the animation already has keeps its own. Attaching changes the animation file itself, so on its own it needs **Create a new mod** or **Convert in place**.
 
-## Animations
+### Changing slots
 
-The mod's body animations (`chara/human/c####/animation/a####/…pap`) are listed as **Idle**, **Emote** or **Animation** sources. An idle slot is its loop together with its start; an emote is every animation of that emote the mod replaces. Facial animations are not supported.
+Converting to another slot only changes which item loads the model; the geometry stays as it was, so a skirt converted to a bracelet still contains the skirt, and its skin. The **Mesh groups** tab lists every model the output ships, with a **Keep** checkbox per mesh group. A group made of several parts has an arrow that opens it, so each part can be kept or removed on its own; removing a group's last part removes the group. Models with the same layout, usually the race versions of one model, are edited together.
 
-- **Swap to another slot (idles):** standing, chair-sitting and ground-sitting idles move only within their own family. The slots are read from the game: the default member (`resident/idle`, `emote/sit`, `emote/jmn`) and every numbered `pose##`, `s_pose##` or `j_pose##`.
-  - **Replace one slot** moves the animation (in place, **Keep it in the current slot too** copies it instead).
-  - **Option group with a variant per slot** creates a single-select Penumbra group with one option per chosen slot, so the slot can be changed in Penumbra at any time. The original slot is selected by default. This needs the animation in the mod's default files.
-- **Swap to another emote:** each animation of the emote moves to the animation in the same position of the target emote (main, start, ground sitting, chair sitting, upper body). Sounds and effects stay those of the target emote.
-- **How a swap works:** the game plays the animation named by the destination's action timeline (`chara/action/<key>.tmb`), so the file is moved to the destination path and the animation, and the timeline inside the file, are renamed to that name. Other animations in the file are left alone. The game's `resident/idle.pap` also holds a hit reaction (`cbna_add_dmg_f`); a file moved there without it is reported, because the game cannot play it while the mod is enabled.
-- **Retarget to other races** rebuilds the animation for each chosen race's base skeleton and writes it to that race's path. Bones are matched by name; rotations and scale transfer relative to each skeleton's rest pose, and movement away from the rest pose is scaled to the target's bone lengths, so a Lalafell does not jump as high as a Roegadyn. Bones the target does not have are dropped and their motion carried by the bones below them. The source skeleton is the one the file says it was made for; a skeleton the mod itself replaces is used instead of the game's. Every rebuilt animation is decoded again and compared frame by frame before anything is written. Retargeting uses the game's own animation runtime and is not previewed automatically, because it takes a moment per file.
-- **Race inheritance:** a race without its own file plays the one of its parent race in the game's race tree (`human.pbd`, for example Lalafell female → Lalafell male → Midlander male). The preview lists which other races each new file also covers, and a swap takes the destination name from the parent race when a race has no file of its own.
+To see what you are choosing, turn on **Show my choices on my character**: your character shows the model without the mesh groups and parts you untick, and is redrawn (a short blink) each time you change a checkbox. The preview only runs while you wear the original item with the source mod enabled; **Equip** puts the item on your character with Glamourer until you change gear. It uses a temporary Penumbra mod (priority 9999) with a copy of the source model, which goes away when you turn the preview off or leave the tab; nothing is written to your mods.
+
+Mesh groups with a body material (skin, bibo, pubes or piercings) are switched off automatically whenever the model changes slots: they are body parts of the old slot. On an equipment slot you can tick them back on. On an accessory they stay off, because an accessory cannot load those materials and the game would not draw the model at all.
+
+Removed parts are hidden in place, their triangles collapsed so nothing else in the file moves; removed groups are taken out of the model, and any material no remaining part uses is dropped with them.
+
+### Merging modpacks
+
+Some mods are split across modpacks: a base mod with the materials, textures and other models, and a second pack that only replaces some models with upscaled ones. Neither works right on its own. **Merge modpacks** (top right of the main window) opens a window where you choose the two modpacks and, explicitly, which of them wins when both change the same thing — there is no default. The merge is planned as soon as that is chosen, and lists everything both packs change before anything is written.
+
+- Where both change the same game file or metadata entry, the winner's version is kept.
+- Option groups with the same name and type are merged, options with the same name into one; everything else is added. The winner's groups are given a higher priority, so its options also win in Penumbra when options of both are on, and anything the winner sets by default is removed from the other pack's options, which would otherwise override it.
+- Identical files are stored once. Two different files that happen to share a name inside the mod folders are both kept, one of them renamed; the game only sees game paths, so this changes nothing in game.
+- The result is a new mod, built in a staging folder like any other and listed in **History**, from where it can be removed again. The two original modpacks are not changed; disable them in Penumbra once the merged mod is in use.
+
+When a converted item uses a material or texture that exists neither in the mod nor in the game, the warning points to this: the file usually lives in a base modpack that should be merged in first.
 
 ## Safety and reverting
 
 - **Nothing is written during preview.** Apply refuses to run if the source mod changed since the preview.
 - **New mods** are built in a hidden staging folder next to the source, validated, and only then moved into place.
-- **In-place conversions** build a full shadow copy, keep the original in a hidden `.apmc-backups` folder inside the Penumbra mod directory, and swap folders atomically. If Penumbra can't load the result, the original is restored automatically.
-- **Reverting never deletes anything.** The reverted output is moved into `.apmc-backups`. Delete that folder yourself to reclaim space.
+- **In-place conversions** build a full shadow copy, keep the original in a backup folder, and swap folders atomically. If Penumbra can't load the result, the original is restored automatically.
+- **Adding to a mod** writes the same way, but nothing is moved or deleted: the converted paths are added next to the original's, in the same options, so the toggles the mod already has control both. Where a converted file needs different contents — a model or material with paths inside it — it gets its own copy and the original is left alone. The one exception is an **IMC option group**, which carries a single item identifier and so cannot drive two items; the converted item gets its own copy of that group, and the plan says so.
+- **Reverting never deletes anything itself.** The reverted output is moved into that same backup folder.
+- **Backups expire.** They are kept for 14 days, and the newest 10 are kept regardless of age; both limits are configurable in Settings, along with a "Clean up now" button and how much space backups currently use. A backup you could still revert to is never deleted, however old it is — once a backup does expire, the History tab says so instead of offering a revert that cannot work.
+- **The backup folder is configurable** in Settings. By default it's the system temp folder, so the machine can reclaim the space too; when temp is on a different drive than the Penumbra mod directory it falls back to a hidden `.apmc-backups` folder beside the mods, because publishing a conversion moves whole folders and a move cannot cross drives. Set a custom path to keep backups somewhere else instead.
+- **A crash is cleaned up on the next start.** Leftover staging folders are removed, and a conversion interrupted between the two folder moves is rolled back to the original.
 - **Status is reported in two parts:** writing the output to disk, and Penumbra loading it. An output Penumbra couldn't load is shown with its path and a retry button.
 
 ## How gear conversion works
@@ -86,7 +96,9 @@ The mod's body animations (`chara/human/c####/animation/a####/…pap`) are liste
 Gear conversion works on the game paths a mod redirects, never on local file names. It follows the same chain the game does: a model loads its materials from `<root>/material/v<IMC material ID>/`, a material loads its textures, and a VFX loads its textures. Everything reached this way under the source item's root, and supplied by the mod, is moved to the target root. The references inside models, materials and effects are rewritten to match. Resources outside the source root, such as shared textures, keep their paths.
 
 - **Variants:** the chosen source variant defines the look (its material folder, attributes, decal and VFX, including the mod's own IMC overrides). Every variant of the target model is redirected to it, so all items sharing the target model look complete.
-- **Game files:** if the mod doesn't replace a model for some race, or a material the converted models need, the game's own file is copied into the output. The target never references files that don't exist.
+- **Models:** only the models the mod ships are converted. A race the mod has no model for keeps seeing the target item's own model; no vanilla copy of the source item is added for it. Each race the output does ship a model for gets an EQDP entry saying so, in the same option as the model, because otherwise the game would load the race it falls back to (an item without a female model shows the male one).
+- **Game files:** a material or effect the converted models need but the mod doesn't ship is copied from the game, so the target never references files that don't exist.
+- **Unused materials:** a model converted to an accessory, or with parts removed in the Mesh groups tab, keeps only the materials its parts use. The game loads every material a model lists before drawing it, and a skin material cannot be found on an accessory slot at all.
 - **Metadata:** EQDP, EQP, GMP, EST, IMC, Shp, Atr and GlobalEqp entries are retargeted, with EQDP bits moved between slots. Entries that make no sense on the target slot, such as body visibility flags on hands, are reported instead of being applied.
 - **Options:** every group type is converted, including Combining and IMC groups. New mods keep only the converted item's data and drop groups that end up empty, unless another group references them.
 - **In place:** resources used only by the converted item move to the target; resources other items still use are kept and duplicated for the target.

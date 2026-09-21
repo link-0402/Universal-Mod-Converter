@@ -11,6 +11,9 @@ public enum AnimationOperation
 
     /// <summary>Rebuild the animation for the skeleton of other races.</summary>
     Retarget,
+
+    /// <summary>Only attach a facial expression; the animation stays where it is.</summary>
+    Expression,
 }
 
 /// <summary>
@@ -18,7 +21,15 @@ public enum AnimationOperation
 /// location moves to. A single variant is a plain replacement; several become the options of
 /// one Penumbra group.
 /// </summary>
-public sealed record AnimationSwapVariant(string Label, ImmutableDictionary<string, string> Locations);
+public sealed record AnimationSwapVariant(string Label, ImmutableDictionary<string, string> Locations)
+{
+    /// <summary>
+    /// What each source location is for, in the words the game uses: "start", "looping",
+    /// "ground sitting". Only used to make messages readable, so it may be incomplete.
+    /// </summary>
+    public ImmutableDictionary<string, string> SourceRoles { get; init; } =
+        ImmutableDictionary<string, string>.Empty;
+}
 
 public sealed record AnimationConversionRequest(
     ImmutableArray<string> SourceLocations,
@@ -43,6 +54,12 @@ public sealed record AnimationConversionRequest(
 
     /// <summary>Retarget: the races to build the animation for.</summary>
     public ImmutableArray<ushort> TargetRaces { get; init; } = [];
+
+    /// <summary>
+    /// Any operation: a facial expression to attach to every animation the conversion writes.
+    /// With <see cref="AnimationOperation.Expression"/> it is the whole conversion.
+    /// </summary>
+    public ExpressionDonor? Expression { get; init; }
 }
 
 /// <summary>Rebuilds a PAP's body animations for another race's skeleton.</summary>
@@ -85,15 +102,7 @@ public sealed class AnimationConversionPlan : IModFilePlan
 
     public bool HasBlockers => Diagnostics.Any(d => d.IsBlocker);
 
-    public string Fingerprint()
-    {
-        var operations = Files.Select(f => new ConversionOperation(f.Operation.ToString(), f.Source ?? string.Empty,
-                f.Destination + (f.Content == null ? string.Empty : "#" + Hash(f.Content))))
-            .Append(new ConversionOperation("definition", "result", Hash(System.Text.Encoding.UTF8.GetBytes(
-                PenumbraMod.Serialize(Result.Meta) + PenumbraMod.Serialize(Result.Default.Node) +
-                string.Concat(Result.Groups.Select(g => PenumbraMod.Serialize(g.Node)))))));
-        return ModFingerprint.ComputePlan(operations);
-    }
+    public string Fingerprint() => ModFingerprint.ComputePlan(Files, Result);
 
     internal static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
 }
@@ -113,16 +122,36 @@ public sealed class AnimationConversionPlan : IModFilePlan
 /// </para>
 /// </summary>
 public sealed class AnimationConversionPlanner(
-    IGameFileProvider game, Func<ushort, ushort?> parentRace, IAnimationRetargeter? retargeter)
+    IGameFileProvider game, Func<ushort, ushort?> parentRace, IAnimationRetargeter? retargeter,
+    IExpressionMerger? expressions = null)
 {
     private readonly IGameFileProvider _game = game;
     private readonly Func<ushort, ushort?> _parentRace = parentRace;
     private readonly IAnimationRetargeter? _retargeter = retargeter;
+    private readonly IExpressionMerger? _expressions = expressions;
 
     private sealed record Provider(ModContainer Container, string Key, string Local, string FullPath, PapPath Path);
 
+    /// <summary>Plans one conversion on its own, finishing the mod definition as it goes.</summary>
     public AnimationConversionPlan Plan(string modDirectory, AnimationConversionRequest request)
-        => new Session(this, Path.GetFullPath(modDirectory), request).Run();
+    {
+        var context = new ModPlanContext(modDirectory, request.Mode);
+        var plan = Plan(context, request);
+        context.RunFinalizers();
+        return plan;
+    }
+
+    /// <summary>
+    /// Plans one conversion into a shared context. The caller runs the finalizers once every
+    /// conversion of the run has been planned.
+    /// </summary>
+    public AnimationConversionPlan Plan(ModPlanContext context, AnimationConversionRequest request)
+    {
+        if (context.Mode != request.Mode)
+            throw new ArgumentException("The request and the planning context disagree about the output mode.",
+                nameof(request));
+        return new Session(this, context, request).Run();
+    }
 
     /// <summary>
     /// The race whose animation a race plays for <paramref name="location"/>: the first race up
@@ -139,6 +168,7 @@ public sealed class AnimationConversionPlanner(
     private sealed class Session
     {
         private readonly AnimationConversionPlanner _owner;
+        private readonly ModPlanContext _context;
         private readonly string _root;
         private readonly AnimationConversionRequest _request;
         private readonly PenumbraMod _mod;
@@ -149,17 +179,20 @@ public sealed class AnimationConversionPlanner(
         private readonly Dictionary<string, byte[]?> _localCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<(string File, string Destination), string> _written = new();
         private readonly Dictionary<string, string> _hashes = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>What the current swap is aiming at ("/Box"), for messages. Null while retargeting.</summary>
+        private string? _destinationLabel;
         private int _races;
 
-        public Session(AnimationConversionPlanner owner, string root, AnimationConversionRequest request)
+        public Session(AnimationConversionPlanner owner, ModPlanContext context, AnimationConversionRequest request)
         {
             _owner = owner;
-            _root = root;
+            _context = context;
+            _root = context.ModDirectory;
             _request = request;
-            _mod = PenumbraMod.Load(root);
-            var result = request.Mode == ConversionOutputMode.NewMod ? _mod.CloneStructure() : _mod.Clone();
-            _plan = new AnimationConversionPlan(request, result);
-            _locals = new GearConversionPlanner.LocalAllocator(request.Mode == ConversionOutputMode.InPlace ? root : null);
+            _mod = context.Source;
+            _plan = new AnimationConversionPlan(request, context.Result);
+            _locals = context.Locals;
             _sources = request.SourceLocations.ToHashSet(StringComparer.Ordinal);
         }
 
@@ -173,24 +206,30 @@ public sealed class AnimationConversionPlanner(
             {
                 Block("empty_plan", "This mod does not replace the selected animation" +
                                     (_request.Operation == AnimationOperation.Retarget
-                                        ? $" for c{_request.SourceRace:D4}."
+                                        ? $" for {RaceNames.Describe(_request.SourceRace)}."
                                         : "."));
                 return _plan;
             }
 
-            if (_request.Operation == AnimationOperation.Swap) PlanSwap(providers);
-            else PlanRetarget(providers);
+            switch (_request.Operation)
+            {
+                case AnimationOperation.Swap:     PlanSwap(providers); break;
+                case AnimationOperation.Retarget: PlanRetarget(providers); break;
+                default:                          PlanExpression(providers); break;
+            }
             if (_plan.HasBlockers) return _plan;
 
-            if (_request.Mode == ConversionOutputMode.InPlace) DeleteOrphans(providers);
+            // Additive mode keeps every source key, so nothing is orphaned to begin with.
+            if (_request.Mode.EditsSourceMod())
+                _context.AddFinalizerOnce("orphans", _ => DeleteOrphans(providers));
             else
-            {
-                ModGroupPruning.Prune(Result, group => _plan.Changes.Add(
-                    new GearPlanChange("Group", group.Name, "option group", "not included (no converted animation)")));
-                Result.Meta.Remove("DefaultPreferredItems");
-                if (Result.Format == PenumbraModFormat.Unified) Result.Meta["Identifier"] = Guid.NewGuid().ToString();
-                else Result.RenumberLegacyGroupFiles();
-            }
+                _context.AddFinalizerOnce("new-mod", mod =>
+                {
+                    ModGroupPruning.Prune(mod, group => _plan.Changes.Add(
+                        new GearPlanChange("Group", group.Name, "option group", "not included (no converted animation)")));
+                    mod.Meta.Remove("DefaultPreferredItems");
+                    mod.Meta["Identifier"] = Guid.NewGuid().ToString();
+                });
             return _plan;
         }
 
@@ -225,26 +264,23 @@ public sealed class AnimationConversionPlanner(
 
             if (grouped)
             {
-                var elsewhere = providers.Where(p => !p.Container.Address.IsDefault).Select(p => p.Container.Label).Distinct().ToList();
-                if (elsewhere.Count > 0)
-                {
-                    Block("variant_group_options",
-                        $"The animation is provided by the option(s) {string.Join(", ", elsewhere)}. An option group of slots " +
-                        "can only be built from animations in the mod's default files; use a straight replacement instead.");
-                    return;
-                }
-                PlanSwapGroup(providers, variants);
+                // Where the animation lives decides where its slot choice goes: an animation the
+                // mod always applies gets a new group of its own, while one inside an option is
+                // split within that option's group, so the group keeps deciding whether it plays.
+                var inDefault = providers.Where(p => p.Container.Address.IsDefault).ToList();
+                var inOptions = providers.Where(p => !p.Container.Address.IsDefault).ToList();
+                if (inDefault.Count > 0) PlanSwapGroup(inDefault, variants);
+                if (inOptions.Count > 0) PlanSwapInOptions(inOptions, variants);
                 return;
             }
 
             var variant = variants[0];
+            _destinationLabel = variant.Label;
             foreach (var provider in providers)
             {
                 if (!variant.Locations.TryGetValue(provider.Path.Location, out var destinationLocation))
                 {
-                    Warn("unpaired", _request.KeepOriginal
-                        ? $"{provider.Path.Key} has no counterpart in {variant.Label} and is left unchanged."
-                        : $"{provider.Path.Key} has no counterpart in {variant.Label}; it moves with the rest and is removed.");
+                    Warn("unpaired", Unpaired(variant, provider));
                     continue;
                 }
                 var destination = FromLocation(provider.Path.Race, destinationLocation);
@@ -273,14 +309,29 @@ public sealed class AnimationConversionPlanner(
                 }
         }
 
+        /// <summary>
+        /// Explains a source animation the destination has no equivalent of: /Box may simply
+        /// have no start animation, in which case the mod's start animation has nowhere to go.
+        /// </summary>
+        private string Unpaired(AnimationSwapVariant variant, Provider provider)
+        {
+            var role    = variant.SourceRoles.GetValueOrDefault(provider.Path.Location);
+            var missing = role == null ? $"counterpart for {provider.Path.Key}" : $"{role} animation of its own";
+            var subject = role == null ? $"this mod's {provider.Path.Key}" : $"this mod's {role} animation";
+            var outcome = _request.KeepOriginal
+                ? "stays where it is instead of moving."
+                : "has nothing to convert to and is removed from the mod. Everything else converts normally.";
+            return $"{variant.Label} has no {missing}, so {subject} {outcome}";
+        }
+
         private void PlanSwapGroup(List<Provider> providers, ImmutableArray<AnimationSwapVariant> variants)
         {
-            var unified = Result.Format == PenumbraModFormat.Unified;
             var options = new JsonArray();
             var labels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var variant in variants)
             {
                 if (!labels.Add(variant.Label)) { Block("duplicate_option", $"Two options are named '{variant.Label}'."); return; }
+                _destinationLabel = variant.Label;
                 var files = new JsonObject();
                 foreach (var provider in providers)
                 {
@@ -298,7 +349,7 @@ public sealed class AnimationConversionPlanner(
                 }
                 if (files.Count == 0) Warn("empty_option", $"The option '{variant.Label}' has no animation for any race the mod provides.");
                 var option = new JsonObject();
-                if (unified) option["Id"] = Guid.NewGuid().ToString();
+                option["Id"] = Guid.NewGuid().ToString();
                 option["Name"] = variant.Label;
                 option["Description"] = string.Empty;
                 option["Files"] = files;
@@ -317,16 +368,141 @@ public sealed class AnimationConversionPlanner(
                 }
 
             var group = new JsonObject();
-            if (unified) group["Id"] = Guid.NewGuid().ToString();
+            group["Id"] = Guid.NewGuid().ToString();
             group["Name"] = _request.GroupName;
             group["Description"] = "Choose which slot this animation replaces. Created by Advanced Penumbra Mod Converter.";
             group["Priority"] = Result.Groups.Select(g => Json.GetInt(g.Node["Priority"], 0)).DefaultIfEmpty(0).Max() + 1;
             group["Type"] = "Single";
             group["DefaultSettings"] = Math.Clamp(_request.DefaultVariant, 0, Math.Max(0, variants.Length - 1));
             group["Options"] = options;
-            Result.Groups.Add(new ModGroup(group, Result.Groups.Count, null));
+            Result.Groups.Add(new ModGroup(group, Result.Groups.Count));
             _plan.Changes.Add(new GearPlanChange("Group", _request.GroupName!, "new single-select group",
                 $"{variants.Length} option(s): {string.Join(", ", variants.Select(v => v.Label))}"));
+        }
+
+        /// <summary>Penumbra stores a multi-select group's setting as a bit per option.</summary>
+        private const int MaxMultiOptions = 32;
+
+        /// <summary>
+        /// Offers the slots of an animation that lives inside an option. A separate slot group
+        /// would detach the animation from that option — it would play whenever the mod is on —
+        /// so instead the option itself becomes one option per slot, each a full copy of it with
+        /// the animation moved to that slot. The group's setting still decides whether the
+        /// animation plays at all, and now also where.
+        /// </summary>
+        private void PlanSwapInOptions(List<Provider> providers, ImmutableArray<AnimationSwapVariant> variants)
+        {
+            var defaultVariant = Math.Clamp(_request.DefaultVariant, 0, variants.Length - 1);
+            foreach (var byGroup in providers.GroupBy(p => p.Container.Address.Group))
+            {
+                var group = Result.Groups[byGroup.Key];
+                if (group.IsCombining)
+                {
+                    // Combining groups hold one container per combination of options, so an option
+                    // cannot be split without multiplying every combination.
+                    Block("slot_options_combining",
+                        $"The animation comes from '{group.Name}', a combining group, whose options are stored as every " +
+                        "possible combination and cannot be split per slot. Use a straight replacement instead.");
+                    continue;
+                }
+
+                var isMulti = group.Type.Equals("Multi", StringComparison.OrdinalIgnoreCase);
+                var old = group.Node["Options"] as JsonArray ?? new JsonArray();
+                var owned = byGroup.GroupBy(p => p.Container.Address.Index).ToDictionary(g => g.Key, g => g.ToList());
+                if (isMulti && old.Count + owned.Count * (variants.Length - 1) > MaxMultiOptions)
+                {
+                    Block("slot_options_too_many",
+                        $"Splitting '{group.Name}' into one option per slot would give it more than {MaxMultiOptions} options, " +
+                        "the most a multi-select group can have. Choose fewer slots.");
+                    continue;
+                }
+
+                var options = new JsonArray();
+                var position = new int[old.Count];
+                for (var j = 0; j < old.Count; j++)
+                {
+                    position[j] = options.Count;
+                    if (old[j] is not JsonObject option) continue;
+                    if (!owned.TryGetValue(j, out var here))
+                    {
+                        options.Add(option.DeepClone());
+                        continue;
+                    }
+
+                    var name = Json.GetString(option["Name"]) ?? $"#{j + 1}";
+                    for (var v = 0; v < variants.Length; v++)
+                        options.Add(SlotCopy(group, option, name, here, variants[v],
+                            keepId: v == defaultVariant));
+                    _plan.Changes.Add(new GearPlanChange("Group", group.Name, $"option '{name}'",
+                        $"one option per slot: {string.Join(", ", variants.Select(x => x.Label))}"));
+                }
+
+                group.Node["Options"] = options;
+                RemapDefaultSettings(group.Node, isMulti, old.Count, owned.Keys.ToHashSet(), position, defaultVariant);
+                Result.Groups[byGroup.Key] = new ModGroup(group.Node, byGroup.Key);
+                Note("slot_options_in_group",
+                    $"The animation comes from '{group.Name}', so its slot is chosen there: " +
+                    $"{string.Join(", ", owned.Keys.Select(k => $"'{Json.GetString((old[k] as JsonObject)?["Name"])}'"))} " +
+                    "now has one option per slot, and the group's setting still decides whether it plays.");
+            }
+        }
+
+        /// <summary>A full copy of <paramref name="option"/> with its animation moved to one slot.</summary>
+        private JsonObject SlotCopy(ModGroup group, JsonObject option, string name, List<Provider> providers,
+            AnimationSwapVariant variant, bool keepId)
+        {
+            _destinationLabel = variant.Label;
+            var copy = (JsonObject)option.DeepClone();
+            // The default slot keeps the option's identity, so anything referring to it still does.
+            copy["Id"] = keepId && option["Id"] is { } id ? id.DeepClone() : Guid.NewGuid().ToString();
+            copy["Name"] = $"{name} · {variant.Label}";
+            if (copy["Files"] is not JsonObject files)
+                copy["Files"] = files = new JsonObject();
+
+            foreach (var provider in providers)
+                if (FindKey(files, provider.Key) is { } key) files.Remove(key);
+
+            foreach (var provider in providers)
+            {
+                if (!variant.Locations.TryGetValue(provider.Path.Location, out var location)) continue;
+                var destination = FromLocation(provider.Path.Race, location);
+                if (destination == null || SwapContent(provider, destination) is not { } local) continue;
+                if (FindKey(files, destination.GamePath) is { } stale)
+                {
+                    Warn("destination_replaced", $"{group.Name} / {name}: the mod's own {destination.GamePath} is replaced.");
+                    files.Remove(stale);
+                }
+                files[destination.GamePath] = GamePath.ToLocal(local);
+                _plan.Changes.Add(new GearPlanChange("Option", $"{group.Name} / {copy["Name"]}",
+                    GamePath.Normalize(provider.Key), destination.GamePath));
+            }
+
+            return copy;
+        }
+
+        /// <summary>
+        /// Keeps the group's default selection pointing at the same option after options were
+        /// split: a single-select index moves with the options before it, and a split option's
+        /// selection lands on its default slot. Multi-select bits move the same way.
+        /// </summary>
+        private static void RemapDefaultSettings(JsonObject group, bool isMulti, int oldCount, HashSet<int> split,
+            int[] position, int defaultVariant)
+        {
+            int NewIndex(int old) => position[old] + (split.Contains(old) ? defaultVariant : 0);
+
+            if (!isMulti)
+            {
+                var index = Json.GetInt(group["DefaultSettings"], 0);
+                if (index >= 0 && index < oldCount) group["DefaultSettings"] = NewIndex(index);
+                return;
+            }
+
+            if (!Json.TryGetULong(group["DefaultSettings"], out var mask)) return;
+            ulong remapped = 0;
+            for (var j = 0; j < Math.Min(oldCount, 64); j++)
+                if ((mask & (1UL << j)) != 0 && NewIndex(j) < 64)
+                    remapped |= 1UL << NewIndex(j);
+            group["DefaultSettings"] = remapped;
         }
 
         /// <summary>Writes the source PAP renamed for <paramref name="destination"/>; returns its local path.</summary>
@@ -345,10 +521,12 @@ public sealed class AnimationConversionPlanner(
                 Block("swap_failed", $"{GamePath.Normalize(provider.Key)}: {ex.Message}");
                 return null;
             }
+            if (WithExpression(content, destination.Key, destination.Race) is not { } expressed) return null;
+            content = expressed;
 
             var wanted = SwapLocal(provider, destination);
             string local;
-            if (_request.Mode == ConversionOutputMode.InPlace && content.AsSpan().SequenceEqual(bytes) &&
+            if (_request.Mode.EditsSourceMod() && content.AsSpan().SequenceEqual(bytes) &&
                 string.Equals(GamePath.NormalizeLocal(wanted), GamePath.NormalizeLocal(provider.Local), StringComparison.Ordinal))
                 local = GamePath.ToLocal(provider.Local); // The slot keeps its own, unchanged file.
             else
@@ -391,11 +569,14 @@ public sealed class AnimationConversionPlanner(
 
             var resolved = ResolvingRace(destination.Race, race => Game(destination.WithRace(race).GamePath) != null, _owner._parentRace);
             if (resolved is not { } race)
-                throw new InvalidDataException($"The game has no animation at {destination.Location} for c{destination.Race:D4} " +
-                                               "or the races it inherits from, so its animation name is unknown.");
+                throw new InvalidDataException(
+                    $"The game has no animation at {destination.Location} for {RaceNames.Describe(destination.Race)} " +
+                    "or any race it inherits from, so there is no name to give the converted animation.");
             if (race != destination.Race)
-                Note("inherited_name", $"c{destination.Race:D4} has no own {destination.Key}; its name was taken from c{race:D4}, " +
-                                       "whose animation the game plays for it.");
+                Note("inherited_name",
+                    $"{RaceNames.Describe(destination.Race)} has no animation of its own for " +
+                    $"{_destinationLabel ?? destination.Key} ({destination.Key}). " +
+                    $"It inherits the animation from {RaceNames.Describe(race)}.");
             var destinationBody = new PapFile(Game(destination.WithRace(race).GamePath)!).BodyEntries.ToList();
 
             var from = Played(source, body);
@@ -508,7 +689,8 @@ public sealed class AnimationConversionPlanner(
                             var retargeted = retargeter.Retarget(bytes, sourceSkeleton, targetSkeleton, target);
                             content = retargeted.Bytes;
                             foreach (var note in retargeted.Notes)
-                                Warn("retarget_note", $"{destination.Key} (c{authored:D4} → c{target:D4}): {note}");
+                                Warn("retarget_note",
+                                    $"{destination.Key} ({RaceNames.Name(authored)} to {RaceNames.Name(target)}): {note}");
                         }
                         catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
                         {
@@ -517,8 +699,12 @@ public sealed class AnimationConversionPlanner(
                         }
                     }
 
+                    if (WithExpression(content, destination.Key, target) is not { } expressed) continue;
+                    content = expressed;
                     var local = Write(content, RaceLocal(GamePath.ToLocal(provider.Local), provider.Path.Race, target), provider,
-                        authored == target ? "copied, already made for this race" : $"retargeted c{authored:D4} → c{target:D4}");
+                        authored == target
+                            ? "copied, already made for this race"
+                            : $"rebuilt for {RaceNames.Name(target)} from {RaceNames.Name(authored)}");
                     _written[(provider.FullPath, destination.GamePath)] = local;
                     _hashes[local] = AnimationConversionPlan.Hash(content);
                     MapRetargeted(provider, destination, local);
@@ -526,6 +712,111 @@ public sealed class AnimationConversionPlanner(
             }
             if (_plan.HasBlockers) return;
             DescribeInheritance(providers, targets);
+        }
+
+        /// <summary>
+        /// Attaching a face on its own: every animation keeps its game path and gets the donor's
+        /// facial animations. The file is edited, so there is no second copy for the additive
+        /// mode to keep beside it.
+        /// </summary>
+        private void PlanExpression(List<Provider> providers)
+        {
+            if (_request.Expression == null) { Block("no_expression", "Choose the expression to attach."); return; }
+            if (_request.Mode.KeepsSource())
+            {
+                Block("expression_additive",
+                    "Attaching an expression changes the animation itself, so there is no original left to keep " +
+                    "beside it. Convert in place or create a new mod instead.");
+                return;
+            }
+
+            foreach (var provider in providers)
+            {
+                if (_written.ContainsKey((provider.FullPath, provider.Path.GamePath))) continue;
+                if (Local(provider.FullPath) is not { } bytes) continue;
+                if (WithExpression(bytes, provider.Path.Key, provider.Path.Race) is not { } content) continue;
+
+                var relative = GamePath.ToLocal(provider.Local);
+                string local;
+                if (_request.Mode.EditsSourceMod())
+                {
+                    // The same file, edited: the key keeps pointing at it.
+                    local = _locals.Reserve(relative, relative);
+                    _plan.Files.Add(new PlannedFileOperation(LocalFileOperation.Write, null, local, content,
+                        $"expression {_request.Expression.Label} attached"));
+                }
+                else
+                {
+                    local = Write(content, relative, provider, $"expression {_request.Expression.Label} attached");
+                    Result.GetContainer(provider.Container.Address).GetOrCreateFiles()[provider.Path.GamePath] = local;
+                }
+
+                _written[(provider.FullPath, provider.Path.GamePath)] = local;
+                _plan.Outputs.Add(new AnimationOutput(provider.Container.Label, provider.Path.GamePath, local,
+                    AnimationConversionPlan.Hash(content)));
+                _plan.Changes.Add(new GearPlanChange("Expression", provider.Container.Label,
+                    GamePath.Normalize(provider.Key), _request.Expression.Label));
+            }
+        }
+
+        private readonly Dictionary<ushort, byte[]?> _donors = new();
+
+        /// <summary>
+        /// The donor .pap for <paramref name="race"/>, read once. A vanilla expression is taken
+        /// from that race's own file, because every race animates a different face; a file from
+        /// another mod is used as it is. Null (and reported) when it cannot be read.
+        /// </summary>
+        private byte[]? Donor(ushort race)
+        {
+            if (_donors.TryGetValue(race, out var known)) return known;
+            var expression = _request.Expression!;
+            byte[]? donor = null;
+            try
+            {
+                if (expression.GamePath is { } gamePath)
+                    donor = PapPath.TryParse(gamePath, out var path) && Game(path.WithRace(race).GamePath) is { } own
+                        ? own
+                        : Game(gamePath);
+                else if (expression.FilePath is { } file && file.EndsWith(".pap", StringComparison.OrdinalIgnoreCase) &&
+                         File.Exists(file))
+                    donor = File.ReadAllBytes(file);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                donor = null;
+            }
+
+            if (donor == null)
+                Block("expression_missing", $"The expression {expression.Label} could not be read for {RaceNames.Describe(race)}.");
+            return _donors[race] = donor;
+        }
+
+        /// <summary>
+        /// The animation with the chosen expression attached, or unchanged when none was chosen.
+        /// Null when attaching failed, which blocks the plan.
+        /// </summary>
+        private byte[]? WithExpression(byte[] content, string what, ushort race)
+        {
+            if (_request.Expression is not { } expression) return content;
+            if (_owner._expressions is not { } merger)
+            {
+                Block("expression_unavailable", "Attaching expressions is not available.");
+                return null;
+            }
+            if (Donor(race) is not { } donor) return null;
+
+            try
+            {
+                var notes = new List<string>();
+                var result = PapExpressions.Attach(content, donor, merger, notes);
+                foreach (var note in notes) Note("expression_note", $"{what}: {note}");
+                return result;
+            }
+            catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
+            {
+                Block("expression_failed", $"{what}: attaching {expression.Label} failed: {ex.Message}");
+                return null;
+            }
         }
 
         private void MapRetargeted(Provider provider, PapPath destination, string local)
@@ -557,8 +848,9 @@ public sealed class AnimationConversionPlanner(
                     var users = GenderRaces.Playable.Where(r => r != target && !targets.Contains(r) &&
                                                                 ResolvingRace(r, Has, _owner._parentRace) == target).ToList();
                     if (users.Count > 0)
-                        Note("inherited_by", $"{location.Key}: {string.Join(", ", users.Select(r => $"c{r:D4}"))} have no file of their own " +
-                                             $"and will also play the c{target:D4} version.");
+                        Note("inherited_by",
+                            $"{location.Key}: {string.Join(", ", users.Select(RaceNames.Name))} have no animation of their own, " +
+                            $"so the game plays the {RaceNames.Name(target)} version for them too.");
                 }
             }
         }
@@ -571,7 +863,8 @@ public sealed class AnimationConversionPlanner(
             {
                 if (GamePath.Normalize(key) != path) continue;
                 if (!container.Address.IsDefault)
-                    Note("mod_skeleton", $"The skeleton for c{race:D4} is taken from the option {container.Label}.");
+                    Note("mod_skeleton",
+                        $"The skeleton for {RaceNames.Describe(race)} is taken from the option {container.Label}.");
                 return Local(PathSafety.ResolveRelative(_root, GamePath.ToLocal(local)));
             }
             if (Game(path) is { } bytes) return bytes;

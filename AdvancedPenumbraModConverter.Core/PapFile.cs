@@ -83,6 +83,88 @@ public sealed class PapFile
     public IEnumerable<(Entry Entry, int Index)> BodyEntries
         => Entries.Select((entry, index) => (entry, index)).Where(e => e.entry.IsBody);
 
+    /// <summary>The facial animations of the pack with their entry indices.</summary>
+    public IEnumerable<(Entry Entry, int Index)> FaceEntries
+        => Entries.Select((entry, index) => (entry, index)).Where(e => !e.entry.IsBody);
+
+    /// <summary>The embedded timeline (a whole TMLB) of entry <paramref name="index"/>.</summary>
+    public byte[] Timeline(int index)
+    {
+        if (index < 0 || index >= Entries.Length) throw new InvalidDataException($"PAP entry {index} does not exist.");
+        var offset = TimelineOffset;
+        for (var i = 0; ; i++)
+        {
+            if (offset < 0 || offset > _bytes.Length - 12 || !_bytes.AsSpan(offset, 4).SequenceEqual("TMLB"u8))
+                throw new InvalidDataException("Invalid animation timeline header.");
+            var length = ReadInt(_bytes, offset + 4);
+            if (length < 12 || length > _bytes.Length - offset) throw new InvalidDataException("Invalid animation timeline size.");
+            if (i == index) return _bytes[offset..(offset + length)];
+            offset += length;
+            // Timelines are aligned relative to the first one, not to zero.
+            offset += (TimelineOffset - offset) & 3;
+        }
+    }
+
+    /// <summary>
+    /// Adds animations to the pack: their info entries after the existing ones, the Havok
+    /// container that now also holds their bindings, and their timelines after the existing
+    /// ones. Every existing entry, its bytes and its timeline are kept exactly; only offsets
+    /// move. The caller supplies <paramref name="havok"/> with the new bindings appended, so
+    /// each new entry's <see cref="Entry.Binding"/> must already point past the old ones.
+    /// </summary>
+    public byte[] WithAppendedEntries(byte[] havok, IReadOnlyList<(Entry Entry, byte[] Timeline)> appended)
+    {
+        if (appended.Count == 0) throw new InvalidDataException("No animation to add was supplied.");
+        if (havok.Length < 8 || havok.Length > MaxFileSize) throw new InvalidDataException("Invalid Havok container size.");
+        var count = Entries.Length + appended.Count;
+        if (count > 4096) throw new InvalidDataException("The PAP would hold too many animations.");
+
+        var info = ReadInt(_bytes, InfoOffsetField);
+        var stream = new MemoryStream();
+        stream.Write(_bytes, 0, info);
+        stream.Write(_bytes, info, Entries.Length * EntrySize);
+        foreach (var (entry, _) in appended)
+        {
+            var name = Encoding.ASCII.GetBytes(entry.Name);
+            if (!PapTimeline.IsSafeMotionName(entry.Name) || name.Length > NameSize - 1)
+                throw new InvalidDataException($"'{entry.Name}' is not a valid animation name.");
+            var record = new byte[EntrySize];
+            name.CopyTo(record, 0);
+            BinaryPrimitives.WriteInt16LittleEndian(record.AsSpan(32), entry.Type);
+            BinaryPrimitives.WriteInt16LittleEndian(record.AsSpan(34), entry.Binding);
+            BinaryPrimitives.WriteInt32LittleEndian(record.AsSpan(36), entry.Face);
+            stream.Write(record);
+        }
+
+        // Keep the gap the file had between its entry table and its Havok container.
+        var gap = HavokOffset - (info + Entries.Length * EntrySize);
+        stream.Write(new byte[Math.Max(0, gap)]);
+        var havokOffset = (int)stream.Length;
+        stream.Write(havok);
+
+        // The timelines keep the alignment the file used for its first one.
+        var pad = (TimelineOffset - (int)stream.Length) & 3;
+        stream.Write(new byte[pad]);
+        var timelineOffset = (int)stream.Length;
+        stream.Write(_bytes, TimelineOffset, _bytes.Length - TimelineOffset);
+        foreach (var (_, timeline) in appended)
+        {
+            if (timeline.Length < 12 || !timeline.AsSpan(0, 4).SequenceEqual("TMLB"u8))
+                throw new InvalidDataException("An added animation has no valid timeline.");
+            stream.Write(new byte[(timelineOffset - (int)stream.Length) & 3]);
+            stream.Write(timeline);
+        }
+
+        var result = stream.ToArray();
+        if (result.Length > MaxFileSize) throw new InvalidDataException("The rebuilt PAP exceeds the size limit.");
+        BinaryPrimitives.WriteInt16LittleEndian(result.AsSpan(8), (short)count);
+        BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(HavokOffsetField), havokOffset);
+        BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(TimelineOffsetField), timelineOffset);
+        _ = new PapFile(result);
+        _ = PapTimeline.ReadStrings(result); // every timeline, and nothing after them
+        return result;
+    }
+
     /// <summary>Replaces the Havok container, keeping the header, entries and timelines.</summary>
     public byte[] ReplaceHavok(byte[] havok)
     {

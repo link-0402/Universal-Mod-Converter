@@ -67,6 +67,7 @@ public sealed partial class ConverterSession
         AnimationTargetSlot = -1;
         AnimationKeepOriginal = false;
         AnimationTargetEmote = 0;
+        AttachExpression = false;
         _animationGroupSlots.Clear();
         _animationTargetRaces.Clear();
         AnimationSourceRace = source.Races.Contains((ushort)101) ? (ushort)101 : source.Races.FirstOrDefault();
@@ -149,7 +150,11 @@ public sealed partial class ConverterSession
 
     /// <summary>Why the animation inputs are incomplete, or null.</summary>
     private string? AnimationBlockReason(AnimationSource source)
+        => OperationBlockReason(source) ?? ExpressionBlockReason();
+
+    private string? OperationBlockReason(AnimationSource source)
     {
+        if (AnimationOperation == AnimationOperation.Expression) return null;
         if (AnimationOperation == AnimationOperation.Retarget)
         {
             if (!source.Races.Contains(AnimationSourceRace)) return "Choose the race to retarget from.";
@@ -177,7 +182,11 @@ public sealed partial class ConverterSession
     private AnimationConversionRequest? BuildAnimationRequest(AnimationSource source)
     {
         if (AnimationBlockReason(source) != null) return null;
-        var request = new AnimationConversionRequest(source.Locations, AnimationOperation, OutputMode, DescribeAnimation(source));
+        var request = new AnimationConversionRequest(source.Locations, AnimationOperation, OutputMode, DescribeAnimation(source))
+        {
+            Expression = CurrentExpression(source),
+        };
+        if (AnimationOperation == AnimationOperation.Expression) return request;
         if (AnimationOperation == AnimationOperation.Retarget)
             return request with { SourceRace = AnimationSourceRace, TargetRaces = [.. _animationTargetRaces] };
 
@@ -187,7 +196,11 @@ public sealed partial class ConverterSession
         var slots = AnimationSlots;
         if (!AnimationAsGroup)
             return slots.FirstOrDefault(s => s.Index == AnimationTargetSlot) is { } target
-                ? request with { Variants = [SlotVariant(source, target)], KeepOriginal = AnimationKeepOriginal }
+                ? request with
+                {
+                    Variants = [SlotVariant(source, target)],
+                    KeepOriginal = AnimationKeepOriginal,
+                }
                 : null;
 
         var chosen = slots.Where(s => _animationGroupSlots.Contains(s.Index)).ToList();
@@ -203,14 +216,16 @@ public sealed partial class ConverterSession
     private static AnimationSwapVariant SlotVariant(AnimationSource source, IdleSlot slot)
     {
         const string prefix = "a0001/bt_common/";
-        var map = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
+        var map   = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
+        var roles = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
         foreach (var location in source.Locations)
         {
             if (!IdleSlots.TryDescribe(location[prefix.Length..], out _, out _, out var isStart)) continue;
+            roles[location] = isStart ? "start" : "looping";
             if (!isStart) map[location] = prefix + slot.LoopKey;
             else if (slot.StartKey != null) map[location] = prefix + slot.StartKey;
         }
-        return new AnimationSwapVariant(slot.Label, map.ToImmutable());
+        return new AnimationSwapVariant(slot.Label, map.ToImmutable()) { SourceRoles = roles.ToImmutable() };
     }
 
     /// <summary>An emote's animations pair with the destination's by their position in the emote.</summary>
@@ -218,22 +233,36 @@ public sealed partial class ConverterSession
     {
         var from = GameData.Animations.FindEmote(source.EmoteId);
         var to = GameData.Animations.FindEmote(AnimationTargetEmote);
-        var map = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
+        var map   = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
+        var roles = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
         if (from != null && to != null)
         {
             var provided = from.Timelines.Where(t => source.Locations.Contains(t.Location)).ToList();
             foreach (var timeline in provided)
+            {
+                roles[timeline.Location] = timeline.Label;
                 if (to.Timelines.FirstOrDefault(t => t.Index == timeline.Index) is { } match)
                     map[timeline.Location] = match.Location;
+            }
             // Emotes with one animation each pair them regardless of position.
             if (map.Count == 0 && provided.Count == 1 && to.Timelines.Length == 1)
                 map[provided[0].Location] = to.Timelines[0].Location;
         }
-        return new AnimationSwapVariant(to == null ? "Emote" : $"/{to.Name}", map.ToImmutable());
+        return new AnimationSwapVariant(to == null ? "Emote" : $"/{to.Name}", map.ToImmutable())
+        {
+            SourceRoles = roles.ToImmutable(),
+        };
     }
 
     private string DescribeAnimation(AnimationSource source)
+        => DescribeOperation(source) + (AttachExpression && AnimationOperation != AnimationOperation.Expression
+            ? $", with the {ExpressionLabel}"
+            : string.Empty);
+
+    private string DescribeOperation(AnimationSource source)
     {
+        if (AnimationOperation == AnimationOperation.Expression)
+            return $"{source.Label} + {ExpressionLabel}";
         if (AnimationOperation == AnimationOperation.Retarget)
             return $"{source.Label}: {RaceLabel(AnimationSourceRace)} → " +
                    string.Join(", ", _animationTargetRaces.Select(RaceLabel));
@@ -247,6 +276,7 @@ public sealed partial class ConverterSession
     /// <summary>Short label for the default new mod name.</summary>
     private string AnimationNameLabel(AnimationSource source)
     {
+        if (AnimationOperation == AnimationOperation.Expression) return $"with {ExpressionLabel}";
         if (AnimationOperation == AnimationOperation.Retarget)
             return _animationTargetRaces.Count == 1 ? RaceLabel(_animationTargetRaces.First()) : "Retargeted";
         if (source.Kind == AnimationSourceKind.Emote)

@@ -11,6 +11,13 @@ public interface IModFilePlan
 /// <summary>Writes a <see cref="GearConversionPlan"/> (or any <see cref="IModFilePlan"/>) to disk.</summary>
 public static class GearConversionExecutor
 {
+    /// <summary>
+    /// Some mods come split into packs, the models in one and their materials and textures in
+    /// another; a file missing from both the mod and the game usually means exactly that.
+    /// </summary>
+    public const string MergeHint =
+        " If a separate modpack supplies it (a base mod this one builds on, for example), combine the two with Merge modpacks first.";
+
     /// <summary>Creates the converted mod in <paramref name="outputDirectory"/> (which must be empty or absent).</summary>
     public static void WriteNewMod(IModFilePlan plan, string sourceDirectory, string outputDirectory,
         string displayName, Action<string>? log = null)
@@ -40,7 +47,7 @@ public static class GearConversionExecutor
 
         plan.Result.Meta["Name"] = displayName;
         plan.Result.Save(outputDirectory);
-        log?.Invoke($"Wrote {plan.Files.Count} file(s) and the {plan.Result.Format} mod definition.");
+        log?.Invoke($"Wrote {plan.Files.Count} file(s) and the mod definition.");
     }
 
     /// <summary>Applies the plan to <paramref name="modDirectory"/> (normally a staged copy of the mod).</summary>
@@ -166,14 +173,14 @@ public static class GearConversionVerifier
                     if (!checkedMaterials.Add(path)) continue;
                     if (!Exists(path))
                     {
-                        issues.Add(new VerificationIssue(true, $"{model} needs {path}, which exists neither in the mod nor in the game."));
+                        issues.Add(new VerificationIssue(true, $"{model} needs {path}, which exists neither in the mod nor in the game." + GearConversionExecutor.MergeHint));
                         continue;
                     }
 
                     foreach (var materialBytes in Contents(path))
                     foreach (var texture in SafeRead(path, materialBytes, issues))
                         if (!Exists(GamePath.Normalize(texture)))
-                            issues.Add(new VerificationIssue(true, $"{path} needs {texture}, which exists neither in the mod nor in the game."));
+                            issues.Add(new VerificationIssue(true, $"{path} needs {texture}, which exists neither in the mod nor in the game." + GearConversionExecutor.MergeHint));
                 }
             }
         }

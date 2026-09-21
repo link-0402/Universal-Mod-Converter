@@ -17,10 +17,12 @@ internal static class AnimationTests
         ("Retarget transfers rotation and folds dropped bones", RetargetRotationAndDroppedBones),
         ("Idle swap in place renames and moves the file", IdleSwapInPlace),
         ("Idle swap into an option group (new mod)", IdleSwapGroup),
-        ("Option groups need the animation in the default files", IdleSwapGroupRejectsOptions),
+        ("An animation inside an option gets its slots within that option's group", IdleSwapGroupInOption),
         ("Swapped files follow game-path layouts and reuse unchanged files", SwapLocalNames),
         ("Swap takes the name from the parent race", SwapInheritsName),
         ("Swap pairs the animation the action timeline plays", SwapFromDefaultIdle),
+        ("An animation with no counterpart is explained in plain words", UnpairedIsExplained),
+        ("Attaching an expression appends facial entries and keeps the body", ExpressionAttach),
         ("Retarget adds target races and reports inheritance", RetargetPlan),
     ];
 
@@ -153,11 +155,85 @@ internal static class AnimationTests
 
     // ── Planner ─────────────────────────────────────────────────────────────
 
+    /// <summary>Appends marker bytes as the "merged" Havok, and reports one existing binding.</summary>
+    private sealed class FakeMerger : IExpressionMerger
+    {
+        public string? UnavailableReason => null;
+        public List<int> Requested { get; } = [];
+
+        public (byte[] Havok, int OriginalBindings) Append(byte[] target, byte[] donor, IReadOnlyList<int> donorBindings)
+        {
+            Requested.AddRange(donorBindings);
+            return ([.. target, .. Enumerable.Repeat((byte)0xEE, 12)], 1);
+        }
+    }
+
+    /// <summary>
+    /// The donor's facial entries land after the target's own, named after the target's body
+    /// animation so they play with it, bound past the target's bindings, with their timelines
+    /// renamed to match. The body entry and its timeline must come through byte for byte.
+    /// </summary>
+    private static void ExpressionAttach()
+    {
+        var target = BuildPap([("cbem_box_1lp", 0)]);
+        var donor  = BuildPap([("emot_smile", 0), ("emot_smile", 1), ("emot_smile", 2)]);
+        var merger = new FakeMerger();
+        var notes  = new List<string>();
+
+        var result = new PapFile(PapExpressions.Attach(target, donor, merger, notes));
+
+        Assert.Equal(3, result.Entries.Length);
+        Assert.Equal(new PapFile(target).Entries[0], result.Entries[0]);
+        Assert.Equal(new PapFile(target).Timeline(0), result.Timeline(0));
+        Assert.Equal(new[] { "cbem_box_1lp", "cbem_box_1lp" }, result.FaceEntries.Select(e => e.Entry.Name).ToArray());
+        Assert.Equal(new[] { 1, 2 }, result.FaceEntries.Select(e => e.Entry.Face).ToArray());
+        // The synthetic file binds entry i to binding i: the two faces bring bindings 1 and 2,
+        // which land after the target's single binding.
+        Assert.Equal(new[] { 1, 2 }, merger.Requested.ToArray());
+        Assert.Equal(new[] { (short)1, (short)2 }, result.FaceEntries.Select(e => e.Entry.Binding).ToArray());
+        Assert.Equal(new[] { "cbem_box_1lp", "cbem_box_1lp", "cbem_box_1lp" },
+            PapTimeline.ReadStrings(result.ToArray()).Where(s => s.IsMotion).Select(s => s.Value).ToArray());
+        Assert.True(result.Havok.Skip(result.Havok.Length - 12).All(b => b == 0xEE), "the merged Havok is used");
+
+        // A face type the target already animates keeps its own.
+        var withFace = BuildPap([("cbem_box_1lp", 0), ("cbem_box_1lp", 1)]);
+        var partial  = new PapFile(PapExpressions.Attach(withFace, donor, new FakeMerger(), notes));
+        Assert.Equal(new[] { 1, 2 }, partial.FaceEntries.Select(e => e.Entry.Face).ToArray());
+
+        // A donor without a face is refused rather than silently doing nothing.
+        Assert.Throws<InvalidDataException>(() => PapExpressions.Attach(target, target, new FakeMerger(), notes));
+    }
+
+    /// <summary>
+    /// A destination with no start animation leaves the mod's start animation nowhere to go.
+    /// The warning has to say that in those terms, not in terms of pap keys and "counterparts".
+    /// </summary>
+    private static void UnpairedIsExplained()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"loop.pap","{{{Start3}}}":"start.pap"}}""");
+        mod.File("loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        mod.File("start.pap", BuildPap([("cbem_pose03_1st", 0)]));
+
+        // Standing idle 5 as a destination with a loop but no start of its own.
+        var plan = Planner(Game()).Plan(mod.Path, SlotRequest(ConversionOutputMode.InPlace, ("Standing idle 5", Loop5, null)));
+
+        var unpaired = plan.Diagnostics.SingleOrDefault(d => d.Code == "unpaired");
+        Assert.True(unpaired != null, "The unmatched start animation must be reported.");
+        Assert.True(unpaired!.Message.Contains("Standing idle 5 has no start animation of its own"), unpaired.Message);
+        Assert.True(unpaired.Message.Contains("removed from the mod"), unpaired.Message);
+        Assert.True(!unpaired.Message.Contains("counterpart"), unpaired.Message);
+    }
+
+    /// <summary>Writes a Penumbra 1.7+ meta.json holding the given DefaultData and groups.</summary>
+    private static void Definition(TempDir mod, string defaultData, string? groups = null)
+        => mod.Json("meta.json", "{\"FileVersion\":4,\"Name\":\"Idle\",\"DefaultData\":" + defaultData +
+                                 (groups == null ? "" : ",\"Groups\":" + groups) + "}");
+
     private static void IdleSwapInPlace()
     {
         using var mod = new TempDir();
-        mod.Json("meta.json", """{"FileVersion":3,"Name":"Idle"}""");
-        mod.Json("default_mod.json",
+        Definition(mod,
             $$$"""{"Files":{"{{{Loop3}}}":"anim\\loop.pap","{{{Start3}}}":"anim\\start.pap"},"FileSwaps":{},"Manipulations":[]}""");
         mod.File("anim/loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
         mod.File("anim/start.pap", BuildPap([("cbem_pose03_1st", 0)]));
@@ -232,8 +308,7 @@ internal static class AnimationTests
         using var mod = new TempDir();
         var loop = Mirrored(Loop3);
         var start = Mirrored(Start3);
-        mod.Json("meta.json", """{"FileVersion":3,"Name":"Idle"}""");
-        mod.Json("default_mod.json", System.Text.Json.JsonSerializer.Serialize(new { Files = new Dictionary<string, string> { [Loop3] = loop, [Start3] = start } }));
+        Definition(mod, System.Text.Json.JsonSerializer.Serialize(new { Files = new Dictionary<string, string> { [Loop3] = loop, [Start3] = start } }));
         mod.File(loop, BuildPap([("cbem_pose03_1lp", 0)]));
         mod.File(start, BuildPap([("cbem_pose03_1st", 0)]));
 
@@ -256,30 +331,50 @@ internal static class AnimationTests
         Assert.Equal(0, AnimationConversionVerifier.Verify(mod.Path, plan).Count);
     }
 
-    private static void IdleSwapGroupRejectsOptions()
+    /// <summary>
+    /// A slot group for an animation that lives in an option must not become a new group: that
+    /// would make the animation play whether or not its option is selected. The option is split
+    /// into one option per slot inside its own group instead, keeping its other files, and the
+    /// group's default selection follows the option to its default slot.
+    /// </summary>
+    private static void IdleSwapGroupInOption()
     {
         using var mod = new TempDir();
-        mod.Json("meta.json", """{"FileVersion":3,"Name":"Idle"}""");
-        mod.Json("default_mod.json", """{"Files":{}}""");
-        mod.Json("group_001_style.json",
-            $$$"""{"Name":"Style","Type":"Single","Options":[{"Name":"A","Files":{"{{{Loop3}}}":"a.pap"}}]}""");
+        Definition(mod, """{"Files":{}}""",
+            $$$"""[{"Name":"Style","Type":"Single","DefaultSettings":1,"Options":[{"Name":"Off"},{"Id":"keep-me","Name":"A","Files":{"{{{Loop3}}}":"a.pap","chara/other.tex":"other.tex"} } ] } ]""");
         mod.File("a.pap", BuildPap([("cbem_pose03_1lp", 0)]));
-        var request = SlotRequest(ConversionOutputMode.NewMod, ("Standing idle 5", Loop5, Start5)) with { GroupName = "Slot" };
+        mod.File("other.tex", [1]);
+        var request = SlotRequest(ConversionOutputMode.InPlace,
+            ("Standing idle 3", Loop3, null), ("Standing idle 5", Loop5, null)) with { GroupName = "Slot" };
         var plan = Planner(Game()).Plan(mod.Path, request);
-        Assert.True(plan.Diagnostics.Any(d => d.IsBlocker && d.Code == "variant_group_options"), "Options must be rejected.");
-
-        // A plain replacement works inside the option.
-        plan = Planner(Game()).Plan(mod.Path, request with { GroupName = null });
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
-        Assert.True(plan.Result.Groups.Single().Containers.Single().FileEntries().Any(e => GamePath.Normalize(e.Key) == Loop5));
+
+        var group = plan.Result.Groups.Single();
+        Assert.Equal("Style", group.Name);
+        Assert.Equal(new[] { "Off", "A · Standing idle 3", "A · Standing idle 5" },
+            group.Options.Select(o => o["Name"]!.GetValue<string>()).ToArray());
+        // The option's identity stays with its default slot, and so does the group's default.
+        Assert.Equal("keep-me", group.Options.ElementAt(1)["Id"]!.GetValue<string>());
+        Assert.Equal(1, group.Node["DefaultSettings"]!.GetValue<int>());
+
+        var slot5 = group.Containers[2].FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
+        Assert.True(slot5.ContainsKey(Loop5) && !slot5.ContainsKey(Loop3), "the copy for slot 5 plays in slot 5 only");
+        Assert.True(slot5.ContainsKey("chara/other.tex"), "the option's other files come along");
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "slot_options_in_group"));
+
+        // A plain replacement still works inside the option, and leaves the group's shape alone.
+        plan = Planner(Game()).Plan(mod.Path,
+            SlotRequest(ConversionOutputMode.InPlace, ("Standing idle 5", Loop5, null)));
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(2, plan.Result.Groups.Single().Containers.Count);
+        Assert.True(plan.Result.Groups.Single().Containers[1].FileEntries().Any(e => GamePath.Normalize(e.Key) == Loop5));
     }
 
     private static void SwapInheritsName()
     {
         using var mod = new TempDir();
         var loop = Loop3.Replace("c0101", "c0801");
-        mod.Json("meta.json", """{"FileVersion":3,"Name":"Idle"}""");
-        mod.Json("default_mod.json", $$$"""{"Files":{"{{{loop}}}":"loop.pap"}}""");
+        Definition(mod, $$$"""{"Files":{"{{{loop}}}":"loop.pap"}}""");
         mod.File("loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
         // c0801 has no own pose05; the game plays c0101's, whose name is used.
         var plan = new AnimationConversionPlanner(Game(), race => race == 801 ? (ushort)101 : null, null)
@@ -297,8 +392,7 @@ internal static class AnimationTests
     private static void SwapFromDefaultIdle()
     {
         using var mod = new TempDir();
-        mod.Json("meta.json", """{"FileVersion":3,"Name":"Idle"}""");
-        mod.Json("default_mod.json", $$$"""{"Files":{"{{{Idle0}}}":"idle.pap"}}""");
+        Definition(mod, $$$"""{"Files":{"{{{Idle0}}}":"idle.pap"}}""");
         mod.File("idle.pap", BuildPap([("cbna_add_dmg_f", 0), ("cbnm_id0", 0)]));
         string Location(string path) => PapPath.TryParse(path, out var p) ? p.Location : throw new Exception(path);
         var request = new AnimationConversionRequest([Location(Idle0)], AnimationOperation.Swap, ConversionOutputMode.NewMod, "test")
@@ -315,8 +409,7 @@ internal static class AnimationTests
     private static void RetargetPlan()
     {
         using var mod = new TempDir();
-        mod.Json("meta.json", """{"FileVersion":3,"Name":"Idle"}""");
-        mod.Json("default_mod.json", $$$"""{"Files":{"{{{Loop3}}}":"c0101\\loop.pap"}}""");
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"c0101\\loop.pap"}}""");
         mod.File("c0101/loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
         var game = Game();
         game.Files[PapPath.BaseSkeletonPath(101)] = [1];
@@ -332,7 +425,8 @@ internal static class AnimationTests
         var plan = new AnimationConversionPlanner(game, Parent, retargeter).Plan(mod.Path, request);
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
         Assert.Equal(1, retargeter.Calls);
-        Assert.True(plan.Diagnostics.Any(d => d.Code == "inherited_by" && d.Message.Contains("c1201")),
+        // Named, not coded: the message is for someone reading the plan, not the file paths.
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "inherited_by" && d.Message.Contains("Lalafell Female")),
             "Lalafell female inherits the new Lalafell male file.");
         GearConversionExecutor.ApplyInPlace(plan, mod.Path);
 
@@ -358,7 +452,10 @@ internal static class AnimationTests
             var map = ImmutableDictionary.CreateBuilder<string, string>();
             map[Location(Loop3)] = Location(s.Loop);
             if (s.Start != null) map[Location(Start3)] = Location(s.Start);
-            return new AnimationSwapVariant(s.Label, map.ToImmutable());
+            var roles = ImmutableDictionary.CreateBuilder<string, string>();
+            roles[Location(Loop3)] = "looping";
+            roles[Location(Start3)] = "start";
+            return new AnimationSwapVariant(s.Label, map.ToImmutable()) { SourceRoles = roles.ToImmutable() };
         }).ToImmutableArray();
         return new AnimationConversionRequest([Location(Loop3), Location(Start3)], AnimationOperation.Swap, mode, "test")
         {

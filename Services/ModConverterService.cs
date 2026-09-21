@@ -23,21 +23,29 @@ public sealed class ModConverterService
 {
     private const string BackupFolderName = ".apmc-backups";
 
+    /// <summary>Backups under the system temp folder live here, all Penumbra roots together.</summary>
+    internal const string TempBackupFolderName = "AdvancedPenumbraModConverter-backups";
+
     private readonly IPluginLog           _log;
     private readonly IGameFileProvider    _gameFiles;
     private readonly GameDataService?     _gameData;
+    private readonly Configuration?       _configuration;
     private readonly CustomizationPlanner _customizationPlanner;
     private readonly IAnimationRetargeter? _retargeter;
+    private readonly IExpressionMerger? _expressions;
     private HumanPbd? _pbd;
     private bool _pbdLoaded;
 
     public ModConverterService(IPluginLog log, GameDataService? gameData = null, IFramework? framework = null,
-        IAnimationRetargeter? retargeter = null)
+        IAnimationRetargeter? retargeter = null, Configuration? configuration = null,
+        IExpressionMerger? expressions = null)
     {
-        _log        = log;
-        _gameData   = gameData;
-        _retargeter = retargeter;
-        _gameFiles  = (IGameFileProvider?)gameData ?? NoGameFiles.Instance;
+        _log           = log;
+        _gameData      = gameData;
+        _retargeter    = retargeter;
+        _expressions   = expressions;
+        _configuration = configuration;
+        _gameFiles     = (IGameFileProvider?)gameData ?? NoGameFiles.Instance;
         var skeletons = gameData == null || framework == null
             ? null
             : new SkeletonHierarchyService(gameData, new HavokSkeletonHierarchyReader(framework), log);
@@ -56,6 +64,10 @@ public sealed class ModConverterService
         {
             _ = PenumbraMod.Load(modDir);
         }
+        catch (OutdatedModFormatException ex)
+        {
+            return (false, ex.Message);
+        }
         catch (Exception ex)
         {
             return (false, $"The mod definition cannot be read: {ex.Message}");
@@ -63,6 +75,10 @@ public sealed class ModConverterService
 
         return (true, string.Empty);
     }
+
+    /// <summary>Why expressions cannot be attached in this session, or null.</summary>
+    public string? ExpressionUnavailableReason
+        => _expressions == null ? "Attaching expressions is not available." : _expressions.UnavailableReason;
 
     /// <summary>Plans all changes without touching disk and sets <c>task.IsPlanned</c>.</summary>
     public void PlanConversion(ConversionTask task)
@@ -75,9 +91,11 @@ public sealed class ModConverterService
         task.AllAssetFiles.Clear();
         task.OutputModels.Clear();
         task.MeshRemovals.Clear();
+        task.MeshDefaultsApplied.Clear();
         task.Diagnostics.Clear();
         task.GearPlan = null;
         task.AnimationPlan = null;
+        task.MergedPlan = null;
         task.IsPlanned = false;
         task.IsApplied = false;
         task.ResultStatus = ConversionResultStatus.NotStarted;
@@ -87,6 +105,12 @@ public sealed class ModConverterService
 
         try
         {
+            if (task.IsQueue)
+            {
+                PlanQueue(task);
+                return;
+            }
+
             if (task.Kind == AssetKind.Animation)
             {
                 PlanAnimation(task);
@@ -105,11 +129,9 @@ public sealed class ModConverterService
             task.GearPlan = plan;
             task.SourceRoot = request.Source.Root;
             task.Diagnostics.AddRange(plan.Diagnostics);
-            if (request.Source.Slot != request.Target.Slot)
+            if (GearSlots.CrossSlotNote(request.Source.Slot, request.Target.Slot) is { } note)
                 task.Diagnostics.Add(new PlanDiagnostic("cross_slot_geometry",
-                    $"The model keeps its {request.Source.Slot} geometry: converting to {request.Target.Slot} only changes " +
-                    "which item loads it. Remove the mesh groups you do not want on the new slot " +
-                    "in the Mesh groups tab.", false));
+                    note + " Untick anything else in the Mesh groups tab.", false));
             task.OutputModels.AddRange(GearOutputModels.Collect(plan, task.ModDirectory));
             task.SourceFingerprint = GearSourceFingerprint(task) ?? string.Empty;
             task.PlanFingerprint = plan.Fingerprint();
@@ -128,10 +150,126 @@ public sealed class ModConverterService
         }
     }
 
+    /// <summary>
+    /// Plans every enabled conversion of a run into one mod. Each reads the mod as it is on
+    /// disk; the merger rejects any that would undo another, and a rejected one blocks the run
+    /// rather than quietly converting the rest.
+    /// </summary>
+    private void PlanQueue(ConversionTask task)
+    {
+        var context = new ModPlanContext(task.ModDirectory, task.OutputMode, shared: true);
+        var merger  = new ModPlanMerger(context);
+
+        foreach (var entry in task.Entries)
+        {
+            entry.ResetPlan();
+            if (!entry.Enabled) continue;
+            if (CustomizationKinds.IsCustomization(entry.Kind))
+            {
+                // Customization conversions patch their files on disk rather than producing a
+                // file plan, so they cannot share a definition with the others yet.
+                entry.Diagnostics.Add(new PlanDiagnostic("queue_unsupported_kind",
+                    $"{entry.Description}: hair, face, tail and Viera-ear conversions cannot be converted " +
+                    "together with others yet. Convert this one on its own.", true));
+                entry.Rejected = true;
+                continue;
+            }
+
+            entry.Task.OutputMode = task.OutputMode;
+            entry.Task.ModDirectory = task.ModDirectory;
+            var merged = entry.Kind == AssetKind.Animation
+                ? merger.Add(entry.Description, AnimationRoots(entry),
+                    ctx => new AnimationConversionPlanner(_gameFiles, ParentRace, _retargeter, _expressions)
+                        .Plan(ctx, ForMode(entry.Task.AnimationRequest
+                                  ?? throw new InvalidOperationException("Choose what to do with the animation."),
+                              task.OutputMode)))
+                : merger.Add(entry.Description, GearRoots(entry),
+                    ctx => new GearConversionPlanner(_gameFiles).Plan(ctx, BuildGearRequest(entry.Task)));
+            entry.Plan = merged.Plan;
+            entry.Rejected = merged.Rejected;
+            entry.Diagnostics.AddRange(merged.Diagnostics);
+        }
+
+        context.RunFinalizers();
+        var plan = merger.Build();
+        task.MergedPlan = plan;
+        task.Diagnostics.AddRange(plan.Diagnostics);
+        foreach (var entry in task.Entries)
+            task.Diagnostics.AddRange(entry.Diagnostics
+                .Where(d => !plan.Diagnostics.Contains(d))
+                .Select(d => d with { Message = $"{entry.Description}: {d.Message}" }));
+
+        // Mesh editing needs the models the run produced, which only exist once every entry has
+        // planned and the finalizers have settled the definition.
+        foreach (var entry in task.Entries.Where(e => !e.Rejected))
+            if (entry.Plan is GearConversionPlan gear)
+                task.OutputModels.AddRange(GearOutputModels.Collect(gear, task.ModDirectory));
+
+        task.SourceFingerprint = MergedSourceFingerprint(task) ?? string.Empty;
+        task.PlanFingerprint = plan.Fingerprint();
+        task.IsPlanned = true;
+        task.ErrorMessage = task.HasBlockers
+            ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
+            : null;
+        _log.Information("[APMC] Planned a run of {0} conversion(s) ({1}): {2} file operation(s), {3} diagnostic(s).",
+            plan.Entries.Count(e => !e.Rejected), task.OutputMode, plan.Files.Count, task.Diagnostics.Count);
+    }
+
+    /// <summary>
+    /// What a queued gear conversion claims: the item it reads and the one it writes. A root
+    /// such as e0728 holds every slot of a set, so the slot is part of the claim; body and
+    /// hands of the same set are different items and may be converted together.
+    /// </summary>
+    private static IEnumerable<string> GearRoots(QueuedConversion entry)
+    {
+        var request = BuildGearRequest(entry.Task);
+        return [$"{request.Source.Root} ({request.Source.Slot})", $"{request.Target.Root} ({request.Target.Slot})"];
+    }
+
+    /// <summary>
+    /// The request for the output mode chosen at preview time. A plan entry is made before the
+    /// mode may change, so the mode is applied here; adding to the mod always keeps the source.
+    /// </summary>
+    private static AnimationConversionRequest ForMode(AnimationConversionRequest request, ConversionOutputMode mode)
+        => request with { Mode = mode, KeepOriginal = request.KeepOriginal || mode.KeepsSource() };
+
+    /// <summary>What a queued animation conversion claims: the animations it reads and writes.</summary>
+    private static IEnumerable<string> AnimationRoots(QueuedConversion entry)
+    {
+        if (entry.Task.AnimationRequest is not { } request) return [];
+        return request.SourceLocations
+            .Concat(request.Variants.SelectMany(v => v.Locations.Values))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string? MergedSourceFingerprint(ConversionTask task)
+    {
+        try
+        {
+            var inputs = task.MergedPlan!.InputFiles
+                .Concat(task.Entries.Where(e => !e.Rejected).SelectMany(PlanInputs))
+                .Concat(PenumbraMod.DefinitionFiles(task.ModDirectory).Where(File.Exists));
+            return ModFingerprint.Compute(task.ModDirectory, inputs);
+        }
+        catch (Exception)
+        {
+            return null; // A planned input no longer exists.
+        }
+    }
+
+    private static IEnumerable<string> PlanInputs(QueuedConversion entry) => entry.Plan switch
+    {
+        GearConversionPlan gear           => gear.InputFiles,
+        AnimationConversionPlan animation => animation.InputFiles,
+        _                                 => [],
+    };
+
     private void PlanAnimation(ConversionTask task)
     {
-        var request = task.AnimationRequest ?? throw new InvalidOperationException("Choose what to do with the animation.");
-        var plan = new AnimationConversionPlanner(_gameFiles, ParentRace, _retargeter).Plan(task.ModDirectory, request);
+        var request = ForMode(task.AnimationRequest ?? throw new InvalidOperationException("Choose what to do with the animation."),
+            task.OutputMode);
+        var plan = new AnimationConversionPlanner(_gameFiles, ParentRace, _retargeter, _expressions)
+            .Plan(task.ModDirectory, request);
         task.AnimationPlan = plan;
         task.Diagnostics.AddRange(plan.Diagnostics);
         task.SourceFingerprint = AnimationSourceFingerprint(task) ?? string.Empty;
@@ -197,18 +335,24 @@ public sealed class ModConverterService
         }
     }
 
-    private static void EnsurePlanIsCurrent(ConversionTask task, ConversionOutputMode mode)
+    /// <param name="newMod">
+    /// Which of the two write paths is about to run. The plan must agree both on the exact mode
+    /// and on which path it was built for, so a plan made for one cannot be written by the other.
+    /// </param>
+    private static void EnsurePlanIsCurrent(ConversionTask task, bool newMod)
     {
         if (!task.IsPlanned) throw new InvalidOperationException("Preview the conversion before applying it.");
         if (task.HasBlockers) throw new InvalidOperationException(task.ErrorMessage ?? "The conversion plan has blockers.");
-        if (task.GearPlan is { } plan && plan.Request.Mode != mode ||
-            task.AnimationPlan is { } animation && animation.Request.Mode != mode)
-            throw new InvalidOperationException("The output mode changed after preview. Preview again before applying.");
-        var current = task.GearPlan != null ? GearSourceFingerprint(task)
+        var planned = task.MergedPlan?.Mode ?? task.GearPlan?.Request.Mode
+                      ?? task.AnimationPlan?.Request.Mode ?? task.OutputMode;
+        if (planned != task.OutputMode || planned.IsNewMod() != newMod)
+            throw new InvalidOperationException("The output mode changed after the preview. Wait for the preview to update, then try again.");
+        var current = task.MergedPlan != null ? MergedSourceFingerprint(task)
+            : task.GearPlan != null ? GearSourceFingerprint(task)
             : task.AnimationPlan != null ? AnimationSourceFingerprint(task)
             : ConversionPlanValidator.RecomputeSourceFingerprint(task);
         if (!string.Equals(current, task.SourceFingerprint, StringComparison.Ordinal))
-            throw new InvalidOperationException("The source mod changed after preview. Preview again before applying.");
+            throw new InvalidOperationException("The mod changed on disk after the preview. The preview is updated now; try again once it is ready.");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -217,7 +361,7 @@ public sealed class ModConverterService
 
     /// <summary>
     /// Applies the plan to a shadow copy of the mod, then swaps the copy in. The original
-    /// is kept in a hidden backup folder until Penumbra confirms the reload.
+    /// is kept in the backup folder until Penumbra confirms the reload.
     /// </summary>
     public void ApplyConversion(ConversionTask task, Action<string>? onLog = null)
     {
@@ -232,19 +376,24 @@ public sealed class ModConverterService
         bool sourceMoved = false;
         try
         {
-            EnsurePlanIsCurrent(task, ConversionOutputMode.InPlace);
+            EnsurePlanIsCurrent(task, newMod: false);
 
             var sourceDir = Path.GetFullPath(task.ModDirectory).TrimEnd('\\', '/');
             var parent = Path.GetDirectoryName(sourceDir) ?? throw new InvalidOperationException("The mod has no parent directory.");
             var name = Path.GetFileName(sourceDir);
             var id = Guid.NewGuid().ToString("N");
             stageDir = Path.Combine(parent, $".{name}.apmc-stage-{id}");
-            backupDir = Path.Combine(BackupRoot(parent), $"{name}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{id[..8]}");
+            backupDir = Path.Combine(BackupRoot(parent, _configuration?.BackupDirectory), $"{name}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{id[..8]}");
             task.JournalPath = Path.Combine(parent, $".{name}.apmc-recovery-{id}.json");
 
             Log($"Staging complete mod shadow: {stageDir}");
             CopyDirectory(sourceDir, stageDir);
-            if (task.GearPlan is { } plan)
+            if (task.MergedPlan is { } merged)
+            {
+                GearConversionExecutor.ApplyInPlace(merged, stageDir, Log);
+                GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
+            }
+            else if (task.GearPlan is { } plan)
             {
                 GearConversionExecutor.ApplyInPlace(plan, stageDir, Log);
                 GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
@@ -297,16 +446,50 @@ public sealed class ModConverterService
     }
 
     /// <summary>
-    /// Backups live one level below the Penumbra root in a hidden folder, so Penumbra never
-    /// discovers them as duplicate mods.
+    /// Where backups are written, preferring the system temp folder so they are transient
+    /// storage the machine can reclaim. Publishing a conversion swaps whole directories with
+    /// <see cref="Directory.Move"/>, which cannot cross volumes, so a temp folder on another
+    /// drive than the Penumbra root is no use: that case falls back to a hidden folder beside
+    /// the mods, where Penumbra never discovers it as a duplicate mod. A configured
+    /// <paramref name="customBackupDirectory"/> wins over both, and is the user's problem to
+    /// keep on the right volume.
     /// </summary>
-    internal static string BackupRoot(string penumbraRoot)
+    /// <param name="create">False to resolve the path without creating anything on disk.</param>
+    internal static string BackupRoot(string penumbraRoot, string? customBackupDirectory = null, bool create = true)
     {
+        if (!string.IsNullOrWhiteSpace(customBackupDirectory))
+        {
+            if (create) Directory.CreateDirectory(customBackupDirectory);
+            return customBackupDirectory;
+        }
+
+        var temp = Path.Combine(Path.GetTempPath(), TempBackupFolderName);
+        if (SameVolume(temp, penumbraRoot))
+        {
+            if (create) Directory.CreateDirectory(temp);
+            return temp;
+        }
+
         var root = Path.Combine(penumbraRoot, BackupFolderName);
+        if (!create) return root;
         var info = Directory.CreateDirectory(root);
         if ((info.Attributes & FileAttributes.Hidden) == 0)
             info.Attributes |= FileAttributes.Hidden;
         return root;
+    }
+
+    /// <summary>True when both paths sit on the same volume, so a directory move is atomic.</summary>
+    internal static bool SameVolume(string a, string b)
+    {
+        try
+        {
+            return string.Equals(Path.GetPathRoot(Path.GetFullPath(a)), Path.GetPathRoot(Path.GetFullPath(b)),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     /// <summary>Applies a customization plan (hair, face, tail, ear) to a staged directory.</summary>
@@ -398,14 +581,19 @@ public sealed class ModConverterService
         void Log(string msg) { onLog?.Invoke(msg); _log.Information("[APMC] {0}", msg); }
         try
         {
-            EnsurePlanIsCurrent(task, ConversionOutputMode.NewMod);
+            EnsurePlanIsCurrent(task, newMod: true);
 
             var finalDir = Path.GetFullPath(newModDir).TrimEnd('\\', '/');
             if (Directory.Exists(finalDir) || File.Exists(finalDir))
                 throw new IOException($"The output path already exists: {finalDir}");
             var parent = Path.GetDirectoryName(finalDir) ?? throw new InvalidOperationException("The output path has no parent.");
             stageDir = Path.Combine(parent, $".{Path.GetFileName(finalDir)}.apmc-stage-{Guid.NewGuid():N}");
-            if (task.GearPlan is { } plan)
+            if (task.MergedPlan is { } merged)
+            {
+                GearConversionExecutor.WriteNewMod(merged, task.ModDirectory, stageDir, modDisplayName, Log);
+                GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
+            }
+            else if (task.GearPlan is { } plan)
             {
                 GearConversionExecutor.WriteNewMod(plan, task.ModDirectory, stageDir, modDisplayName, Log);
                 GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
@@ -442,14 +630,43 @@ public sealed class ModConverterService
     }
 
     /// <summary>
-    /// Sets the display name of a copied mod. A copied Penumbra 1.7+ mod also needs its own
-    /// stable identifier; two mods must not claim the same one.
+    /// Writes a merged modpack to <paramref name="newModDir"/>. Like any new mod it is staged
+    /// beside its final place and moved there whole, so a failure never leaves half a mod.
+    /// </summary>
+    public string PublishMerge(ModMergePlan plan, string newModDir, Action<string>? onLog = null)
+    {
+        void Log(string msg) { onLog?.Invoke(msg); _log.Information("[APMC] {0}", msg); }
+
+        var finalDir = Path.GetFullPath(newModDir).TrimEnd('\\', '/');
+        if (Directory.Exists(finalDir) || File.Exists(finalDir))
+            throw new IOException($"The output path already exists: {finalDir}");
+        var parent = Path.GetDirectoryName(finalDir) ?? throw new InvalidOperationException("The output path has no parent.");
+        var stageDir = Path.Combine(parent, $".{Path.GetFileName(finalDir)}.apmc-stage-{Guid.NewGuid():N}");
+        try
+        {
+            ModMerger.Write(plan, stageDir, Log);
+            ValidateModDefinition(stageDir);
+            Directory.Move(stageDir, finalDir);
+            Log($"Merged mod published: {finalDir}");
+            return finalDir;
+        }
+        catch
+        {
+            if (Directory.Exists(stageDir))
+                try { Directory.Delete(stageDir, true); } catch { }
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Sets the display name of a copied mod. A copy also needs its own stable identifier;
+    /// two mods must not claim the same one.
     /// </summary>
     private void UpdateMetaJsonName(string modDir, string displayName, Action<string> log)
     {
         var mod = PenumbraMod.Load(modDir);
         mod.Meta["Name"] = displayName;
-        if (mod.Format == PenumbraModFormat.Unified) mod.Meta["Identifier"] = Guid.NewGuid().ToString();
+        mod.Meta["Identifier"] = Guid.NewGuid().ToString();
         mod.Save(modDir);
         log($"Set mod display name to: {displayName}");
     }
@@ -573,10 +790,24 @@ public sealed class ModConverterService
         var modDirectory = directory ?? task.ModDirectory;
         try
         {
+            if (task.MergedPlan != null)
+            {
+                foreach (var entry in task.Entries.Where(e => !e.Rejected && e.Plan != null))
+                foreach (var hit in VerifyEntry(entry, modDirectory))
+                {
+                    // Which of the run's conversions a problem belongs to is the first thing to know.
+                    hit.Detail = $"{entry.Description}: {hit.Detail}";
+                    hits.Add(hit);
+                }
+
+                return hits;
+            }
+
             if (task.GearPlan is { } plan)
             {
-                // Retained source paths are expected in place (shared resources) but not in a new mod.
-                var source = plan.Request.Mode == ConversionOutputMode.NewMod ? plan.Request.Source : (GearItem?)null;
+                // Retained source paths are expected when editing the mod (shared resources, and
+                // the whole point of adding to it) but not in a new mod.
+                var source = plan.Request.Mode.IsNewMod() ? plan.Request.Source : (GearItem?)null;
                 foreach (var issue in GearConversionVerifier.Verify(modDirectory, plan.Request.Target, source, _gameFiles))
                     hits.Add(new LeftoverHit
                     {
@@ -612,6 +843,35 @@ public sealed class ModConverterService
         }
 
         return hits;
+    }
+
+    /// <summary>Verifies one conversion of a run with the verifier its kind already has.</summary>
+    private IEnumerable<LeftoverHit> VerifyEntry(QueuedConversion entry, string modDirectory)
+    {
+        switch (entry.Plan)
+        {
+            case GearConversionPlan gear:
+                // Retained source paths are expected when editing the mod (shared resources, and
+                // the whole point of adding to it) but not in a new mod.
+                var source = gear.Request.Mode.IsNewMod() ? gear.Request.Source : (GearItem?)null;
+                return GearConversionVerifier.Verify(modDirectory, gear.Request.Target, source, _gameFiles)
+                    .Select(issue => new LeftoverHit
+                    {
+                        FilePath = modDirectory,
+                        HitType  = issue.IsError ? "missing" : "leftover",
+                        Detail   = issue.Message,
+                    });
+            case AnimationConversionPlan animation:
+                return AnimationConversionVerifier.Verify(modDirectory, animation)
+                    .Select(issue => new LeftoverHit
+                    {
+                        FilePath = modDirectory,
+                        HitType  = issue.IsError ? "missing" : "note",
+                        Detail   = issue.Message,
+                    });
+            default:
+                return [];
+        }
     }
 
     private static List<LeftoverHit> VerifyCustomizationConversion(

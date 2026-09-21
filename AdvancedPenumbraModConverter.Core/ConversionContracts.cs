@@ -1,5 +1,3 @@
-using System.Collections.Immutable;
-
 namespace AdvancedPenumbraModConverter.Core;
 
 public enum AssetKind
@@ -10,13 +8,40 @@ public enum AssetKind
     Face,
     Tail,
     VieraEar,
+
+    /// <summary>The body under the gear: skin textures and the materials that load them.</summary>
+    Body,
     Animation,
 }
 
 public enum ConversionOutputMode
 {
+    /// <summary>Build a separate mod and leave the source untouched.</summary>
     NewMod,
+
+    /// <summary>Replace the source item in this mod with the converted one.</summary>
     InPlace,
+
+    /// <summary>
+    /// Add the converted item to this mod beside the original, in the same containers, so the
+    /// option groups that already govern the original govern the new paths too.
+    /// </summary>
+    AddToMod,
+}
+
+/// <summary>
+/// The questions the planners actually ask about an output mode. Comparing against a single
+/// member is how a third mode silently takes the wrong branch, so ask these instead.
+/// </summary>
+public static class ConversionOutputModes
+{
+    public static bool IsNewMod(this ConversionOutputMode mode) => mode == ConversionOutputMode.NewMod;
+
+    /// <summary>Writes into the source mod rather than building a separate one.</summary>
+    public static bool EditsSourceMod(this ConversionOutputMode mode) => mode != ConversionOutputMode.NewMod;
+
+    /// <summary>Leaves the source item working instead of moving it to the target.</summary>
+    public static bool KeepsSource(this ConversionOutputMode mode) => mode == ConversionOutputMode.AddToMod;
 }
 
 public enum ConversionResultStatus
@@ -35,15 +60,6 @@ public sealed record ConversionEndpoint(
     string? Slot = null,
     ushort? GenderRace = null);
 
-public sealed record ConversionRequest(
-    string ModDirectory,
-    string SourceRoot,
-    ConversionEndpoint Source,
-    ConversionEndpoint Target,
-    ConversionOutputMode OutputMode,
-    string? OutputDirectory = null,
-    string? DisplayName = null);
-
 public sealed record PlanDiagnostic(string Code, string Message, bool IsBlocker);
 
 public sealed record ConversionOperation(
@@ -52,25 +68,4 @@ public sealed record ConversionOperation(
     string TargetPath,
     bool Required = true);
 
-public sealed record ConversionPlan(
-    ConversionRequest Request,
-    string SourceFingerprint,
-    string PlanFingerprint,
-    ImmutableArray<ConversionOperation> Operations,
-    ImmutableArray<PlanDiagnostic> Diagnostics)
-{
-    public bool CanApply => Diagnostics.All(d => !d.IsBlocker);
-}
 
-public sealed record ConversionResult(
-    ConversionResultStatus Status,
-    string? PublishedPath,
-    string? RecoveryPath,
-    ImmutableArray<string> Warnings,
-    string? Error)
-{
-    public bool IsSuccess => Status is ConversionResultStatus.Succeeded;
-
-    public static ConversionResult Failed(string error)
-        => new(ConversionResultStatus.Failed, null, null, [], error);
-}

@@ -25,6 +25,7 @@ public sealed class MainWindow : Window, IDisposable
     private readonly ConfirmDialog    _confirm = new();
     private readonly ModBrowserPanel  _browser;
     private readonly ConversionCards  _cards;
+    private readonly QueuePanel       _queue;
     private readonly ActionPanels     _actions;
     private readonly PlanView         _plan;
     private readonly LogView          _log;
@@ -46,11 +47,12 @@ public sealed class MainWindow : Window, IDisposable
         _session = plugin.Session;
         _browser = new ModBrowserPanel(_session);
         _cards   = new ConversionCards(_session);
+        _queue   = new QueuePanel(_session);
         _actions = new ActionPanels(_session, plugin.Configuration, _confirm);
         _plan    = new PlanView(_session, plugin.Configuration);
         _log     = new LogView(_session.Log);
         _history = new HistoryView(_session, _actions);
-        _meshes  = new MeshGroupsView(_session);
+        _meshes  = new MeshGroupsView(_session, plugin);
 
         Size          = new Vector2(1000, 720);
         SizeCondition = ImGuiCond.FirstUseEver;
@@ -107,7 +109,16 @@ public sealed class MainWindow : Window, IDisposable
             Widgets.Tooltip("Mods are opened by folder path, and new mods must be added to Penumbra manually.");
         }
 
-        ImGui.SameLine(ImGui.GetWindowContentRegionMax().X - ImGui.GetFrameHeight());
+        const string merge = "Merge modpacks";
+        float iconWidth;
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+            iconWidth = ImGui.CalcTextSize(FontAwesomeIcon.ObjectGroup.ToIconString()).X;
+        var mergeWidth = iconWidth + ImGui.CalcTextSize(merge).X + ImGui.GetStyle().FramePadding.X * 2 + 5f * Theme.Scale;
+        ImGui.SameLine(ImGui.GetWindowContentRegionMax().X - ImGui.GetFrameHeight() - ImGui.GetStyle().ItemSpacing.X - mergeWidth);
+        if (Widgets.IconTextButton(FontAwesomeIcon.ObjectGroup, merge, null,
+                "Combine two modpacks into one new mod, e.g. a base mod and a separate pack of upscaled models."))
+            _plugin.ToggleMergeUi();
+        ImGui.SameLine();
         if (Widgets.IconButton("##Settings", FontAwesomeIcon.Cog, "Settings"))
             _plugin.ToggleConfigUi();
         ImGui.Spacing();
@@ -145,8 +156,15 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.Spacing();
         _cards.Draw();
         ImGui.Spacing();
-        _actions.DrawOutput();
-        _actions.DrawActions();
+        _queue.Draw();
+        ImGui.Spacing();
+        Widgets.BeginAutoCard("##OutputCard");
+        try
+        {
+            _actions.DrawOutput();
+            _actions.DrawActions();
+        }
+        finally { Widgets.EndAutoCard(); }
         _actions.DrawResult();
         ImGui.Spacing();
         DrawTabs();
@@ -166,11 +184,6 @@ public sealed class MainWindow : Window, IDisposable
     private void DrawModHeader()
     {
         ImGui.TextUnformatted(_session.ModName);
-        if (_session.ModFormat is { } format)
-        {
-            ImGui.SameLine();
-            Widgets.Badge(format == Core.PenumbraModFormat.Unified ? "1.7+ format" : "Legacy format", Theme.Muted);
-        }
 
         var buttons = ImGui.GetFrameHeight() * 2 + ImGui.GetStyle().ItemSpacing.X;
         ImGui.SameLine(ImGui.GetContentRegionMax().X - buttons);

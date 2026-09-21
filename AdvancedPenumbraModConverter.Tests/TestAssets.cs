@@ -145,12 +145,14 @@ internal static class TestAssets
     /// An MDL v6 with one LOD and one single-triangle mesh per material (in order). Mesh 0's
     /// submesh carries the attribute "atr_test"; <paramref name="shapeMesh"/> gets a shape.
     /// </summary>
-    public static byte[] CreateMultiMeshMdl(string[] materials, int? shapeMesh = null)
+    public static byte[] CreateMultiMeshMdl(string[] materials, int? shapeMesh = null, int partsPerMesh = 1)
     {
         var meshCount = materials.Length;
+        var parts = partsPerMesh;
+        var indexCount = meshCount * parts * 3;
         const int vertexStride0 = 20, vertexStride1 = 16, vertexSize = vertexStride0 + vertexStride1;
         var vertexBufferSize = meshCount * vertexSize;
-        var indexBufferSize = (meshCount * 3 * 2 + 15) & ~15;
+        var indexBufferSize = (indexCount * 2 + 15) & ~15;
         var hasShape = shapeMesh.HasValue;
 
         using var stream = new MemoryStream();
@@ -182,7 +184,7 @@ internal static class TestAssets
         uint Offset(string value) => offsets[strings.IndexOf(value)];
 
         writer.Write(1f);
-        writer.Write((ushort)meshCount); writer.Write((ushort)1); writer.Write((ushort)meshCount);
+        writer.Write((ushort)meshCount); writer.Write((ushort)1); writer.Write((ushort)(meshCount * parts));
         writer.Write((ushort)meshCount); writer.Write((ushort)1); writer.Write((ushort)1);
         writer.Write((ushort)(hasShape ? 1 : 0)); writer.Write((ushort)(hasShape ? 1 : 0)); writer.Write((ushort)(hasShape ? 1 : 0));
         writer.Write((byte)1); writer.Write((byte)0); writer.Write((ushort)0);
@@ -197,16 +199,17 @@ internal static class TestAssets
         writer.Write(new byte[60 * 3]);
         for (var m = 0; m < meshCount; m++)
         {
-            writer.Write((ushort)1); writer.Write((ushort)0); writer.Write(3u);
-            writer.Write((ushort)m); writer.Write((ushort)m); writer.Write((ushort)1); writer.Write((ushort)0);
-            writer.Write((uint)(m * 3));
+            writer.Write((ushort)1); writer.Write((ushort)0); writer.Write((uint)(3 * parts));
+            writer.Write((ushort)m); writer.Write((ushort)(m * parts)); writer.Write((ushort)parts); writer.Write((ushort)0);
+            writer.Write((uint)(m * 3 * parts));
             writer.Write((uint)(m * vertexSize)); writer.Write((uint)(m * vertexSize + vertexStride0)); writer.Write(0u);
             writer.Write((byte)vertexStride0); writer.Write((byte)vertexStride1); writer.Write((byte)0); writer.Write((byte)2);
         }
         writer.Write(Offset("atr_test"));
         for (var m = 0; m < meshCount; m++)
+        for (var p = 0; p < parts; p++)
         {
-            writer.Write((uint)(m * 3)); writer.Write(3u); writer.Write(m == 0 ? 1u : 0u);
+            writer.Write((uint)((m * parts + p) * 3)); writer.Write(3u); writer.Write(m == 0 && p == 0 ? 1u : 0u);
             writer.Write((ushort)0); writer.Write((ushort)1);
         }
         foreach (var material in materials) writer.Write(Offset(material));
@@ -217,7 +220,7 @@ internal static class TestAssets
             writer.Write(Offset("shp_test"));
             writer.Write((ushort)0); writer.Write((ushort)0); writer.Write((ushort)0);
             writer.Write((ushort)1); writer.Write((ushort)0); writer.Write((ushort)0);
-            writer.Write((uint)(shapeMesh!.Value * 3)); writer.Write(1u); writer.Write(0u);
+            writer.Write((uint)(shapeMesh!.Value * 3 * parts)); writer.Write(1u); writer.Write(0u);
             writer.Write((ushort)0); writer.Write((ushort)(shapeMesh.Value));
         }
         writer.Write(2u); writer.Write((ushort)0);
@@ -239,8 +242,9 @@ internal static class TestAssets
             writer.Write((byte)128); writer.Write((byte)255); writer.Write((byte)128); writer.Write((byte)77);
         }
         var indexStart = (int)stream.Position;
-        for (var i = 0; i < meshCount * 3; i++) writer.Write((ushort)0);
-        writer.Write(new byte[indexBufferSize - meshCount * 6]);
+        // Several parts get distinct indices, so a removed part's triangles are recognizable.
+        for (var i = 0; i < indexCount; i++) writer.Write((ushort)(parts > 1 ? i % 3 : 0));
+        writer.Write(new byte[indexBufferSize - indexCount * 2]);
 
         var result = stream.ToArray();
         void U16(int offset, ushort value) => BitConverter.TryWriteBytes(result.AsSpan(offset, 2), value);

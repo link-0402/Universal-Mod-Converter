@@ -135,6 +135,31 @@ internal static class Widgets
     }
 
     /// <summary>
+    /// Header text with a compact button at the right end of its line, above the separator.
+    /// Returns whether the button was clicked.
+    /// </summary>
+    public static bool SectionTitle(string text, FontAwesomeIcon? icon, FontAwesomeIcon buttonIcon, string buttonText,
+        string? tooltip = null)
+    {
+        var start = ImGui.GetCursorPos();
+        SectionTitle(text, icon);
+        var after = ImGui.GetCursorPos();
+
+        var padding = ImGui.GetStyle().FramePadding.X;
+        float iconWidth;
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+            iconWidth = ImGui.CalcTextSize(buttonIcon.ToIconString()).X;
+        var width = iconWidth + ImGui.CalcTextSize(buttonText).X + padding * 2 + 5f * Theme.Scale;
+
+        ImGui.SetCursorPos(new Vector2(ImGui.GetContentRegionMax().X - width, start.Y));
+        bool clicked;
+        using (ImRaii.PushStyle(ImGuiStyleVar.FramePadding, new Vector2(padding, 0)))
+            clicked = IconTextButton(buttonIcon, buttonText, null, tooltip);
+        ImGui.SetCursorPos(after);
+        return clicked;
+    }
+
+    /// <summary>
     /// A path shortened in the middle to fit <paramref name="maxWidth"/>; hovering shows the
     /// full path and right-click copies it.
     /// </summary>
@@ -201,12 +226,34 @@ internal static class Widgets
     }
 
     /// <summary>Begins a bordered, padded panel. Always pair with <see cref="EndCard"/>.</summary>
-    public static void BeginCard(string id, Vector2 size)
+    public static void BeginCard(string id, Vector2 size, ImGuiWindowFlags flags = ImGuiWindowFlags.None)
     {
         ImGui.PushStyleColor(ImGuiCol.ChildBg, Theme.CardBackground);
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, Theme.Rounding);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(8f, 6f) * Theme.Scale);
-        ImGui.BeginChild(id, size, true, ImGuiWindowFlags.AlwaysUseWindowPadding);
+        ImGui.BeginChild(id, size, true, ImGuiWindowFlags.AlwaysUseWindowPadding | flags);
+    }
+
+    private static readonly Dictionary<string, float> AutoCardHeights = new();
+    private static readonly Stack<string> AutoCards = new();
+
+    /// <summary>
+    /// A card as tall as its content, for content whose height changes. The height is measured
+    /// each frame and used for the next, so a change settles one frame later. Always pair with
+    /// <see cref="EndAutoCard"/>.
+    /// </summary>
+    public static void BeginAutoCard(string id)
+    {
+        var height = AutoCardHeights.TryGetValue(id, out var measured) ? measured : ImGui.GetFrameHeightWithSpacing() * 3;
+        BeginCard(id, new Vector2(-1, height), ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        AutoCards.Push(id);
+    }
+
+    public static void EndAutoCard()
+    {
+        var style = ImGui.GetStyle();
+        AutoCardHeights[AutoCards.Pop()] = ImGui.GetCursorPosY() - style.ItemSpacing.Y + style.WindowPadding.Y + 2f * Theme.Scale;
+        EndCard();
     }
 
     public static void EndCard()

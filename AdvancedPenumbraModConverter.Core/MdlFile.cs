@@ -539,6 +539,82 @@ public sealed class MdlFile
         RequiresRebuild = true;
     }
 
+    /// <summary>
+    /// Drops materials no mesh uses and renumbers the rest. The game loads every material a
+    /// model lists before it draws the model, used or not, so one that cannot be found — a
+    /// skin material left behind by a removed skin part, say — keeps the whole model from
+    /// showing. Returns the names that were dropped.
+    /// </summary>
+    public IReadOnlyList<string> RemoveUnusedMaterials()
+    {
+        var used = Meshes.Select(m => (int)m.MaterialIndex).Where(i => i < Materials.Length).ToHashSet();
+        // Crest and background materials are named by the header rather than by a mesh.
+        foreach (var index in new int[] { ModelHeader.BackgroundMaterialIndex, ModelHeader.CrestMaterialIndex })
+            if (index != 0 && index < Materials.Length) used.Add(index);
+        if (used.Count == Materials.Length) return [];
+
+        var map = new int[Materials.Length];
+        var kept = ImmutableArray.CreateBuilder<string>();
+        var removed = new List<string>();
+        for (var i = 0; i < Materials.Length; i++)
+        {
+            if (used.Contains(i))
+            {
+                map[i] = kept.Count;
+                kept.Add(Materials[i]);
+            }
+            else removed.Add(Materials[i]);
+        }
+
+        ushort Remap(ushort index) => index < map.Length && used.Contains(index) ? checked((ushort)map[index]) : (ushort)0;
+        Meshes = Meshes.Select(m => m with { MaterialIndex = Remap(m.MaterialIndex) }).ToImmutableArray();
+        ModelHeader = ModelHeader with
+        {
+            BackgroundMaterialIndex = (byte)Remap(ModelHeader.BackgroundMaterialIndex),
+            CrestMaterialIndex = (byte)Remap(ModelHeader.CrestMaterialIndex),
+        };
+        Materials = kept.ToImmutable();
+        RequiresRebuild = true;
+        return removed;
+    }
+
+    /// <summary>
+    /// Hides submeshes (by absolute submesh-table index) by turning their triangles into
+    /// zero-area ones: every index of the submesh's range is set to its first index. Nothing
+    /// moves and no table changes, so this is safe whether the game draws a mesh as a whole or
+    /// submesh by submesh, and a shape that replaces one of those indices still yields
+    /// zero-area triangles.
+    /// </summary>
+    public void RemoveSubmeshes(IReadOnlyCollection<int> submeshIndices)
+    {
+        foreach (var index in submeshIndices)
+        {
+            if ((uint)index >= (uint)Submeshes.Length)
+                throw new ArgumentOutOfRangeException(nameof(submeshIndices), "A submesh index is outside the submesh table.");
+            var mesh = -1;
+            for (var m = 0; m < Meshes.Length && mesh < 0; m++)
+                if (index >= Meshes[m].SubmeshIndex && index < Meshes[m].SubmeshIndex + Meshes[m].SubmeshCount)
+                    mesh = m;
+            if (mesh < 0) throw new InvalidDataException($"MDL submesh {index} belongs to no mesh.");
+            var lod = -1;
+            for (var l = 0; l < Math.Min(Header.LodCount, Lods.Length) && lod < 0; l++)
+                if (mesh >= Lods[l].MeshIndex && mesh < Lods[l].MeshIndex + Lods[l].MeshCount)
+                    lod = l;
+            if (lod < 0) throw new InvalidDataException($"MDL mesh {mesh} belongs to no LOD.");
+
+            var submesh = Submeshes[index];
+            if (submesh.IndexCount == 0) continue;
+            // Submesh index offsets count from the start of their LOD's index buffer.
+            var end = ((long)submesh.IndexOffset + submesh.IndexCount) * 2;
+            if (end > Lods[lod].IndexBufferSize)
+                throw new InvalidDataException($"MDL submesh {index} exceeds its LOD's index buffer.");
+            var span = _bytes.AsSpan(checked((int)(Lods[lod].IndexDataOffset + submesh.IndexOffset * 2)),
+                checked((int)submesh.IndexCount * 2));
+            var first = BinaryPrimitives.ReadUInt16LittleEndian(span);
+            for (var i = 2; i < span.Length; i += 2) BinaryPrimitives.WriteUInt16LittleEndian(span[i..], first);
+        }
+    }
+
     internal Span<byte> MutableBytes => _bytes;
 
     internal int VertexOffset(int lodIndex, int meshIndex, int stream, int vertexIndex)

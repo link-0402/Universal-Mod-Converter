@@ -65,7 +65,7 @@ var tests = new (string Name, Action Run)[]
     ("TexTools-style equipment/accessory path retargeting", TestGearPaths),
     ("Hair material sharing and skin references", TestCharacterMaterialPaths),
     ("Plan fingerprint is deterministic", TestFingerprint),
-}.Concat(GearConversionTests.All).Concat(CustomizationRuleTests.All).Concat(AnimationTests.All).ToArray();
+}.Concat(GearConversionTests.All).Concat(CustomizationRuleTests.All).Concat(AnimationTests.All).Concat(ModMergerTests.All).Concat(MeshPartTests.All).ToArray();
 
 var failures = 0;
 foreach (var test in tests)

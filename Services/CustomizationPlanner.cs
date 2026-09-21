@@ -29,9 +29,9 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         if (task.SourceGenderRace is not { } sourceRace || task.TargetGenderRace is not { } targetRace)
             throw new InvalidDataException("Source and target playable race/gender codes are required.");
         if (!descriptor.SupportsRace(sourceRace))
-            throw new InvalidDataException($"{descriptor.DisplayName} is not valid for c{sourceRace:D4}.");
+            throw new InvalidDataException($"{descriptor.DisplayName} is not valid for {RaceNames.Describe(sourceRace)}.");
         if (!targetDescriptor.SupportsRace(targetRace))
-            throw new InvalidDataException($"{targetDescriptor.DisplayName} is not valid for c{targetRace:D4}.");
+            throw new InvalidDataException($"{targetDescriptor.DisplayName} is not valid for {RaceNames.Describe(targetRace)}.");
         if (CustomizationTargets.BlockReason(task.Kind, sourceRace, targetKind, targetRace) is { } blocked)
             throw new InvalidDataException(blocked);
 
@@ -45,12 +45,24 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         var root = Path.GetFullPath(task.ModDirectory);
         task.SourceRoot = descriptor.Root(sourceRace, oldId);
 
+        var extraTargets = ReadExtraTargets(task, targetKind, source, target);
         var resources = ReadResources(root);
-        var keys = new KeyRules(source, target, resources);
+        var keys = new KeyRules(source, target, resources, extraTargets, task.KeepSourcePaths || extraTargets.Count > 0);
         var assets = DiscoverAssets(root, resources.Files, source);
         if (assets.Count == 0)
             throw new InvalidDataException($"No {descriptor.DisplayName.ToLowerInvariant()} root matched " +
                                            $"c{sourceRace:D4}/{descriptor.Token(oldId)}.");
+
+        // A model or material carries the race and model ID inside it, so one file cannot serve
+        // several targets and cannot be left alone while its key is copied: it would still be
+        // rewritten in place, breaking the original. Textures carry nothing, which is why the
+        // fan-out is offered for them alone.
+        if ((task.KeepSourcePaths || extraTargets.Count > 0) &&
+            assets.FirstOrDefault(file => StructuredExtensions.Contains(Path.GetExtension(file))) is { } structured)
+            throw new InvalidDataException(
+                $"This {descriptor.DisplayName.ToLowerInvariant()} replaces more than textures " +
+                $"({Path.GetFileName(structured)}), so it cannot be added to other races or IDs while keeping " +
+                "the original. Convert it to a single target instead.");
 
         task.AllAssetFiles.Clear();
         task.AllAssetFiles.AddRange(assets);
@@ -134,7 +146,8 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                 if (bytes == null)
                 {
                     task.Diagnostics.Add(new PlanDiagnostic("missing_material_dependency",
-                        $"Material '{sourcePath}' required by '{Path.GetFileName(file)}' could not be read.", true));
+                        $"Material '{sourcePath}' required by '{Path.GetFileName(file)}' could not be read." +
+                        GearConversionExecutor.MergeHint, true));
                     continue;
                 }
                 // Preserve vanilla texture references, shader constants and alpha behavior.
@@ -210,13 +223,34 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                 yield return local;
     }
 
+    /// <summary>
+    /// The additional races or model IDs the conversion also writes. Only offered for textures,
+    /// where one file can serve every target; anything with paths inside it would need its own
+    /// rewritten copy per target.
+    /// </summary>
+    private static List<CustomizationPathEndpoint> ReadExtraTargets(ConversionTask task, AssetKind targetKind,
+        CustomizationPathEndpoint source, CustomizationPathEndpoint primary)
+    {
+        var extras = new List<CustomizationPathEndpoint>();
+        foreach (var extra in task.ExtraTargets)
+        {
+            var race = extra.GenderRace ?? primary.GenderRace;
+            var endpoint = new CustomizationPathEndpoint(targetKind, race, extra.ModelId);
+            if (endpoint == primary || endpoint == source || extras.Contains(endpoint)) continue;
+            if (CustomizationTargets.BlockReason(source.Kind, source.GenderRace, targetKind, race) is { } blocked)
+                throw new InvalidDataException(blocked);
+            extras.Add(endpoint);
+        }
+
+        return extras;
+    }
+
     private static ModResourceIndex ReadResources(string root)
     {
         var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var swaps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var estOverrides = new Dictionary<EstOverrideKey, ushort>();
-        // Legacy mods keep containers in default_mod.json/group_*.json; Penumbra 1.7+ mods
-        // keep everything in meta.json. Other JSON files inside option folders are not data.
+        // Every container lives in meta.json; other JSON files inside option folders are not data.
         foreach (var jsonFile in PenumbraMod.DefinitionFiles(root).Where(File.Exists))
         {
             JsonNode? node;
@@ -252,7 +286,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             if (!TryInt(est["SetId"], out var setId) || setId is < 0 or > ushort.MaxValue ||
                 !TryInt(est["Entry"], out var skeletonId) || skeletonId is < 0 or > ushort.MaxValue ||
                 !TryEstKind(est["Slot"]?.GetValue<string>(), out var kind) ||
-                !TryGenderRace(est["Race"]?.GetValue<string>(), est["Gender"]?.GetValue<string>(), out var race))
+                !GenderRaces.TryParse(est["Race"]?.GetValue<string>(), est["Gender"]?.GetValue<string>(), out var race))
                 return;
             estOverrides[new EstOverrideKey(kind, race, (ushort)setId)] = (ushort)skeletonId;
         }
@@ -267,8 +301,8 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             rename => Normalize(Path.GetRelativePath(root, rename.OldPath)),
             rename => Normalize(Path.GetRelativePath(root, rename.NewPath)),
             StringComparer.OrdinalIgnoreCase);
-        var sourceNames = RaceNames(source.GenderRace);
-        var targetNames = RaceNames(target.GenderRace);
+        var sourceNames = GenderRaces.Names(source.GenderRace);
+        var targetNames = GenderRaces.Names(target.GenderRace);
 
         foreach (var jsonFile in PenumbraMod.DefinitionFiles(root).Where(File.Exists))
         {
@@ -335,6 +369,9 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                                 changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[{dictKey}]", OldValue = valueText, NewValue = replacement, ChangeType = "path_value" });
                             if (key == "Files" && newKey != null)
                                 foreach (var extra in keys.ExtraTargetVariants(newKey))
+                                    variantAdditions[extra] = replacement;
+                            if (key == "Files")
+                                foreach (var extra in keys.ExtraTargetKeys(dictKey))
                                     variantAdditions[extra] = replacement;
                         }
                         foreach (var (extra, extraValue) in variantAdditions.ToList())
@@ -460,16 +497,15 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                 continue;
             if (skeleton == defaultSkeleton) defaultAvailable = false;
             task.Diagnostics.Add(new PlanDiagnostic("extra_skeleton_missing",
-                $"The source uses extra skeleton {prefix}{skeleton:D4}, which does not exist for c{target.GenderRace:D4} " +
+                $"The source uses extra skeleton {prefix}{skeleton:D4}, which does not exist for {RaceNames.Describe(target.GenderRace)} " +
                 $"({skeletonPath}); physics bones of the converted {descriptor.DisplayName.ToLowerInvariant()} may not move.", false));
         }
 
         // An explicit default entry is retargeted with the rest of the metadata.
         if (defaultSource != null || !defaultAvailable) return;
 
-        var (file, jsonPath) = mod.Format == PenumbraModFormat.Unified
-            ? (Path.Combine(root, PenumbraMod.MetaFileName), "<root>.DefaultData")
-            : (Path.Combine(root, PenumbraMod.LegacyDefaultFileName), "<root>");
+        var file = Path.Combine(root, PenumbraMod.MetaFileName);
+        const string jsonPath = "<root>.DefaultData";
         if (!File.Exists(file))
         {
             task.Diagnostics.Add(new PlanDiagnostic("extra_skeleton_not_added",
@@ -477,7 +513,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             return;
         }
 
-        var (race, gender) = RaceNames(target.GenderRace);
+        var (race, gender) = GenderRaces.Names(target.GenderRace);
         var manipulation = new JsonObject
         {
             ["Type"] = "Est",
@@ -505,7 +541,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
     /// <summary>The extra skeleton a container sets for <paramref name="endpoint"/>, if any.</summary>
     private static ushort? FindEst(ModContainer container, CustomizationPathEndpoint endpoint)
     {
-        var (race, gender) = RaceNames(endpoint.GenderRace);
+        var (race, gender) = GenderRaces.Names(endpoint.GenderRace);
         foreach (var node in container.Manipulations ?? [])
         {
             if (node is not JsonObject obj ||
@@ -534,12 +570,17 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         private readonly CustomizationPathEndpoint _source;
         private readonly CustomizationPathEndpoint _target;
+        private readonly IReadOnlyList<CustomizationPathEndpoint> _extraTargets;
+        private readonly bool _keepSource;
         private readonly HashSet<string> _skipped = new(StringComparer.OrdinalIgnoreCase);
 
-        public KeyRules(CustomizationPathEndpoint source, CustomizationPathEndpoint target, ModResourceIndex resources)
+        public KeyRules(CustomizationPathEndpoint source, CustomizationPathEndpoint target, ModResourceIndex resources,
+            IReadOnlyList<CustomizationPathEndpoint>? extraTargets = null, bool keepSource = false)
         {
             _source = source;
             _target = target;
+            _extraTargets = extraTargets ?? [];
+            _keepSource = keepSource;
             // Hrothgar tails keep the same material in up to five variant folders. A target
             // with a single folder receives one of them: the tail's own number when present.
             if (!CustomizationPaths.IsHrothgarTail(source) || CustomizationPaths.IsHrothgarTail(target)) return;
@@ -568,11 +609,26 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         public bool IsSkipped(string key) => _skipped.Contains(Normalize(key));
 
-        /// <summary>Material keys under a root other customizations also load are copied, never moved.</summary>
+        /// <summary>
+        /// Whether this key is added rather than moved: material keys under a root other
+        /// customizations also load, and every key of a conversion that keeps its source.
+        /// </summary>
         public bool IsShared(string key)
-            => key.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase) &&
+            => _keepSource ||
+               key.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase) &&
                CustomizationPaths.FindEndpoints(key).Any(e => CustomizationPaths.IsSharedMaterialRoot(e) &&
                    (e == _source || e == CustomizationPaths.GetMaterialEndpoint(_source)));
+
+        /// <summary>The same file's key for every extra target, so one texture serves them all.</summary>
+        public IEnumerable<string> ExtraTargetKeys(string key)
+        {
+            if (IsSkipped(key)) yield break;
+            foreach (var extra in _extraTargets)
+            {
+                var rewritten = CustomizationPaths.Rewrite(key, _source, extra);
+                if (!string.Equals(rewritten, key, StringComparison.Ordinal)) yield return rewritten;
+            }
+        }
 
         public bool IsSharedMaterialFile(string localPath) => IsShared(localPath);
 
@@ -759,24 +815,4 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         return false;
     }
 
-    private static bool TryGenderRace(string? race, string? gender, out ushort code)
-    {
-        code = 0;
-        if (string.IsNullOrWhiteSpace(race) || string.IsNullOrWhiteSpace(gender)) return false;
-        string[] races = ["Midlander", "Highlander", "Elezen", "Miqote", "Roegadyn", "Lalafell", "AuRa", "Hrothgar", "Viera"];
-        var raceIndex = Array.FindIndex(races, value => value.Equals(race, StringComparison.OrdinalIgnoreCase));
-        if (raceIndex < 0) return false;
-        var genderOffset = gender.Equals("Male", StringComparison.OrdinalIgnoreCase) ? 1
-            : gender.Equals("Female", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
-        if (genderOffset == 0) return false;
-        code = checked((ushort)(((raceIndex * 2) + genderOffset) * 100 + 1));
-        return true;
-    }
-
-    private static (string Race, string Gender) RaceNames(ushort code)
-    {
-        var index = code / 100;
-        string[] races = ["Midlander", "Highlander", "Elezen", "Miqote", "Roegadyn", "Lalafell", "AuRa", "Hrothgar", "Viera"];
-        return (races[(index - 1) / 2], index % 2 == 1 ? "Male" : "Female");
-    }
 }

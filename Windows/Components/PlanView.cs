@@ -25,7 +25,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         Accent,
     }
 
-    private sealed record Section(string Title, string[] Headers, Cell[] Styles, List<string[]> Rows, bool Advanced = false);
+    private sealed record Section(string Title, string[] Headers, Cell[] Styles, List<string[]> Rows);
 
     private static readonly (string Category, string Title)[] GearSections =
     [
@@ -54,34 +54,38 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         }
 
         DrawHeader(task);
-        DrawDiagnostics(task);
+        DrawDiagnostics(task, config);
 
-        EnsureModel(task);
-        var filterWidth = Math.Min(320f * Theme.Scale, ImGui.GetContentRegionAvail().X);
-        ImGui.SetNextItemWidth(filterWidth);
-        ImGui.InputTextWithHint("##PlanFilter", "Filter changes…", ref _filter, 256);
-        ImGui.SameLine();
         var advanced = config.ShowAdvancedDetails;
         if (ImGui.Checkbox("Advanced details", ref advanced))
         {
             config.ShowAdvancedDetails = advanced;
             config.Save();
         }
-        Widgets.Tooltip("Show fingerprints and bone resolution details.");
+        Widgets.Tooltip("Every game path, metadata entry and file operation the conversion produces, " +
+                        "plus fingerprints and bone resolution.");
 
-        if (config.ShowAdvancedDetails)
+        ImGui.Spacing();
+        if (!config.ShowAdvancedDetails)
         {
-            Widgets.Muted($"Source fingerprint: {task.SourceFingerprint}");
-            Widgets.CopyOnRightClick(task.SourceFingerprint);
-            Widgets.Muted($"Plan fingerprint:   {task.PlanFingerprint}");
-            Widgets.CopyOnRightClick(task.PlanFingerprint);
+            PlanSummaryView.Draw(session, task);
+            return;
         }
+
+        EnsureModel(task);
+        var filterWidth = Math.Min(320f * Theme.Scale, ImGui.GetContentRegionAvail().X);
+        ImGui.SetNextItemWidth(filterWidth);
+        ImGui.InputTextWithHint("##PlanFilter", "Filter changes…", ref _filter, 256);
+
+        Widgets.Muted($"Source fingerprint: {task.SourceFingerprint}");
+        Widgets.CopyOnRightClick(task.SourceFingerprint);
+        Widgets.Muted($"Plan fingerprint:   {task.PlanFingerprint}");
+        Widgets.CopyOnRightClick(task.PlanFingerprint);
         ImGui.Spacing();
 
         var any = false;
         foreach (var (section, rows) in FilteredSections())
         {
-            if (section.Advanced && !config.ShowAdvancedDetails) continue;
             any = true;
             DrawSection(section, rows);
         }
@@ -110,10 +114,20 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
 
     private void DrawHeader(ConversionTask task)
     {
+        if (task.IsQueue)
+        {
+            var accepted = task.Entries.Count(e => e.Enabled && !e.Rejected);
+            ImGui.TextColored(Theme.Accent, accepted == 1
+                ? "One conversion in this run"
+                : $"{accepted} conversions in this run");
+            DrawBadges(task);
+            return;
+        }
+
         if (task.AnimationPlan is { } animation)
         {
             ImGui.TextColored(Theme.Accent, animation.Request.Description);
-            DrawBadges(task, animation.Result.Format);
+            DrawBadges(task);
             return;
         }
 
@@ -121,13 +135,13 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
             ? $"{task.Kind} → {targetKind}"
             : task.Kind.ToString();
         var race = task.SourceGenderRace.HasValue || task.TargetGenderRace.HasValue
-            ? $"   c{task.SourceGenderRace:D4} → c{task.TargetGenderRace:D4}"
+            ? $"   {RaceNames.Describe(task.SourceGenderRace ?? 0)} → {RaceNames.Describe(task.TargetGenderRace ?? 0)}"
             : string.Empty;
         ImGui.TextColored(Theme.Accent, $"{kind}: {task.OldIdPadded} → {task.NewIdPadded}{race}");
-        DrawBadges(task, task.GearPlan?.Result.Format);
+        DrawBadges(task);
     }
 
-    private void DrawBadges(ConversionTask task, PenumbraModFormat? format)
+    private void DrawBadges(ConversionTask task)
     {
         ImGui.SameLine();
         if (task.IsApplied)
@@ -138,23 +152,26 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
             Widgets.Badge("Outdated: preview again", Theme.Warning);
 
         ImGui.SameLine();
-        Widgets.Badge(task.OutputMode == ConversionOutputMode.NewMod ? "New mod" : "In place", Theme.Muted);
-        if (format is { } modFormat)
-        {
-            ImGui.SameLine();
-            Widgets.Badge(modFormat == PenumbraModFormat.Unified ? "Penumbra 1.7+ format" : "Legacy format", Theme.Muted);
-        }
+        Widgets.Badge(OutputModeBadge(task.OutputMode), Theme.Muted);
         ImGui.Spacing();
     }
 
-    private static void DrawDiagnostics(ConversionTask task)
+    internal static string OutputModeBadge(ConversionOutputMode mode) => mode switch
+    {
+        ConversionOutputMode.NewMod   => "New mod",
+        ConversionOutputMode.AddToMod => "Added to mod",
+        _                             => "In place",
+    };
+
+    private static void DrawDiagnostics(ConversionTask task, Configuration config)
     {
         if (task.Diagnostics.Count == 0) return;
 
         var blockers = task.Diagnostics.Count(d => d.IsBlocker);
+        var notes    = task.Diagnostics.Count - blockers;
         var title    = blockers > 0
-            ? $"{blockers} blocker(s), {task.Diagnostics.Count - blockers} warning(s)"
-            : $"{task.Diagnostics.Count} warning(s)";
+            ? $"{blockers} problem(s) to fix" + (notes > 0 ? $", {notes} thing(s) to check" : string.Empty)
+            : $"{notes} thing(s) to check";
         ImGui.SetNextItemOpen(true, ImGuiCond.Appearing);
         bool open;
         using (ImRaii.PushColor(ImGuiCol.Text, blockers > 0 ? Theme.Danger : Theme.Warning))
@@ -164,7 +181,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         using var table = ImRaii.Table("##DiagnosticsTable", 2,
             ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH | ImGuiTableFlags.SizingStretchProp);
         if (!table.Success) return;
-        ImGui.TableSetupColumn("Code", ImGuiTableColumnFlags.WidthFixed, 150f * Theme.Scale);
+        ImGui.TableSetupColumn("What", ImGuiTableColumnFlags.WidthFixed, 210f * Theme.Scale);
         ImGui.TableSetupColumn("Message", ImGuiTableColumnFlags.WidthStretch);
         foreach (var diagnostic in task.Diagnostics.OrderByDescending(d => d.IsBlocker))
         {
@@ -173,7 +190,12 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
             ImGui.TableNextColumn();
             Widgets.Icon(diagnostic.IsBlocker ? FontAwesomeIcon.TimesCircle : FontAwesomeIcon.ExclamationTriangle, tint);
             ImGui.SameLine();
-            ImGui.TextColored(tint, diagnostic.Code);
+            // The raw code is what to quote in a bug report, so it stays one hover away.
+            ImGui.TextColored(tint, config.ShowAdvancedDetails
+                ? diagnostic.Code
+                : DiagnosticText.Title(diagnostic.Code));
+            if (!config.ShowAdvancedDetails && DiagnosticText.HasTitle(diagnostic.Code))
+                Widgets.Tooltip(diagnostic.Code);
             Widgets.CopyOnRightClick($"[{diagnostic.Code}] {diagnostic.Message}", false);
             ImGui.TableNextColumn();
             ImGui.TextWrapped(diagnostic.Message);
@@ -248,7 +270,8 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         _builtFor    = task;
         _filteredFor = "\0"; // force refilter
         _filtered    = new();
-        _sections    = task.GearPlan is { } plan ? BuildGear(plan.Changes, plan.Files)
+        _sections    = task.IsQueue ? BuildRun(task)
+            : task.GearPlan is { } plan ? BuildGear(plan.Changes, plan.Files)
             : task.AnimationPlan is { } animation ? BuildGear(animation.Changes, animation.Files, AnimationSections)
             : BuildCustomization(task);
         _sections.RemoveAll(s => s.Rows.Count == 0);
@@ -261,6 +284,37 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         ("Option", "Option group contents"),
         ("Group", "Option groups"),
     ];
+
+    /// <summary>
+    /// The tables for a run of several conversions: the same categories, with every row saying
+    /// which conversion produced it. Splitting them into one set of tables per conversion would
+    /// bury the thing the advanced view is for — seeing the whole output at once.
+    /// </summary>
+    private static List<Section> BuildRun(ConversionTask task)
+    {
+        var changes = new List<GearPlanChange>();
+        var files   = new List<PlannedFileOperation>();
+        var gear    = false;
+        foreach (var entry in task.Entries.Where(e => !e.Rejected && e.Plan != null))
+        {
+            switch (entry.Plan)
+            {
+                case GearConversionPlan plan:
+                    gear = true;
+                    changes.AddRange(plan.Changes.Select(c => c with { Scope = $"{entry.Description} · {c.Scope}" }));
+                    files.AddRange(plan.Files);
+                    break;
+                case AnimationConversionPlan animation:
+                    changes.AddRange(animation.Changes.Select(c => c with { Scope = $"{entry.Description} · {c.Scope}" }));
+                    files.AddRange(animation.Files);
+                    break;
+            }
+        }
+
+        // Animation categories are a subset of the gear ones plus two of their own, so a mixed
+        // run uses whichever set covers what it actually produced; unknown ones get their own table.
+        return BuildGear(changes, files, gear ? GearSections : AnimationSections);
+    }
 
     private static List<Section> BuildGear(IReadOnlyList<GearPlanChange> changes, IReadOnlyList<PlannedFileOperation> files,
         (string Category, string Title)[]? categories = null)
@@ -315,7 +369,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
                     r.Bone,
                     r.ResolvedBone ?? "identity",
                     r.Strategy.ToString(),
-                })).ToList(), Advanced: true),
+                })).ToList()),
         ];
     }
 
