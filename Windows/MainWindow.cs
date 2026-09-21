@@ -7,6 +7,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
+using Dalamud.Utility;
 
 namespace UniversalModConverter.Windows;
 
@@ -19,6 +20,7 @@ public sealed class MainWindow : Window, IDisposable
 {
     private const float MinBrowserWidth = 160f;
     private const float MaxBrowserWidth = 520f;
+    private const string KofiUrl = "https://ko-fi.com/luci_xiv";
 
     private readonly Plugin           _plugin;
     private readonly ConverterSession _session;
@@ -61,9 +63,28 @@ public sealed class MainWindow : Window, IDisposable
             MinimumSize = new Vector2(640, 440),
             MaximumSize = new Vector2(float.MaxValue, float.MaxValue),
         };
+
+        TitleBarButtons.Add(new TitleBarButton
+        {
+            Icon = FontAwesomeIcon.Heart,
+            Click = _ => OpenKofiPage(),
+            ShowTooltip = () => ImGui.SetTooltip("♥ Support me on Ko-fi"),
+        });
     }
 
     public void Dispose() { }
+
+    private void OpenKofiPage()
+    {
+        try
+        {
+            Util.OpenLink(KofiUrl);
+        }
+        catch (Exception e)
+        {
+            Plugin.Log.Error(e, "Could not open the Universal Mod Converter Ko-fi page.");
+        }
+    }
 
     public override void OnOpen()
     {
