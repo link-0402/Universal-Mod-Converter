@@ -99,12 +99,19 @@ public sealed partial class ConverterSession
     public int TargetCustomizationId { get; private set; } = 1;
 
     /// <summary>
-    /// Texture-only customization roots: further races the same textures are also written for.
-    /// The primary target is never in here.
+    /// Texture-only customization roots: further (race, ID) pairs the same textures are also
+    /// written for, e.g. a face texture offered to several face IDs of a race at once. The
+    /// primary target (<see cref="TargetRace"/>, <see cref="TargetCustomizationId"/>) is never
+    /// in here.
     /// </summary>
-    private readonly SortedSet<ushort> _extraTargetRaces = [];
+    private readonly HashSet<(ushort Race, ushort Id)> _extraTargets = new();
 
-    public IReadOnlyCollection<ushort> ExtraTargetRaces => _extraTargetRaces;
+    public IReadOnlyCollection<(ushort Race, ushort Id)> ExtraTargets => _extraTargets;
+
+    /// <summary>How many extra targets are checked for <paramref name="race"/>.</summary>
+    public int ExtraTargetCount(ushort race) => _extraTargets.Count(e => e.Race == race);
+
+    public bool IsExtraTarget(ushort race, ushort id) => _extraTargets.Contains((race, id));
 
     /// <summary>Texture-only roots: keep the source race's paths as well as writing the targets.</summary>
     public bool KeepSourcePaths { get; private set; }
@@ -112,10 +119,11 @@ public sealed partial class ConverterSession
     /// <summary>Whether the selected root can be written for several races at once.</summary>
     public bool CanFanOutTextures => Source is { IsCustomization: true, IsTextureOnly: true };
 
-    public void SetExtraTargetRace(ushort race, bool on)
+    public void SetExtraTarget(ushort race, ushort id, bool on)
     {
-        if (race == TargetRace || !AllowedTargetRaces.Contains(race)) return;
-        if (on ? !_extraTargetRaces.Add(race) : !_extraTargetRaces.Remove(race)) return;
+        if (!AllowedTargetRaces.Contains(race)) return;
+        var key = (race, id);
+        if (on ? !_extraTargets.Add(key) : !_extraTargets.Remove(key)) return;
         MarkDirty();
     }
 
@@ -128,7 +136,7 @@ public sealed partial class ConverterSession
 
     private void ClearFanOut()
     {
-        _extraTargetRaces.Clear();
+        _extraTargets.Clear();
         KeepSourcePaths = false;
     }
 
@@ -446,7 +454,6 @@ public sealed partial class ConverterSession
     {
         if (race == TargetRace || !AllowedTargetRaces.Contains(race)) return;
         TargetRace = race;
-        _extraTargetRaces.Remove(race);
         _fixTargetId = true;
         MarkDirty();
     }
@@ -534,12 +541,14 @@ public sealed partial class ConverterSession
     /// <summary>
     /// Why the converted item cannot be added beside the original, or null. Hair, face, tail
     /// and Viera-ear conversions rewrite their model and material files in place, which would
-    /// retarget the original as well, so they still have to replace it.
+    /// retarget the original as well, so they still have to replace it. A texture-only root that
+    /// keeps the source race or adds further targets only ever adds paths, so it is exempt.
     /// </summary>
     public string? AddToModBlockReason
-        => _queue.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind)) is { } entry
+        => _queue.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind) &&
+                                       !(e.Task.KeepSourcePaths || e.Task.ExtraTargets.Count > 0)) is { } entry
             ? $"{CustomizationKinds.Get(entry.Kind).DisplayName} conversions replace the original; " +
-              "create a new mod to keep it."
+              "create a new mod to keep it, or keep the source race (or add further targets) to keep it working here."
             : null;
 
     public void SetOutputMode(ConversionOutputMode mode)
@@ -631,13 +640,13 @@ public sealed partial class ConverterSession
             };
     }
 
-    /// <summary>Adds the extra races a texture-only root is also written for.</summary>
+    /// <summary>Adds the extra (race, ID) targets a texture-only root is also written for.</summary>
     private void AddExtraTargets(ConversionTask task, DetectedItem source)
     {
         if (source is not { IsCustomization: true, IsTextureOnly: true }) return;
-        foreach (var race in _extraTargetRaces.Where(r => r != TargetRace))
-            task.ExtraTargets.Add(new ConversionEndpoint(TargetCustomizationKind, (ushort)TargetCustomizationId,
-                GenderRace: race));
+        var primary = (TargetRace, (ushort)TargetCustomizationId);
+        foreach (var (race, id) in _extraTargets.Where(e => e != primary))
+            task.ExtraTargets.Add(new ConversionEndpoint(TargetCustomizationKind, id, GenderRace: race));
     }
 
     public void Preview()

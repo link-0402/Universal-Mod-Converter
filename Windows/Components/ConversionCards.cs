@@ -334,40 +334,76 @@ internal sealed class ConversionCards(ConverterSession session)
     }
 
     /// <summary>
-    /// Textures carry no paths inside them, so one file can serve several races at once. The
-    /// option only appears for a root the mod replaces nothing but textures in, because a model
-    /// or material would have to differ per race and cannot be shared.
+    /// Textures carry no paths inside them, so one file can serve several races (and, for a kind
+    /// with several IDs per race such as faces, several IDs) at once. The option only appears for
+    /// a root the mod replaces nothing but textures in, because a model or material would have to
+    /// differ per target and cannot be shared.
     /// </summary>
-    private void DrawTextureFanOut(DetectedItem source, float labelWidth)
+    private void DrawTextureFanOut(DetectedItem source)
     {
         if (!session.CanFanOutTextures) return;
 
-        ImGui.AlignTextToFramePadding();
+        ImGui.Spacing();
         ImGui.TextUnformatted("Also for");
-        ImGui.SameLine(labelWidth);
+        Widgets.Tooltip("The same textures are written for whatever is ticked below as well. The mod replaces " +
+                        "only textures here, so one file can serve all of them.");
 
-        var extras = session.ExtraTargetRaces;
-        var label = extras.Count == 0
-            ? "Only the race above"
-            : string.Join(", ", extras.Select(ConverterSession.RaceLabel));
-        ImGui.SetNextItemWidth(-1);
-        using (var combo = ImRaii.Combo("##ExtraRaces", label, ImGuiComboFlags.HeightLarge))
+        var kind  = session.TargetCustomizationKind;
+        var races = session.AllowedTargetRaces.Where(r => r != session.TargetRace).OrderBy(r => r).ToList();
+
+        if (kind != AssetKind.Body && races.Any(r => session.GameData.TryGetCustomizationOptions(kind, r) == null))
         {
-            if (combo.Success)
-                foreach (var race in session.AllowedTargetRaces.Where(r => r != session.TargetRace))
-                {
-                    var on = extras.Contains(race);
-                    if (ImGui.Checkbox(RaceNames.Describe(race), ref on)) session.SetExtraTargetRace(race, on);
-                }
+            Widgets.Spinner(Theme.Accent);
+            ImGui.SameLine();
+            Widgets.Muted("Loading the options players can choose…");
         }
-        Widgets.Tooltip("The same textures are written for these races as well. The mod replaces only " +
-                        "textures here, so one file can serve all of them.");
+        else if (races.Count == 0)
+        {
+            Widgets.MutedWrapped("No other race accepts this kind.");
+        }
+        else
+        {
+            using var list = ImRaii.Child("##FanOutList", new Vector2(-1, 160f * Theme.Scale), true);
+            if (list.Success)
+                foreach (var race in races)
+                    DrawFanOutRace(kind, race);
+        }
 
         var keep = session.KeepSourcePaths;
-        ImGui.SameLine(labelWidth);
         if (ImGui.Checkbox("Keep the original race too", ref keep)) session.SetKeepSourcePaths(keep);
         Widgets.Tooltip($"Leave {ConverterSession.RaceLabel(source.GenderRace ?? 0)} with these textures " +
                         "instead of moving them away.");
+    }
+
+    /// <summary>
+    /// One race/gender row, in the list ordered by race code. A kind with at most one ID per
+    /// race (skins, and any race/kind pair with a single option) is a single toggle; a kind with
+    /// several (faces, mostly) expands into a checkbox per ID the players of that race can choose.
+    /// </summary>
+    private void DrawFanOutRace(AssetKind kind, ushort race)
+    {
+        var options = kind == AssetKind.Body ? null : session.GameData.TryGetCustomizationOptions(kind, race);
+        if (options is not { Count: > 1 })
+        {
+            var id = options is { Count: > 0 } list ? list[0].Id : (ushort)1;
+            var on = session.IsExtraTarget(race, id);
+            if (ImGui.Checkbox(ConverterSession.RaceLabel(race), ref on)) session.SetExtraTarget(race, id, on);
+            return;
+        }
+
+        var selected = session.ExtraTargetCount(race);
+        var header   = selected > 0 ? $"{ConverterSession.RaceLabel(race)}  ·  {selected} selected" : ConverterSession.RaceLabel(race);
+        if (!ImGui.CollapsingHeader($"{header}###FanOutRace{race}")) return;
+
+        // CollapsingHeader does not leave a lasting ID scope, so the race is folded into every
+        // checkbox's own ID: two expanded races can otherwise share the same face ID.
+        using var indent = ImRaii.PushIndent();
+        foreach (var option in options)
+        {
+            var on = session.IsExtraTarget(race, option.Id);
+            if (ImGui.Checkbox($"{option.Label}##{race}_{option.Id}", ref on)) session.SetExtraTarget(race, option.Id, on);
+            if (option.Clans != null) Widgets.Tooltip($"Only {option.Clans} players can choose this.");
+        }
     }
 
     private void DrawCustomizationTarget(DetectedItem source)
@@ -404,7 +440,10 @@ internal sealed class ConversionCards(ConverterSession session)
             ? "Races with this kind of asset. Lalafell convert only among Lalafell, and faces and skins keep their gender."
             : "Races with this kind of asset. Lalafell convert only among Lalafell.");
 
-        DrawTextureFanOut(source, labelWidth);
+        DrawTextureFanOut(source);
+
+        // A skin has exactly one ID per race; there is nothing for the player to pick.
+        if (session.TargetCustomizationKind == AssetKind.Body) return;
 
         var kindName = session.TargetCustomizationKind == AssetKind.VieraEar
             ? "Ears"

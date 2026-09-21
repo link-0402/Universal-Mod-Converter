@@ -191,9 +191,15 @@ public sealed class GameDataService : IGameFileProvider
     public IReadOnlyList<CustomizationOption> GetCustomizationOptions(AssetKind kind, ushort genderRace)
         => Lookup(PlayerOptions(), kind, genderRace);
 
-    /// <summary>Label for any root, e.g. "Face 101 (Keeper of the Moon)" or "Face 91 (NPC)".</summary>
+    /// <summary>
+    /// Label for any root, e.g. "Face 101 (Keeper of the Moon)" or "Face 91 (NPC)". A body root
+    /// never has player-choosable IDs to look up (there is exactly one skin per race), so it is
+    /// simply "Skin", never a numeric ID players cannot act on.
+    /// </summary>
     public string DescribeCustomization(AssetKind kind, ushort genderRace, ushort id)
     {
+        if (kind == AssetKind.Body)
+            return id <= 1 ? CustomizationKinds.Get(kind).DisplayName : $"{CustomizationKinds.Get(kind).DisplayName} {id}";
         var option = GetCustomizationOptions(kind, genderRace).FirstOrDefault(o => o.Id == id);
         return option?.Label ?? $"{OptionLabel(kind, id)} (NPC)";
     }
