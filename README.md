@@ -2,8 +2,6 @@
 
 A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](https://github.com/xivdev/Penumbra) mods to a different item, slot or race, keeping the mod's options and toggles intact.
 
-> **Tip:** Use **Create a new mod** (the default) so your source mod is never touched, and report anything that looks wrong.
-
 ## What it does
 
 - **Gear and facewear:** retarget an item to any other wearable item, including a different slot. Weapons are not supported.
@@ -15,7 +13,7 @@ A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](ht
 
 ## Installation
 
-The plugin is distributed through the shared [DalamudPlugins](https://github.com/link-0402/DalamudPlugins) repository.
+The plugin is distributed through my shared [DalamudPlugins](https://github.com/link-0402/DalamudPlugins) repository.
 
 1. Open `/xlsettings` → **Experimental**.
 2. Under **Custom Plugin Repositories**, add this URL and click **Save**:
@@ -38,6 +36,7 @@ Open the window with `/umc` (settings: `/umcconfig` or the cog icon).
 6. Click **Create new mod**, **Add to this mod** or **Convert in place**. The result is verified and loaded in Penumbra.
 
 Nothing converts until it's added to the **conversion plan**; Preview and Apply both work on the whole plan, so one apply is one revertable entry in **History**. **Merge modpacks** (top right) is a separate flow for combining two modpacks.
+During gear conversion you can tick off parts of the mesh you'd like to remove. When converting to a different slot, body parts will automatically be removed. Note that this cannot automatically add body meshes for the new output slot.
 
 ## Safety and reverting
 
