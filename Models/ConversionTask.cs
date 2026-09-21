@@ -122,12 +122,6 @@ public class ConversionTask
     /// </summary>
     public List<ConversionEndpoint> ExtraTargets { get; } = new();
 
-    /// <summary>
-    /// Keep the source paths as well instead of moving them, so the original race or face ID
-    /// still gets the textures. Implied whenever <see cref="ExtraTargets"/> is used.
-    /// </summary>
-    public bool KeepSourcePaths { get; set; }
-
     // ── Runs of several conversions ──────────────────────────────────────────
 
     /// <summary>
@@ -164,7 +158,6 @@ public class ConversionTask
             TargetSlot              = TargetSlot,
             TargetVariant           = TargetVariant,
             SourceVariant           = SourceVariant,
-            KeepSourcePaths         = KeepSourcePaths,
         };
         copy.ExtraTargets.AddRange(ExtraTargets);
         return copy;

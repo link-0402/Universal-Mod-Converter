@@ -119,11 +119,13 @@ public sealed partial class ConverterSession
                 } + (AttachExpression && AnimationOperation != AnimationOperation.Expression ? " + expression" : ""),
             };
         if (source.IsCustomization)
-            return new ConversionSide
-            {
-                Name   = $"{CustomizationKinds.Get(TargetCustomizationKind).DisplayName} {TargetCustomizationId:D4}",
-                Detail = RaceLabel(TargetRace),
-            };
+            return source.IsTextureOnly
+                ? new ConversionSide { Name = CustomizationKinds.Get(TargetCustomizationKind).DisplayName, Detail = DescribeTextureTargets() }
+                : new ConversionSide
+                {
+                    Name   = $"{CustomizationKinds.Get(TargetCustomizationKind).DisplayName} {TargetCustomizationId:D4}",
+                    Detail = RaceLabel(TargetRace),
+                };
         return TargetItem is { } item
             ? new ConversionSide { Icon = item.Icon, Name = item.Name, Detail = $"{(item.IsAccessory ? 'a' : 'e')}{item.ModelIdDisplay}" }
             : new ConversionSide { Name = "?" };

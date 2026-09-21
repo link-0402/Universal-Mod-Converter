@@ -39,10 +39,13 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         Widgets.Badge("Keeps the original", Theme.Info);
         if (additiveBlock != null) Widgets.Tooltip(additiveBlock);
 
-        if (ImGui.RadioButton("Convert in place", mode == ConversionOutputMode.InPlace))
-            session.SetOutputMode(ConversionOutputMode.InPlace);
-        ImGui.SameLine();
-        Widgets.Badge("Advanced", Theme.Warning);
+        if (session.CanConvertInPlace)
+        {
+            if (ImGui.RadioButton("Convert in place", mode == ConversionOutputMode.InPlace))
+                session.SetOutputMode(ConversionOutputMode.InPlace);
+            ImGui.SameLine();
+            Widgets.Badge("Advanced", Theme.Warning);
+        }
 
         if (mode == ConversionOutputMode.AddToMod)
         {

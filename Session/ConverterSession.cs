@@ -99,46 +99,33 @@ public sealed partial class ConverterSession
     public int TargetCustomizationId { get; private set; } = 1;
 
     /// <summary>
-    /// Texture-only customization roots: further (race, ID) pairs the same textures are also
-    /// written for, e.g. a face texture offered to several face IDs of a race at once. The
-    /// primary target (<see cref="TargetRace"/>, <see cref="TargetCustomizationId"/>) is never
-    /// in here.
+    /// Texture-only customization roots: every (race, ID) pair the same textures are written for,
+    /// e.g. a face texture offered to several face IDs of a race at once. Each becomes its own
+    /// toggleable option in a new group built for its race (see <see cref="CustomizationPlanner"/>
+    /// in Services), so ticking or unticking one here has nothing special about it — the source's
+    /// own race is just pre-ticked, since that is what the mod already has.
     /// </summary>
-    private readonly HashSet<(ushort Race, ushort Id)> _extraTargets = new();
+    private readonly HashSet<(ushort Race, ushort Id)> _textureTargets = new();
 
-    public IReadOnlyCollection<(ushort Race, ushort Id)> ExtraTargets => _extraTargets;
+    public IReadOnlyCollection<(ushort Race, ushort Id)> TextureTargets => _textureTargets;
 
-    /// <summary>How many extra targets are checked for <paramref name="race"/>.</summary>
-    public int ExtraTargetCount(ushort race) => _extraTargets.Count(e => e.Race == race);
+    /// <summary>How many targets are checked for <paramref name="race"/>.</summary>
+    public int TextureTargetCount(ushort race) => _textureTargets.Count(e => e.Race == race);
 
-    public bool IsExtraTarget(ushort race, ushort id) => _extraTargets.Contains((race, id));
-
-    /// <summary>Texture-only roots: keep the source race's paths as well as writing the targets.</summary>
-    public bool KeepSourcePaths { get; private set; }
+    public bool IsTextureTarget(ushort race, ushort id) => _textureTargets.Contains((race, id));
 
     /// <summary>Whether the selected root can be written for several races at once.</summary>
     public bool CanFanOutTextures => Source is { IsCustomization: true, IsTextureOnly: true };
 
-    public void SetExtraTarget(ushort race, ushort id, bool on)
+    public void SetTextureTarget(ushort race, ushort id, bool on)
     {
         if (!AllowedTargetRaces.Contains(race)) return;
         var key = (race, id);
-        if (on ? !_extraTargets.Add(key) : !_extraTargets.Remove(key)) return;
+        if (on ? !_textureTargets.Add(key) : !_textureTargets.Remove(key)) return;
         MarkDirty();
     }
 
-    public void SetKeepSourcePaths(bool keep)
-    {
-        if (keep == KeepSourcePaths) return;
-        KeepSourcePaths = keep;
-        MarkDirty();
-    }
-
-    private void ClearFanOut()
-    {
-        _extraTargets.Clear();
-        KeepSourcePaths = false;
-    }
+    private void ClearFanOut() => _textureTargets.Clear();
 
     // ── Output ───────────────────────────────────────────────────────────────
 
@@ -279,6 +266,7 @@ public sealed partial class ConverterSession
             if (Source is not { } source) return DetectedItems.Count == 0 ? "No convertible item was found in this mod." : "Select a source item.";
             if (source.Animation is { } animation) return AnimationBlockReason(animation);
             if (!source.IsCustomization) return TargetItem == null ? "Select a target item." : null;
+            if (source.IsTextureOnly) return _textureTargets.Count == 0 ? "Choose at least one race to convert to." : null;
             if (TargetCustomizationId is < 1 or > 9999) return "Customization IDs must be between 1 and 9999.";
             if (CustomizationTargets.BlockReason(source.Kind, source.GenderRace ?? 0, TargetCustomizationKind, TargetRace) is { } blocked)
                 return blocked;
@@ -397,6 +385,15 @@ public sealed partial class ConverterSession
             var races = AllowedTargetRaces;
             TargetRace = source.GenderRace is { } race && races.Contains(race) ? race : races.FirstOrDefault();
             _fixTargetId = true;
+            if (source.IsTextureOnly)
+            {
+                // The mod already has this race working; start with it ticked so nothing is
+                // silently dropped unless the user unticks it.
+                if (source.GenderRace is { } sourceRace) _textureTargets.Add((sourceRace, (ushort)TargetCustomizationId));
+                // Convert in place has nothing left to mean once every target becomes its own
+                // toggleable option group: there is no more "in place" to replace.
+                if (OutputMode == ConversionOutputMode.InPlace) SetOutputMode(ConversionOutputMode.NewMod);
+            }
         }
         else
             ReloadCandidates();
@@ -447,6 +444,8 @@ public sealed partial class ConverterSession
         TargetCustomizationKind = kind;
         TargetRace = AllowedTargetRaces.FirstOrDefault();
         _fixTargetId = true;
+        // A tail's and a Viera ear's IDs are unrelated numbering, so nothing here still applies.
+        _textureTargets.Clear();
         MarkDirty();
     }
 
@@ -550,9 +549,17 @@ public sealed partial class ConverterSession
               "create a new mod to keep it."
             : null;
 
+    /// <summary>
+    /// Whether "Convert in place" still means anything for the current selection or plan. A
+    /// texture-only root always becomes new toggleable option groups now, so there is no single
+    /// existing assignment left to replace in place.
+    /// </summary>
+    public bool CanConvertInPlace => !(CanFanOutTextures || _queue.Any(e => e.IsTextureOnly));
+
     public void SetOutputMode(ConversionOutputMode mode)
     {
         if (mode == ConversionOutputMode.AddToMod && AddToModBlockReason != null) return;
+        if (mode == ConversionOutputMode.InPlace && !CanConvertInPlace) return;
         if (mode == OutputMode) return;
         OutputMode = mode;
         Config.OutputMode = mode;
@@ -613,38 +620,44 @@ public sealed partial class ConverterSession
     private ConversionTask BuildTaskCore(DetectedItem source)
     {
         var target = TargetItem;
-        return source.Animation is { } animation
-            ? new ConversionTask
+        if (source.Animation is { } animation)
+            return new ConversionTask
             {
                 Kind             = AssetKind.Animation,
                 ModDirectory     = ModDirectory,
                 OutputMode       = OutputMode,
                 AnimationRequest = BuildAnimationRequest(animation),
-            }
-            : new ConversionTask
-            {
-                Kind                    = source.Kind,
-                TargetCustomizationKind = source.IsCustomization ? TargetCustomizationKind : null,
-                ModDirectory            = ModDirectory,
-                OutputMode              = OutputMode,
-                Slot                    = source.Slot,
-                OldIdPadded             = source.ModelIdPadded,
-                NewIdPadded             = source.IsCustomization ? TargetCustomizationId.ToString("D4") : target!.ModelIdPadded,
-                TargetVariant           = source.IsCustomization ? 1 : target!.Variant,
-                SourceVariant           = source.Variant,
-                SourceGenderRace        = source.GenderRace,
-                TargetGenderRace        = source.IsCustomization ? TargetRace : null,
-                KeepSourcePaths         = source is { IsCustomization: true, IsTextureOnly: true } && KeepSourcePaths,
-                TargetSlot              = !source.IsCustomization && TargetSlot != source.Slot ? TargetSlot : null,
             };
+
+        // A texture-only root has no single target: whatever is ticked in the list becomes one
+        // new option, one per (race, ID). One of them still has to carry the task's scalar
+        // fields; which one does not matter; AddExtraTargets adds the rest.
+        var textureOnly = source is { IsCustomization: true, IsTextureOnly: true };
+        var primary = textureOnly ? _textureTargets.OrderBy(t => t.Race).ThenBy(t => t.Id).FirstOrDefault() : default;
+        return new ConversionTask
+        {
+            Kind                    = source.Kind,
+            TargetCustomizationKind = source.IsCustomization ? TargetCustomizationKind : null,
+            ModDirectory            = ModDirectory,
+            OutputMode              = OutputMode,
+            Slot                    = source.Slot,
+            OldIdPadded             = source.ModelIdPadded,
+            NewIdPadded             = textureOnly ? primary.Id.ToString("D4")
+                : source.IsCustomization ? TargetCustomizationId.ToString("D4") : target!.ModelIdPadded,
+            TargetVariant           = source.IsCustomization ? 1 : target!.Variant,
+            SourceVariant           = source.Variant,
+            SourceGenderRace        = source.GenderRace,
+            TargetGenderRace        = textureOnly ? primary.Race : source.IsCustomization ? TargetRace : null,
+            TargetSlot              = !source.IsCustomization && TargetSlot != source.Slot ? TargetSlot : null,
+        };
     }
 
-    /// <summary>Adds the extra (race, ID) targets a texture-only root is also written for.</summary>
+    /// <summary>Adds every texture-only target beyond the one carried as the task's primary.</summary>
     private void AddExtraTargets(ConversionTask task, DetectedItem source)
     {
         if (source is not { IsCustomization: true, IsTextureOnly: true }) return;
-        var primary = (TargetRace, (ushort)TargetCustomizationId);
-        foreach (var (race, id) in _extraTargets.Where(e => e != primary))
+        var primary = _textureTargets.OrderBy(t => t.Race).ThenBy(t => t.Id).FirstOrDefault();
+        foreach (var (race, id) in _textureTargets.Where(e => e != primary))
             task.ExtraTargets.Add(new ConversionEndpoint(TargetCustomizationKind, id, GenderRace: race));
     }
 
@@ -881,10 +894,25 @@ public sealed partial class ConverterSession
     {
         if (source.Animation is { } animation) return DescribeAnimation(animation);
         if (source.IsCustomization)
-            return $"{RaceLabel(source.GenderRace ?? 0)} {source.ItemName} → {RaceLabel(TargetRace)} {TargetOptionLabel}";
+            return source.IsTextureOnly
+                ? $"{RaceLabel(source.GenderRace ?? 0)} {source.ItemName} → {DescribeTextureTargets()}"
+                : $"{RaceLabel(source.GenderRace ?? 0)} {source.ItemName} → {RaceLabel(TargetRace)} {TargetOptionLabel}";
         var target = TargetItem == null ? "?" : $"{TargetItem.Name} ({TargetItem.ModelIdDisplay})";
         return $"{source.ItemName} ({source.ModelIdDisplay}) → {target}" +
                (TargetSlot != source.Slot ? $" [{SlotInfo.DisplayLabelMap[source.Slot]} → {SlotInfo.DisplayLabelMap[TargetSlot]}]" : string.Empty);
+    }
+
+    /// <summary>The whole ticked (race, ID) set of a texture-only root, for summaries.</summary>
+    private string DescribeTextureTargets()
+    {
+        if (_textureTargets.Count == 0) return "?";
+        if (_textureTargets.Count == 1)
+        {
+            var (race, id) = _textureTargets.First();
+            return $"{RaceLabel(race)} {GameDataService.OptionLabel(TargetCustomizationKind, id)}";
+        }
+        var races = _textureTargets.Select(t => t.Race).Distinct().Count();
+        return $"{_textureTargets.Count} option(s) across {races} race(s)";
     }
 
     // ─────────────────────────────────────────────────────────────────────────

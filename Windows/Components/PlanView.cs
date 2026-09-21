@@ -391,8 +391,10 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         "numeric_id"          => "ID",
         "numeric_id_string"   => "ID",
         "path_key_copy"       => "Copy",
+        "path_key_delete"     => "Remove",
         "dependency_files"    => "Add",
         "manipulation_insert" => "Meta",
+        "group_insert"        => "New group",
         _                     => changeType,
     };
 }

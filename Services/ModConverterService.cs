@@ -1005,7 +1005,7 @@ public sealed class ModConverterService
 
         int applied = 0;
         // Key renames and copies go last so value edits can still find their original key.
-        foreach (var change in selectedChanges.OrderBy(c => c.ChangeType is "path_key" or "path_key_copy" ? 1 : 0))
+        foreach (var change in selectedChanges.OrderBy(c => c.ChangeType is "path_key" or "path_key_copy" or "path_key_delete" ? 1 : 0))
             if (ApplyJsonChangeAtPath(node, change)) applied++;
 
         if (applied != selectedChanges.Count)
@@ -1040,6 +1040,16 @@ public sealed class ModConverterService
                 var identity = GearManipulations.Identity(manipulation);
                 if (!manipulations.OfType<JsonObject>().Any(m => GearManipulations.Identity(m) == identity))
                     manipulations.Add(manipulation);
+                return true;
+            }
+
+            if (change.ChangeType == "group_insert")
+            {
+                // A whole new option group (see CustomizationPlanner.PlanTextureGroups), appended
+                // to the mod's group list, creating it if this is the mod's first group.
+                if (root is not JsonObject rootObj) return false;
+                if (rootObj["Groups"] is not JsonArray groups) rootObj["Groups"] = groups = new JsonArray();
+                groups.Add((JsonObject)JsonNode.Parse(change.NewValue)!);
                 return true;
             }
 
@@ -1103,6 +1113,13 @@ public sealed class ModConverterService
                     if (string.Equals(kv.Key, change.OldValue, StringComparison.OrdinalIgnoreCase))
                     {
                         var val = dictNode[kv.Key];
+                        // A texture root's key that moved into its own new option group; nothing
+                        // takes its place here (see CustomizationPlanner.RemoveSourceKeys).
+                        if (change.ChangeType == "path_key_delete")
+                        {
+                            dictNode.Remove(kv.Key);
+                            return true;
+                        }
                         // Keys under shared material roots are copied: other customizations still load them.
                         if (change.ChangeType == "path_key_copy")
                         {
