@@ -37,23 +37,40 @@ public static class CustomizationDetection
     }
 
     /// <summary>
-    /// True when the mod replaces only textures under this root. A skin or face retexture is
-    /// exactly that, and it is the case where one file can serve several races or face IDs,
-    /// because a texture has no paths inside it to retarget.
+    /// True when the same files can simply be offered under other races or IDs: the mod replaces
+    /// only textures under this root, or, for faces and skins, textures and materials. A texture
+    /// has no paths inside it to retarget, and a face or skin material only points at textures,
+    /// which a fan-out can follow (see <see cref="TextureFanOutPlanner"/>). Anything with a model
+    /// has to be converted properly instead.
     /// </summary>
-    public static bool IsTextureOnly(PenumbraMod mod, CustomizationPathEndpoint endpoint)
+    public static bool CanFanOut(PenumbraMod mod, CustomizationPathEndpoint endpoint)
     {
-        var any = false;
+        var allowed = endpoint.Kind is AssetKind.Face or AssetKind.Body
+            ? AssetContents.Texture | AssetContents.Material
+            : AssetContents.Texture;
+        var contents = Contents(mod, endpoint);
+        return contents != AssetContents.None && (contents & ~allowed) == AssetContents.None;
+    }
+
+    /// <summary>
+    /// What converting this root touches, for the user: the kinds of files the mod redirects under
+    /// it, plus textures its materials load that the mod also replaces (see <see cref="ModContents.Of"/>).
+    /// </summary>
+    public static AssetContents Affected(PenumbraMod mod, string modDirectory, CustomizationPathEndpoint endpoint)
+        => ModContents.Of(mod, modDirectory, path => CustomizationPaths.Contains(path, endpoint));
+
+    /// <summary>What kinds of files the mod redirects under this root, and nothing else.</summary>
+    public static AssetContents Contents(PenumbraMod mod, CustomizationPathEndpoint endpoint)
+    {
+        var contents = AssetContents.None;
         foreach (var container in mod.Containers)
         foreach (var (gamePath, _) in container.FileEntries().Concat(container.SwapEntries()))
         {
             var normalized = GamePath.Normalize(gamePath);
-            if (!CustomizationPaths.Contains(normalized, endpoint)) continue;
-            any = true;
-            if (!normalized.EndsWith(".tex", StringComparison.Ordinal)) return false;
+            if (CustomizationPaths.Contains(normalized, endpoint)) contents |= AssetContentsExtensions.Of(normalized);
         }
 
-        return any;
+        return contents;
     }
 
     private static bool IsBorrowedTextureRoot(CustomizationPathEndpoint endpoint, HashSet<string> keys,

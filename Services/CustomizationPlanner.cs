@@ -41,28 +41,18 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         var source = new CustomizationPathEndpoint(task.Kind, sourceRace, oldId);
         task.SourceRoot = descriptor.Root(sourceRace, oldId);
 
-        // A texture has no paths inside it, so the very same file can serve every race and ID
-        // chosen for it. Adding to this mod (or building a new one) turns every race into its own
-        // new multi-select option group, the way an idle animation becomes one option per slot;
-        // converting in place instead adds the same paths straight into whatever container the
-        // source already lives in, governed by whatever toggle (if any) already governs it.
-        // Anything else (a model or material) carries its race and ID inside it, so it can only
-        // ever have a single target, in place or not.
-        if (CustomizationDetection.IsTextureOnly(PenumbraMod.Load(root), source))
-        {
-            if (task.OutputMode == ConversionOutputMode.InPlace)
-                PlanTextureInPlace(task, descriptor, targetKind, targetDescriptor, source, targetRace, newId, root);
-            else
-                PlanTextureGroups(task, descriptor, targetKind, targetDescriptor, source, targetRace, newId, root);
-            return;
-        }
+        // Textures (and face or skin materials) alone are offered to other races by the
+        // TextureFanOutPlanner instead; anything with a model carries its race and ID inside it
+        // and has exactly one target.
+        if (CustomizationDetection.CanFanOut(PenumbraMod.Load(root), source))
+            throw new InvalidDataException("This root only holds textures or materials; choose where to add its paths instead.");
 
         if (oldId == newId && sourceRace == targetRace && task.Kind == targetKind)
             throw new InvalidDataException("Source and target customization roots are identical.");
 
         var target = new CustomizationPathEndpoint(targetKind, targetRace, newId);
         var resources = ReadResources(root);
-        var keys = new KeyRules(source, target, resources, [], false);
+        var keys = new KeyRules(source, target, resources);
         var assets = DiscoverAssets(root, resources.Files, source);
         if (assets.Count == 0)
             throw new InvalidDataException($"No {descriptor.DisplayName.ToLowerInvariant()} root matched " +
@@ -116,260 +106,6 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         PlanJson(task, root, descriptor, source, target, resources, materialDependencies, keys);
         PlanExtraSkeleton(task, root, descriptor, source, target, resources);
         PlanDeformation(task, sourceRace, targetRace, source, resources);
-    }
-
-    /// <summary>
-    /// Validates every (race, ID) the conversion writes to: the primary target plus every extra,
-    /// deduplicated. Throws the same way a single-target conversion would for an invalid one.
-    /// </summary>
-    private static List<CustomizationPathEndpoint> ResolveTargets(ConversionTask task, AssetKind targetKind,
-        CustomizationKindDescriptor targetDescriptor, CustomizationPathEndpoint source,
-        ushort primaryRace, ushort primaryId)
-    {
-        var targets = new List<CustomizationPathEndpoint>();
-        void AddTarget(ushort race, ushort id)
-        {
-            var endpoint = new CustomizationPathEndpoint(targetKind, race, id);
-            if (targets.Contains(endpoint)) return;
-            if (!targetDescriptor.SupportsRace(race))
-                throw new InvalidDataException($"{targetDescriptor.DisplayName} is not valid for {RaceNames.Describe(race)}.");
-            if (CustomizationTargets.BlockReason(source.Kind, source.GenderRace, targetKind, race) is { } blocked)
-                throw new InvalidDataException(blocked);
-            targets.Add(endpoint);
-        }
-        AddTarget(primaryRace, primaryId);
-        foreach (var extra in task.ExtraTargets)
-            AddTarget(extra.GenderRace ?? primaryRace, extra.ModelId);
-        if (targets.Count == 0)
-            throw new InvalidDataException("Choose at least one race to convert to.");
-        return targets;
-    }
-
-    /// <summary>The source root's own Files entries, wherever in the mod they live.</summary>
-    private static List<KeyValuePair<string, string>> ResolveSourceFiles(ConversionTask task,
-        ModResourceIndex resources, CustomizationKindDescriptor descriptor, CustomizationPathEndpoint source)
-    {
-        var sourceFiles = resources.Files.Where(f => CustomizationPaths.Contains(f.Key, source)).ToList();
-        if (sourceFiles.Count == 0)
-            throw new InvalidDataException($"No {descriptor.DisplayName.ToLowerInvariant()} root matched " +
-                                           $"c{source.GenderRace:D4}/{descriptor.Token(source.ModelId)}.");
-        foreach (var (gamePath, _) in resources.FileSwaps.Where(f => CustomizationPaths.Contains(f.Key, source)))
-            task.Diagnostics.Add(new PlanDiagnostic("file_swap", $"The file swap for {gamePath} is not converted.", false));
-
-        task.AllAssetFiles.Clear();
-        task.AllAssetFiles.AddRange(sourceFiles.Select(f => f.Value).Distinct(StringComparer.OrdinalIgnoreCase));
-        return sourceFiles;
-    }
-
-    /// <summary>
-    /// Builds one new multi-select option group per target race, with one option per ID chosen
-    /// for that race (most kinds ever offer one; a face can have several). The source's own keys
-    /// are pulled out of wherever they currently live — Default, or any option — because the new
-    /// groups provide them from here on, the same way an idle animation moved into a slot group
-    /// stops being served from Default. The source root itself is just another target: including
-    /// it keeps it working, as its own toggleable option beside the others; leaving it out moves
-    /// it away entirely.
-    /// </summary>
-    private void PlanTextureGroups(ConversionTask task, CustomizationKindDescriptor descriptor,
-        AssetKind targetKind, CustomizationKindDescriptor targetDescriptor, CustomizationPathEndpoint source,
-        ushort primaryRace, ushort primaryId, string root)
-    {
-        var targets = ResolveTargets(task, targetKind, targetDescriptor, source, primaryRace, primaryId);
-        var resources = ReadResources(root);
-        var sourceFiles = ResolveSourceFiles(task, resources, descriptor, source);
-
-        RemoveSourceKeys(task, root, source);
-
-        var file = Path.Combine(root, PenumbraMod.MetaFileName);
-        var planned = task.PlannedJsonChanges.FirstOrDefault(j => string.Equals(j.FilePath, file, StringComparison.OrdinalIgnoreCase));
-        if (planned == null) task.PlannedJsonChanges.Add(planned = new PlannedJsonChange { FilePath = file });
-
-        var mod = PenumbraMod.Load(root);
-        var takenNames = mod.Groups.Select(g => g.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var priority = mod.Groups.Select(g => Json.GetInt(g.Node["Priority"], 0)).DefaultIfEmpty(0).Max();
-
-        foreach (var raceGroup in targets.GroupBy(t => t.GenderRace).OrderBy(g => g.Key))
-        {
-            var race = raceGroup.Key;
-            var ids = raceGroup.Select(e => e.ModelId).OrderBy(id => id).ToList();
-            if (ids.Count > MaxMultiOptions)
-                throw new InvalidDataException(
-                    $"{RaceNames.Describe(race)} would need {ids.Count} options, more than the " +
-                    $"{MaxMultiOptions} a multi-select group can have. Choose fewer IDs for it.");
-
-            var options = new JsonArray();
-            foreach (var id in ids)
-            {
-                var endpoint = new CustomizationPathEndpoint(targetKind, race, id);
-                var files = new JsonObject();
-                foreach (var (gamePath, local) in sourceFiles)
-                    files[CustomizationPaths.Rewrite(gamePath, source, endpoint)] =
-                        Path.GetRelativePath(root, local).Replace('/', '\\');
-                options.Add(new JsonObject
-                {
-                    ["Id"] = Guid.NewGuid().ToString(),
-                    ["Name"] = gameData?.DescribeCustomization(targetKind, race, id) ?? GameDataService.OptionLabel(targetKind, id),
-                    ["Description"] = string.Empty,
-                    ["Files"] = files,
-                    ["FileSwaps"] = new JsonObject(),
-                    ["Manipulations"] = new JsonArray(),
-                });
-            }
-
-            var name = UniqueName(RaceNames.Name(race), takenNames);
-            var group = new JsonObject
-            {
-                ["Id"] = Guid.NewGuid().ToString(),
-                ["Name"] = name,
-                ["Description"] = $"Which {descriptor.DisplayName.ToLowerInvariant()} texture{(ids.Count > 1 ? "s" : "")} " +
-                                   $"to use for {RaceNames.Name(race)}. Created by Universal Mod Converter.",
-                ["Priority"] = ++priority,
-                ["Type"] = "Multi",
-                ["DefaultSettings"] = (1UL << ids.Count) - 1, // every option here was ticked, so all start on
-                ["Options"] = options,
-            };
-            planned.Changes.Add(new JsonFieldChange
-            {
-                JsonPath = "<root>",
-                ChangeType = "group_insert",
-                OldValue = $"New group '{name}'",
-                NewValue = group.ToJsonString(),
-            });
-        }
-    }
-
-    /// <summary>
-    /// Adds every extra target's rewritten keys straight into whatever container the source's own
-    /// keys already live in — Default, or an existing option — right alongside them, governed by
-    /// whatever toggle (if any) already governs that container. No new group is created. Unticking
-    /// the source removes its own keys from there instead of leaving them in place.
-    /// </summary>
-    private void PlanTextureInPlace(ConversionTask task, CustomizationKindDescriptor descriptor,
-        AssetKind targetKind, CustomizationKindDescriptor targetDescriptor, CustomizationPathEndpoint source,
-        ushort primaryRace, ushort primaryId, string root)
-    {
-        var targets = ResolveTargets(task, targetKind, targetDescriptor, source, primaryRace, primaryId);
-        var resources = ReadResources(root);
-        ResolveSourceFiles(task, resources, descriptor, source);
-
-        var keepsSource = targets.Contains(source);
-        var extras = targets.Where(t => t != source).ToList();
-        AddKeysInPlace(task, root, source, extras, keepsSource);
-    }
-
-    private static void AddKeysInPlace(ConversionTask task, string root, CustomizationPathEndpoint source,
-        IReadOnlyList<CustomizationPathEndpoint> extras, bool keepsSource)
-    {
-        foreach (var jsonFile in PenumbraMod.DefinitionFiles(root).Where(File.Exists))
-        {
-            var node = Parse(jsonFile);
-            if (node == null) continue;
-            var changes = new List<JsonFieldChange>();
-            Walk(node, "<root>", changes);
-            if (changes.Count == 0) continue;
-            var planned = task.PlannedJsonChanges.FirstOrDefault(j => string.Equals(j.FilePath, jsonFile, StringComparison.OrdinalIgnoreCase));
-            if (planned == null) task.PlannedJsonChanges.Add(planned = new PlannedJsonChange { FilePath = jsonFile });
-            planned.Changes.AddRange(changes);
-        }
-
-        void Walk(JsonNode? node, string path, List<JsonFieldChange> changes)
-        {
-            if (node is JsonObject obj)
-            {
-                foreach (var (key, value) in obj.ToList())
-                {
-                    if (key == "Files" && value is JsonObject dict)
-                    {
-                        var matches = dict.Where(kv => CustomizationPaths.Contains(kv.Key, source)).ToList();
-                        if (matches.Count > 0)
-                        {
-                            var additions = new JsonObject();
-                            foreach (var (dictKey, dictValue) in matches)
-                            {
-                                if (!keepsSource)
-                                    changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[key]", OldValue = dictKey, ChangeType = "path_key_delete" });
-                                if (dictValue is not JsonValue v || !v.TryGetValue<string>(out var local)) continue;
-                                foreach (var extra in extras)
-                                {
-                                    var rewritten = CustomizationPaths.Rewrite(dictKey, source, extra);
-                                    if (!dict.ContainsKey(rewritten) && !additions.ContainsKey(rewritten)) additions[rewritten] = local;
-                                }
-                            }
-                            if (additions.Count > 0)
-                                changes.Add(new JsonFieldChange { JsonPath = path, ChangeType = "dependency_files", NewValue = additions.ToJsonString() });
-                        }
-                        continue;
-                    }
-                    if (key == "FileSwaps" && value is JsonObject swaps)
-                    {
-                        if (!keepsSource)
-                            foreach (var (dictKey, _) in swaps.ToList())
-                                if (CustomizationPaths.Contains(dictKey, source))
-                                    changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[key]", OldValue = dictKey, ChangeType = "path_key_delete" });
-                        continue;
-                    }
-                    Walk(value, path + "." + key, changes);
-                }
-            }
-            else if (node is JsonArray array)
-                for (var i = 0; i < array.Count; i++) Walk(array[i], $"{path}[{i}]", changes);
-        }
-    }
-
-    /// <summary>Penumbra identifies a group by name in its UI, so a new one needs its own.</summary>
-    private static string UniqueName(string name, HashSet<string> taken)
-    {
-        var candidate = name;
-        for (var i = 2; !taken.Add(candidate); i++) candidate = $"{name} ({i})";
-        return candidate;
-    }
-
-    /// <summary>Penumbra stores a multi-select group's setting as a bit per option.</summary>
-    private const int MaxMultiOptions = 32;
-
-    /// <summary>
-    /// Removes the source root's own keys from every container that has them, wherever in the mod
-    /// that is: the new option groups provide those paths instead, and leaving the originals in
-    /// place would keep them active no matter how the new group's option is toggled.
-    /// </summary>
-    private static void RemoveSourceKeys(ConversionTask task, string root, CustomizationPathEndpoint source)
-    {
-        foreach (var jsonFile in PenumbraMod.DefinitionFiles(root).Where(File.Exists))
-        {
-            var node = Parse(jsonFile);
-            if (node == null) continue;
-            var changes = new List<JsonFieldChange>();
-            Walk(node, "<root>", changes);
-            if (changes.Count == 0) continue;
-            var planned = task.PlannedJsonChanges.FirstOrDefault(j => string.Equals(j.FilePath, jsonFile, StringComparison.OrdinalIgnoreCase));
-            if (planned == null) task.PlannedJsonChanges.Add(planned = new PlannedJsonChange { FilePath = jsonFile });
-            planned.Changes.AddRange(changes);
-        }
-
-        void Walk(JsonNode? node, string path, List<JsonFieldChange> changes)
-        {
-            if (node is JsonObject obj)
-            {
-                foreach (var (key, value) in obj.ToList())
-                {
-                    if (key is "Files" or "FileSwaps" && value is JsonObject dict)
-                    {
-                        foreach (var (dictKey, _) in dict.ToList())
-                            if (CustomizationPaths.Contains(dictKey, source))
-                                changes.Add(new JsonFieldChange
-                                {
-                                    JsonPath = $"{path}.{key}[key]",
-                                    OldValue = dictKey,
-                                    ChangeType = "path_key_delete",
-                                });
-                        continue;
-                    }
-                    Walk(value, path + "." + key, changes);
-                }
-            }
-            else if (node is JsonArray array)
-                for (var i = 0; i < array.Count; i++) Walk(array[i], $"{path}[{i}]", changes);
-        }
     }
 
     private Dictionary<string, Dictionary<string, string>> PlanMaterialDependencies(ConversionTask task,
@@ -606,9 +342,6 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                             if (key == "Files" && newKey != null)
                                 foreach (var extra in keys.ExtraTargetVariants(newKey))
                                     variantAdditions[extra] = replacement;
-                            if (key == "Files")
-                                foreach (var extra in keys.ExtraTargetKeys(dictKey))
-                                    variantAdditions[extra] = replacement;
                         }
                         foreach (var (extra, extraValue) in variantAdditions.ToList())
                             if (produced.Contains(Normalize(extra))) variantAdditions.Remove(extra);
@@ -806,17 +539,12 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         private readonly CustomizationPathEndpoint _source;
         private readonly CustomizationPathEndpoint _target;
-        private readonly IReadOnlyList<CustomizationPathEndpoint> _extraTargets;
-        private readonly bool _keepSource;
         private readonly HashSet<string> _skipped = new(StringComparer.OrdinalIgnoreCase);
 
-        public KeyRules(CustomizationPathEndpoint source, CustomizationPathEndpoint target, ModResourceIndex resources,
-            IReadOnlyList<CustomizationPathEndpoint>? extraTargets = null, bool keepSource = false)
+        public KeyRules(CustomizationPathEndpoint source, CustomizationPathEndpoint target, ModResourceIndex resources)
         {
             _source = source;
             _target = target;
-            _extraTargets = extraTargets ?? [];
-            _keepSource = keepSource;
             // Hrothgar tails keep the same material in up to five variant folders. A target
             // with a single folder receives one of them: the tail's own number when present.
             if (!CustomizationPaths.IsHrothgarTail(source) || CustomizationPaths.IsHrothgarTail(target)) return;
@@ -847,24 +575,12 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         /// <summary>
         /// Whether this key is added rather than moved: material keys under a root other
-        /// customizations also load, and every key of a conversion that keeps its source.
+        /// customizations also load.
         /// </summary>
         public bool IsShared(string key)
-            => _keepSource ||
-               key.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase) &&
+            => key.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase) &&
                CustomizationPaths.FindEndpoints(key).Any(e => CustomizationPaths.IsSharedMaterialRoot(e) &&
                    (e == _source || e == CustomizationPaths.GetMaterialEndpoint(_source)));
-
-        /// <summary>The same file's key for every extra target, so one texture serves them all.</summary>
-        public IEnumerable<string> ExtraTargetKeys(string key)
-        {
-            if (IsSkipped(key)) yield break;
-            foreach (var extra in _extraTargets)
-            {
-                var rewritten = CustomizationPaths.Rewrite(key, _source, extra);
-                if (!string.Equals(rewritten, key, StringComparison.Ordinal)) yield return rewritten;
-            }
-        }
 
         public bool IsSharedMaterialFile(string localPath) => IsShared(localPath);
 

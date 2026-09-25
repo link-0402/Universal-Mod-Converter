@@ -12,17 +12,21 @@ internal static class AnimationTests
     [
         ("PAP header, entries and Havok replacement", PapRoundTrip),
         ("PAP entry and timeline motion renames", PapRenames),
+        ("Timelines are rebuilt in the game's layout, with faces added", TimelineEditing),
         ("Animation game paths and idle slots", PathsAndSlots),
         ("Retarget keeps rest poses and scales translation", RetargetRestAndScale),
         ("Retarget transfers rotation and folds dropped bones", RetargetRotationAndDroppedBones),
         ("Idle swap in place renames and moves the file", IdleSwapInPlace),
         ("Idle swap into an option group (new mod)", IdleSwapGroup),
-        ("An animation inside an option gets its slots within that option's group", IdleSwapGroupInOption),
+        ("An animation inside an option gets a new slot group beside it", IdleSwapGroupInOption),
+        ("Adding a slot group to the mod keeps the original where it is", IdleSwapGroupKeepsOriginal),
         ("Swapped files follow game-path layouts and reuse unchanged files", SwapLocalNames),
         ("Swap takes the name from the parent race", SwapInheritsName),
         ("Swap pairs the animation the action timeline plays", SwapFromDefaultIdle),
         ("An animation with no counterpart is explained in plain words", UnpairedIsExplained),
-        ("Attaching an expression appends facial entries and keeps the body", ExpressionAttach),
+        ("A facial expression swaps to another, with its timeline in every option", FaceSwap),
+        ("Attaching an expression names the face in the body's timeline", ExpressionAttach),
+        ("Game expressions: one pose, read from the race's own face animations", GameExpressionDonor),
         ("Retarget adds target races and reports inheritance", RetargetPlan),
     ];
 
@@ -55,23 +59,39 @@ internal static class AnimationTests
 
     private static void PapRenames()
     {
-        var bytes = BuildPap([("cbem_pose03_1lp", 0), ("face_anim", 1)]);
+        var bytes = BuildPap([("cbem_pose03_1lp", 0), ("cfxf_smile", 1)]);
         var pap = new PapFile(bytes);
         Assert.Equal(1, pap.BodyEntries.Count());
+        // The flag the game sets on facial entries is set on some body animations too.
+        Assert.True(new PapFile.Entry("cbem_dogeza", 0, 0, 1).IsBody, "the face flag alone does not make a facial animation");
 
-        // Shorter: written in place.
+        // Shorter: the timeline shrinks, keeping nothing of the old name.
         var shorter = PapTimeline.RenameMotions(new PapFile(bytes).WithEntryNames(new Dictionary<int, string> { [0] = "jmn" }),
             new Dictionary<string, string> { ["cbem_pose03_1lp"] = "jmn" });
         Assert.Equal("jmn", new PapFile(shorter).Entries[0].Name);
-        Assert.Equal(["jmn", "face_anim"], PapTimeline.ReadStrings(shorter).Select(s => s.Value));
-        Assert.Equal(bytes.Length, shorter.Length);
+        Assert.Equal(["jmn", "cfxf_smile"], PapTimeline.ReadStrings(shorter).Select(s => s.Value));
+        Assert.True(!Encoding.ASCII.GetString(new PapFile(shorter).Timeline(0)).Contains("pose03"), "no trace of the old name");
+        Assert.Equal(new PapFile(bytes).Timeline(1), new PapFile(shorter).Timeline(1));
 
-        // Longer: appended to its own timeline, the following timeline stays readable.
+        // Longer: its timeline grows, the following timeline stays readable.
         var name = "cbem_pose03_much_longer_name";
         var longer = PapTimeline.RenameMotions(new PapFile(bytes).WithEntryNames(new Dictionary<int, string> { [0] = name }),
             new Dictionary<string, string> { ["cbem_pose03_1lp"] = name });
-        Assert.Equal([name, "face_anim"], PapTimeline.ReadStrings(longer).Select(s => s.Value));
+        Assert.Equal([name, "cfxf_smile"], PapTimeline.ReadStrings(longer).Select(s => s.Value));
         Assert.True(longer.Length > bytes.Length, "The longer name must grow the timeline.");
+        foreach (var i in new[] { 0, 1 })
+        {
+            var timeline = new PapFile(longer).Timeline(i);
+            Assert.Equal(timeline, TmbTimeline.Parse(timeline).ToArray());
+        }
+
+        // A timeline with an entry of unknown layout is patched in place instead.
+        var unknown = Timeline("cbem_pose03_1lp");
+        "C999"u8.CopyTo(unknown.AsSpan(12)); // over the TMDH header, which holds no pointer
+        Assert.Throws<InvalidDataException>(() => TmbTimeline.Parse(unknown));
+        var patched = PapTimeline.RenameMotions(pap.WithTimelines([unknown, pap.Timeline(1)]),
+            new Dictionary<string, string> { ["cbem_pose03_1lp"] = "jmn" });
+        Assert.Equal(["jmn", "cfxf_smile"], PapTimeline.ReadStrings(patched).Select(s => s.Value));
 
         Assert.Throws<InvalidDataException>(() => PapTimeline.RenameMotions(bytes, new Dictionary<string, string> { ["missing"] = "x" }));
         Assert.Throws<InvalidDataException>(() => new PapFile(bytes).WithEntryNames(new Dictionary<int, string> { [0] = "bad/name" }));
@@ -83,7 +103,9 @@ internal static class AnimationTests
         Assert.Equal((ushort)101, path.Race);
         Assert.Equal("a0001/bt_common/emote/pose03_loop", path.Location);
         Assert.Equal("chara/human/c1101/animation/a0001/bt_common/emote/pose03_loop.pap", path.WithRace(1101).GamePath);
-        Assert.True(!PapPath.TryParse("chara/human/c0101/animation/f0001/nonresident/smile.pap", out _), "Facial animations are not body animations.");
+        Assert.True(PapPath.TryParse("chara/human/c0101/animation/f0001/nonresident/smile.pap", out var smile) && smile.IsFacial,
+            "A facial expression's pack parses, as facial.");
+        Assert.True(!path.IsFacial, "Body animations are not facial.");
         Assert.Equal("resident/idle", AnimationKeys.PapKey("normal/idle"));
 
         Assert.True(IdleSlots.TryDescribe("emote/j_pose02_start", out var family, out var index, out var start));
@@ -155,53 +177,244 @@ internal static class AnimationTests
 
     // ── Planner ─────────────────────────────────────────────────────────────
 
-    /// <summary>Appends marker bytes as the "merged" Havok, and reports one existing binding.</summary>
-    private sealed class FakeMerger : IExpressionMerger
+    /// <summary>
+    /// Timelines taken apart and written back come out byte for byte, whether built here or
+    /// taken from real animations: j_pose02 (a face and its pack) and a dance with a sound.
+    /// Adding a face gives the body's track a C010 lasting as long as the body, and a pack
+    /// header placed where the game keeps it.
+    /// </summary>
+    private static void TimelineEditing()
     {
-        public string? UnavailableReason => null;
-        public List<int> Requested { get; } = [];
-
-        public (byte[] Havok, int OriginalBindings) Append(byte[] target, byte[] donor, IReadOnlyList<int> donorBindings)
+        const string jpose02 =
+            "544d4c42d700000007000000544d4448100000000100000046000300544d50500c00000090000000544d414c100000007c00000001000000" +
+            "544d41431c0000000200000000000000000000006e00000001000000544d54521800000003000000540000000200000000000000" +
+            "433030391800000004000000a0000000000000004600000043303130280000000500" +
+            "00000a000000000000000000000000000000000000004000000000000000" +
+            "0200030004000500736d696c65006362656d5f6a5f706f736530325f326c7000636678665f736d696c6500";
+        const string dance =
+            "544d4c422901000009000000544d44481000000001000000b4000300544d414c10000000cc00000001000000" +
+            "544d41431c000000020000000000000000000000be00000003000000544d54521800000003000000a80000000100000000000000" +
+            "544d54521800000004000000920000000100000000000000544d545218000000050000007c0000000100000000000000" +
+            "433030391800000006000000e80100000000000066000000" +
+            "433031302800000007000000e80100000000000001000000000000000000803f5f00000000000000" +
+            "433036332000000008000000ffffffff0000000042000000000000000300000002000300040005000600070008006362656d5f" +
+            "64616e636531395f326c7000636678665f736d696c6500736f756e642f6c6f6c6f2e73636400";
+        foreach (var hex in new[] { jpose02, dance })
         {
-            Requested.AddRange(donorBindings);
-            return ([.. target, .. Enumerable.Repeat((byte)0xEE, 12)], 1);
+            var real = Convert.FromHexString(hex);
+            Assert.Equal(real, TmbTimeline.Parse(real).ToArray());
+            Assert.Equal(["cfxf_smile"], TmbTimeline.Parse(real).Faces);
         }
+        Assert.Equal("smile", TmbTimeline.Parse(Convert.FromHexString(jpose02)).FacePack);
+
+        var built = Timeline("cbem_joy", duration: 57);
+        var timeline = TmbTimeline.Parse(built);
+        Assert.Equal(built, timeline.ToArray());
+        Assert.True(timeline.FacePack == null && !timeline.Faces.Any(), "a plain body animation");
+
+        timeline.AddFace("cbem_joy", "cfxf_smile");
+        timeline.FacePack = "smile";
+        var edited = timeline.ToArray();
+        var again = TmbTimeline.Parse(edited);
+        Assert.Equal(edited, again.ToArray());
+        Assert.Equal(["cbem_joy", "cfxf_smile"], again.Motions);
+        Assert.Equal("smile", again.FacePack);
+        // The pack header follows TMDH and its name comes first among the strings, as the game writes them.
+        var text = Encoding.ASCII.GetString(edited);
+        Assert.Equal("TMPP", text.Substring(28, 4));
+        Assert.True(text.EndsWith("smile\0cbem_joy\0cfxf_smile\0", StringComparison.Ordinal), "strings in item order");
+
+        // The C010: next id, on the body's track, as long as the body, time control from frame 0 to 1.
+        var c010 = text.IndexOf("C010", StringComparison.Ordinal);
+        Assert.Equal((short)5, BinaryPrimitives.ReadInt16LittleEndian(edited.AsSpan(c010 + 8)));
+        Assert.Equal(57, BinaryPrimitives.ReadInt32LittleEndian(edited.AsSpan(c010 + 12)));
+        Assert.Equal(1, BinaryPrimitives.ReadInt32LittleEndian(edited.AsSpan(c010 + 20)));
+        Assert.Equal(1f, BinaryPrimitives.ReadSingleLittleEndian(edited.AsSpan(c010 + 28)));
+        var track = text.IndexOf("TMTR", StringComparison.Ordinal);
+        Assert.Equal(2, BinaryPrimitives.ReadInt32LittleEndian(edited.AsSpan(track + 16)));
+
+        Assert.Throws<InvalidDataException>(() => TmbTimeline.Parse(built).AddFace("cbem_other", "cfxf_smile"));
     }
 
     /// <summary>
-    /// The donor's facial entries land after the target's own, named after the target's body
-    /// animation so they play with it, bound past the target's bindings, with their timelines
-    /// renamed to match. The body entry and its timeline must come through byte for byte.
+    /// Attaching a face only touches the timeline of the body animation the path plays: the
+    /// entries and the Havok data stay exactly as they were, and nothing is added to the pack.
     /// </summary>
     private static void ExpressionAttach()
     {
-        var target = BuildPap([("cbem_box_1lp", 0)]);
-        var donor  = BuildPap([("emot_smile", 0), ("emot_smile", 1), ("emot_smile", 2)]);
-        var merger = new FakeMerger();
-        var notes  = new List<string>();
+        var target = BuildPap([("cbna_add_dmg_f", 0), ("cbnm_id0", 0)]);
+        var notes = new List<string>();
+        var smile = new FacialAnimation("cfxf_smile", "smile");
 
-        var result = new PapFile(PapExpressions.Attach(target, donor, merger, notes));
+        var result = new PapFile(PapExpressions.Attach(target, smile, ["cbnm_id0"], notes));
+        var before = new PapFile(target);
+        Assert.Equal(before.Entries.ToArray(), result.Entries.ToArray());
+        Assert.Equal(before.Havok, result.Havok);
+        Assert.Equal(before.Timeline(0), result.Timeline(0));
+        var face = TmbTimeline.Parse(result.Timeline(1));
+        Assert.Equal(["cfxf_smile"], face.Faces);
+        Assert.Equal("smile", face.FacePack);
 
-        Assert.Equal(3, result.Entries.Length);
-        Assert.Equal(new PapFile(target).Entries[0], result.Entries[0]);
-        Assert.Equal(new PapFile(target).Timeline(0), result.Timeline(0));
-        Assert.Equal(new[] { "cbem_box_1lp", "cbem_box_1lp" }, result.FaceEntries.Select(e => e.Entry.Name).ToArray());
-        Assert.Equal(new[] { 1, 2 }, result.FaceEntries.Select(e => e.Entry.Face).ToArray());
-        // The synthetic file binds entry i to binding i: the two faces bring bindings 1 and 2,
-        // which land after the target's single binding.
-        Assert.Equal(new[] { 1, 2 }, merger.Requested.ToArray());
-        Assert.Equal(new[] { (short)1, (short)2 }, result.FaceEntries.Select(e => e.Entry.Binding).ToArray());
-        Assert.Equal(new[] { "cbem_box_1lp", "cbem_box_1lp", "cbem_box_1lp" },
-            PapTimeline.ReadStrings(result.ToArray()).Where(s => s.IsMotion).Select(s => s.Value).ToArray());
-        Assert.True(result.Havok.Skip(result.Havok.Length - 12).All(b => b == 0xEE), "the merged Havok is used");
+        // A face in the resident pack needs no pack loaded.
+        var resident = new PapFile(PapExpressions.Attach(target, new FacialAnimation("cfxf_bow", null), ["cbnm_id0"], notes));
+        Assert.True(TmbTimeline.Parse(resident.Timeline(1)).FacePack == null, "no pack for a resident face");
 
-        // A face type the target already animates keeps its own.
-        var withFace = BuildPap([("cbem_box_1lp", 0), ("cbem_box_1lp", 1)]);
-        var partial  = new PapFile(PapExpressions.Attach(withFace, donor, new FakeMerger(), notes));
-        Assert.Equal(new[] { 1, 2 }, partial.FaceEntries.Select(e => e.Entry.Face).ToArray());
+        // A moving face keeps its frames and pace, as its source plays it: here 600 frames against a
+        // 40-frame body, which the notes say. A single-frame hold is stretched over the body instead.
+        var panting = new FaceTiming(600, 0, 0x08000001, 0f, 600f, 0);
+        notes.Clear();
+        var moving = TmbTimeline.Parse(new PapFile(PapExpressions.Attach(target, new FacialAnimation("cfxf_comeon", "comeon", panting),
+            ["cbnm_id0"], notes)).Timeline(1));
+        Assert.Equal(panting, moving.TimingOf("cfxf_comeon"));
+        Assert.True(notes.Any(n => n.Contains("starts over")), "a face longer than the body is explained");
+        var held = TmbTimeline.Parse(new PapFile(PapExpressions.Attach(target,
+            new FacialAnimation("cfxf_smile", "smile", new FaceTiming(3652, 0, 1, 0f, 1f, 0)), ["cbnm_id0"], notes)).Timeline(1));
+        Assert.Equal(new FaceTiming(40, 0, 1, 0f, 1f, 0), held.TimingOf("cfxf_smile"));
 
-        // A donor without a face is refused rather than silently doing nothing.
-        Assert.Throws<InvalidDataException>(() => PapExpressions.Attach(target, target, new FakeMerger(), notes));
+        // An animation that already plays a face keeps it, and nothing to attach to is refused.
+        Assert.Throws<InvalidDataException>(() => PapExpressions.Attach(result.ToArray(), smile, ["cbnm_id0"], notes));
+        Assert.Throws<InvalidDataException>(() => PapExpressions.Attach(target, smile, ["cbem_missing"], notes));
+    }
+
+    /// <summary>
+    /// A game expression is found in the race's standard face animations: the pose's own pack,
+    /// which the timeline then has the game load, or the resident one. A race without face
+    /// animations of its own plays its skeleton parent's.
+    /// </summary>
+    private static void GameExpressionDonor()
+    {
+        Assert.True(GameExpressions.TryPose("facial/pose/smile", out var pose) && pose == "smile", "an expression's timeline");
+        Assert.True(!GameExpressions.TryPose("emote/joy", out _), "a body animation is no expression");
+
+        var game = new FakeGame();
+        game.Files["chara/human/c0101/animation/f0002/nonresident/smile.pap"] = BuildPap([("cfxf_smile", 1)]);
+        game.Files["chara/human/c0101/animation/f0002/resident/face.pap"] =
+            BuildPap([("cfxb_blink1", 1), ("cfxf_bow", 1), ("cfxf_base", 1), ("cfxl_lip_nor1", 1)]);
+        Assert.Equal(new FacialAnimation("cfxf_smile", "smile"), GameExpressions.Find(101, "smile", game.ReadFile));
+        Assert.Equal(new FacialAnimation("cfxf_bow", null), GameExpressions.Find(101, "bow", game.ReadFile));
+        Assert.True(GameExpressions.Find(101, "wink", game.ReadFile) == null, "a pose the race does not have");
+        Assert.True(GameExpressions.Find(501, "smile", game.ReadFile) == null, "a race without face animations");
+
+        // Elezen males have no face animations of their own, so they get their skeleton parent's.
+        using var mod = new TempDir();
+        const string joy = "chara/human/c0501/animation/a0001/bt_common/emote/joy.pap";
+        Definition(mod, $$$"""{"Files":{"{{{joy}}}":"joy.pap"}}""");
+        mod.File("joy.pap", BuildPap([("cbem_joy", 0)], model: 501));
+        var request = new AnimationConversionRequest([PapPath.TryParse(joy, out var path) ? path.Location : ""],
+            AnimationOperation.Expression, ConversionOutputMode.InPlace, "test")
+        {
+            Expression = new ExpressionDonor("/Smile", Pose: "smile"),
+        };
+        ushort? Parent(ushort race) => race == 501 ? 101 : null;
+        var plan = new AnimationConversionPlanner(game, Parent, null).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        var output = new PapFile(plan.Files.Single(f => f.Operation == LocalFileOperation.Write).Content!);
+        Assert.Equal(new[] { "cbem_joy" }, output.Entries.Select(e => e.Name).ToArray());
+        var timeline = TmbTimeline.Parse(output.Timeline(0));
+        Assert.Equal(["cfxf_smile"], timeline.Faces);
+        Assert.Equal("smile", timeline.FacePack);
+        Assert.Equal(new FaceTiming(40, 0, 1, 0f, 1f, 0), timeline.TimingOf("cfxf_smile"));
+
+        // An expression whose emote moves the face is played at the emote's pace.
+        var emote = TmbTimeline.Parse(Timeline("cfxf_base"));
+        var pace = new FaceTiming(90, 0, 1, 0f, 90f, 0);
+        emote.AddFace("cfxf_base", "cfxf_smile", pace);
+        game.Files["chara/action/facial/pose/smile.tmb"] = emote.ToArray();
+        plan = new AnimationConversionPlanner(game, Parent, null).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        output = new PapFile(plan.Files.Single(f => f.Operation == LocalFileOperation.Write).Content!);
+        Assert.Equal(pace, TmbTimeline.Parse(output.Timeline(0)).TimingOf("cfxf_smile"));
+    }
+
+    /// <summary>
+    /// A facial expression mod (the pose's packs per face animation set, and the expression's
+    /// timeline in each speed option) swapped to another expression: every pack moves to the
+    /// new pose with its face renamed, and each option's timeline follows with its pack and face
+    /// renamed, keeping its pace. Faces only swap; a pose in the shared resident pack is refused.
+    /// </summary>
+    private static void FaceSwap()
+    {
+        const string smile2 = "chara/human/c0801/animation/f0002/nonresident/smile.pap";
+        const string smile3 = "chara/human/c0801/animation/f0003/nonresident/smile.pap";
+        const string grin2 = "chara/human/c0801/animation/f0002/nonresident/grin.pap";
+        const string grin3 = "chara/human/c0801/animation/f0003/nonresident/grin.pap";
+        const string smileTmb = "chara/action/facial/pose/smile.tmb";
+        const string grinTmb = "chara/action/facial/pose/grin.tmb";
+        Assert.True(PapPath.TryParse(smile2, out var face) && face.IsFacial && face.Key == "smile" && face.Location == "f0002/nonresident/smile",
+            "a face pack parses as facial");
+        Assert.True(!PapPath.TryParse("chara/human/c0801/animation/f0002/resident/face.pap", out _), "the shared pack holds every face");
+
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{smile2}}}":"face\\{{{smile2.Replace("/", "\\\\")}}}","{{{smile3}}}":"face\\{{{smile3.Replace("/", "\\\\")}}}"}}""",
+            $$$"""[{"Name":"Speed","Type":"Single","Options":[{"Name":"Full","Files":{"{{{smileTmb}}}":"full\\smile.tmb"}},{"Name":"Half","Files":{"{{{smileTmb}}}":"half\\smile.tmb"}},{"Name":"None"}]}]""");
+        mod.File("face/" + smile2, BuildPap([("cfxf_smile", 1)], model: 801));
+        mod.File("face/" + smile3, BuildPap([("cfxf_smile", 1)], model: 801));
+        byte[] Speed(int duration)
+        {
+            var timeline = TmbTimeline.Parse(Timeline("cfxf_base"));
+            timeline.AddFace("cfxf_base", "cfxf_smile", new FaceTiming(duration, 0, 0x08000001, 0f, 600f, 0));
+            timeline.FacePack = "smile";
+            return timeline.ToArray();
+        }
+        mod.File("full/smile.tmb", Speed(600));
+        mod.File("half/smile.tmb", Speed(1200));
+
+        var game = new FakeGame();
+        game.Files[grin2] = BuildPap([("cfxf_grin", 1)], model: 801);
+        game.Files["chara/human/c0801/animation/f0002/resident/face.pap"] = BuildPap([("cfxf_bow", 1)], model: 801);
+        AnimationConversionRequest Request(ConversionOutputMode mode, string pose, string label) =>
+            new([face.Location, "f0003/nonresident/smile"], AnimationOperation.Swap, mode, "test")
+            {
+                Variants = [new AnimationSwapVariant(label, ImmutableDictionary<string, string>.Empty
+                    .Add(face.Location, $"f0002/nonresident/{pose}").Add("f0003/nonresident/smile", $"f0003/nonresident/{pose}"))],
+            };
+
+        var plan = new AnimationConversionPlanner(game, _ => null, null).Plan(mod.Path, Request(ConversionOutputMode.InPlace, "grin", "/Grin"));
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        // The game has no f0003 grin of its own for this race: said, not refused.
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "no_game_face"), "a destination the game lacks is explained");
+
+        var files = plan.Result.Default.FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => GamePath.NormalizeLocal(e.Local));
+        Assert.Equal(new[] { grin2, grin3 }, files.Keys.Order().ToArray());
+        foreach (var local in files.Values)
+        {
+            var pap = new PapFile(plan.Files.Single(f => f.Operation == LocalFileOperation.Write && GamePath.NormalizeLocal(f.Destination) == local).Content!);
+            Assert.Equal(new[] { "cfxf_grin" }, pap.Entries.Select(e => e.Name).ToArray());
+            Assert.Equal(["cfxf_grin"], PapTimeline.ReadStrings(pap.ToArray()).Select(s => s.Value));
+        }
+
+        var speed = plan.Result.Groups.Single();
+        foreach (var (option, duration) in new[] { (0, 600), (1, 1200) })
+        {
+            var entry = speed.Containers[option].FileEntries().Single();
+            Assert.Equal(grinTmb, GamePath.Normalize(entry.Key));
+            var tmb = TmbTimeline.Parse(plan.Files.Single(f => f.Operation == LocalFileOperation.Write &&
+                                                                GamePath.NormalizeLocal(f.Destination) == GamePath.NormalizeLocal(entry.Local)).Content!);
+            Assert.Equal("grin", tmb.FacePack);
+            Assert.Equal(new FaceTiming(duration, 0, 0x08000001, 0f, 600f, 0), tmb.TimingOf("cfxf_grin"));
+        }
+        Assert.True(!speed.Containers[2].FileEntries().Any(), "the empty option stays empty");
+        // In place, the files left behind are removed.
+        Assert.Equal(4, plan.Files.Count(f => f.Operation == LocalFileOperation.Delete));
+
+        // Added to the mod, the smile stays too.
+        var added = new AnimationConversionPlanner(game, _ => null, null).Plan(mod.Path,
+            Request(ConversionOutputMode.AddToMod, "grin", "/Grin") with { KeepOriginal = true });
+        Assert.True(!added.HasBlockers, string.Join(" ", added.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { grin2, smile2, grin3, smile3 },
+            added.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
+        Assert.Equal(new[] { grinTmb, smileTmb },
+            added.Result.Groups.Single().Containers[0].FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
+
+        // The shared resident pack holds /Bow with every other face: it cannot be replaced alone.
+        var bow = new AnimationConversionPlanner(game, _ => null, null).Plan(mod.Path, Request(ConversionOutputMode.InPlace, "bow", "/Bow"));
+        Assert.True(bow.Diagnostics.Any(d => d.IsBlocker && d.Message.Contains("shared face pack")), "a resident pose is refused");
+
+        // Faces are only swapped.
+        var retarget = new AnimationConversionPlanner(game, _ => null, null).Plan(mod.Path,
+            new AnimationConversionRequest([face.Location], AnimationOperation.Retarget, ConversionOutputMode.NewMod, "test")
+                { SourceRace = 801, TargetRaces = [101] });
+        Assert.True(retarget.Diagnostics.Any(d => d.Code == "facial_swap_only" && d.IsBlocker), "a face is not retargeted");
     }
 
     /// <summary>
@@ -288,15 +501,17 @@ internal static class AnimationTests
         Assert.True(result.Default.FileEntries().All(e => !PapPath.TryParse(e.Key, out _)), "The group provides the animation.");
         var group = result.Groups.Single();
         Assert.Equal("Idle slot", group.Name);
-        Assert.Equal(1, Json.GetInt(group.Node["DefaultSettings"], -1));
-        Assert.Equal(["Standing idle (default)", "Standing idle 3", "Standing idle 5"],
+        // Past the empty "-" that switches the group off.
+        Assert.Equal(2, Json.GetInt(group.Node["DefaultSettings"], -1));
+        Assert.Equal(["-", "Standing idle (default)", "Standing idle 3", "Standing idle 5"],
             group.Options.Select(o => Json.GetString(o["Name"])));
         Assert.True(group.Options.All(o => Guid.TryParse(Json.GetString(o["Id"]), out _)), "Penumbra 1.7 options carry IDs.");
-        var names = group.Containers.Select(c => c.FileEntries().Single())
+        Assert.Equal(0, group.Containers[0].FileEntries().Count());
+        var names = group.Containers.Skip(1).Select(c => c.FileEntries().Single())
             .Select(e => new PapFile(File.ReadAllBytes(Path.Combine(output.Path, e.Local))).Entries[0].Name).ToList();
         Assert.Equal(["cbnm_id0", "cbem_pose03_1lp", "cbem_pose05_1lp"], names);
-        Assert.True(plan.Diagnostics.Any(d => d.Code == "destination_extras" && d.Message.Contains("cbna_add_dmg_f")),
-            "Replacing the default idle must report the hit reaction the output lacks.");
+        Assert.True(plan.Diagnostics.All(d => !d.Message.Contains("cbna_add_dmg_f")),
+            "The hit reaction the game keeps beside its default idle is not worth a warning.");
         Assert.Equal(0, AnimationConversionVerifier.Verify(output.Path, plan).Count);
     }
 
@@ -312,7 +527,7 @@ internal static class AnimationTests
         mod.File(loop, BuildPap([("cbem_pose03_1lp", 0)]));
         mod.File(start, BuildPap([("cbem_pose03_1st", 0)]));
 
-        var request = SlotRequest(ConversionOutputMode.InPlace,
+        var request = SlotRequest(ConversionOutputMode.AddToMod,
             ("Standing idle (default)", Idle0, null), ("Standing idle 3", Loop3, Start3), ("Standing idle 5", Loop5, Start5)) with
         {
             GroupName = "Idle slot",
@@ -332,35 +547,39 @@ internal static class AnimationTests
     }
 
     /// <summary>
-    /// A slot group for an animation that lives in an option must not become a new group: that
-    /// would make the animation play whether or not its option is selected. The option is split
-    /// into one option per slot inside its own group instead, keeping its other files, and the
-    /// group's default selection follows the option to its default slot.
+    /// A slot group for an animation that lives in an option is a new group beside it, named as
+    /// asked, with options named after the slots and "-" to switch it off. The option keeps its
+    /// own animation and files. Converting in place is refused: nothing is converted, a group is
+    /// added.
     /// </summary>
     private static void IdleSwapGroupInOption()
     {
         using var mod = new TempDir();
         Definition(mod, """{"Files":{}}""",
-            $$$"""[{"Name":"Style","Type":"Single","DefaultSettings":1,"Options":[{"Name":"Off"},{"Id":"keep-me","Name":"A","Files":{"{{{Loop3}}}":"a.pap","chara/other.tex":"other.tex"} } ] } ]""");
+            $$$"""[{"Name":"Style","Type":"Single","Priority":3,"DefaultSettings":1,"Options":[{"Name":"Off"},{"Id":"keep-me","Name":"A","Files":{"{{{Loop3}}}":"a.pap","chara/other.tex":"other.tex"} } ] } ]""");
         mod.File("a.pap", BuildPap([("cbem_pose03_1lp", 0)]));
         mod.File("other.tex", [1]);
-        var request = SlotRequest(ConversionOutputMode.InPlace,
+        var request = SlotRequest(ConversionOutputMode.AddToMod,
             ("Standing idle 3", Loop3, null), ("Standing idle 5", Loop5, null)) with { GroupName = "Slot" };
         var plan = Planner(Game()).Plan(mod.Path, request);
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
 
-        var group = plan.Result.Groups.Single();
-        Assert.Equal("Style", group.Name);
-        Assert.Equal(new[] { "Off", "A · Standing idle 3", "A · Standing idle 5" },
-            group.Options.Select(o => o["Name"]!.GetValue<string>()).ToArray());
-        // The option's identity stays with its default slot, and so does the group's default.
-        Assert.Equal("keep-me", group.Options.ElementAt(1)["Id"]!.GetValue<string>());
-        Assert.Equal(1, group.Node["DefaultSettings"]!.GetValue<int>());
+        Assert.Equal(new[] { "Style", "Slot" }, plan.Result.Groups.Select(g => g.Name).ToArray());
+        var style = plan.Result.Groups[0];
+        Assert.Equal(new[] { "Off", "A" }, style.Options.Select(o => Json.GetString(o["Name"])).ToArray());
+        Assert.Equal("keep-me", Json.GetString(style.Options.ElementAt(1)["Id"]));
+        Assert.Equal(new[] { Loop3, "chara/other.tex" },
+            style.Containers[1].FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
 
-        var slot5 = group.Containers[2].FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
-        Assert.True(slot5.ContainsKey(Loop5) && !slot5.ContainsKey(Loop3), "the copy for slot 5 plays in slot 5 only");
-        Assert.True(slot5.ContainsKey("chara/other.tex"), "the option's other files come along");
-        Assert.True(plan.Diagnostics.Any(d => d.Code == "slot_options_in_group"));
+        var slot = plan.Result.Groups[1];
+        Assert.Equal(new[] { "-", "Standing idle 3", "Standing idle 5" }, slot.Options.Select(o => Json.GetString(o["Name"])).ToArray());
+        Assert.Equal(1, Json.GetInt(slot.Node["DefaultSettings"], -1));
+        Assert.Equal(4, Json.GetInt(slot.Node["Priority"], 0));
+        Assert.Equal(0, slot.Containers[0].FileEntries().Count());
+        Assert.Equal(new[] { Loop5 }, slot.Containers[2].FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
+
+        var inPlace = Planner(Game()).Plan(mod.Path, request with { Mode = ConversionOutputMode.InPlace });
+        Assert.True(inPlace.Diagnostics.Any(d => d.Code == "group_in_place" && d.IsBlocker), "a slot group is never converted in place");
 
         // A plain replacement still works inside the option, and leaves the group's shape alone.
         plan = Planner(Game()).Plan(mod.Path,
@@ -368,6 +587,45 @@ internal static class AnimationTests
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
         Assert.Equal(2, plan.Result.Groups.Single().Containers.Count);
         Assert.True(plan.Result.Groups.Single().Containers[1].FileEntries().Any(e => GamePath.Normalize(e.Key) == Loop5));
+    }
+
+    /// <summary>
+    /// Added to the mod, the slot group sits beside the original: the source stays where it is,
+    /// in Default or its option, and the new group can be left at "-". One group cannot hold
+    /// a location that several options fill with different files.
+    /// </summary>
+    private static void IdleSwapGroupKeepsOriginal()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"a.pap"}}""");
+        mod.File("a.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        var request = SlotRequest(ConversionOutputMode.AddToMod,
+            ("Standing idle 3", Loop3, null), ("Standing idle 5", Loop5, null)) with
+        {
+            GroupName = "Slot (smile)",
+        };
+        var plan = Planner(Game()).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { Loop3 }, plan.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
+        var slot = plan.Result.Groups.Single();
+        Assert.Equal("Slot (smile)", slot.Name);
+        Assert.Equal(new[] { "-", "Standing idle 3", "Standing idle 5" }, slot.Options.Select(o => Json.GetString(o["Name"])).ToArray());
+        Assert.Equal(1, Json.GetInt(slot.Node["DefaultSettings"], -1));
+        GearConversionExecutor.ApplyInPlace(plan, mod.Path);
+        Assert.True(File.Exists(Path.Combine(mod.Path, "a.pap")), "the original file stays");
+
+        Definition(mod, """{"Files":{}}""",
+            $$$"""[{"Name":"Style","Type":"Single","Options":[{"Name":"A","Files":{"{{{Loop3}}}":"a.pap"} },{"Name":"B","Files":{"{{{Loop3}}}":"b.pap"} } ] } ]""");
+        var b = BuildPap([("cbem_pose03_1lp", 0)], havokSize: 24); // told apart from a.pap by its size
+        mod.File("b.pap", b);
+        plan = Planner(Game()).Plan(mod.Path, request);
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "several_sources" && d.IsBlocker), "two different files for one slot block");
+
+        // Told which option to take it from, the group uses that option's version.
+        plan = Planner(Game()).Plan(mod.Path, request with { SourceContainer = new ContainerAddress(0, 1) });
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        var slot3 = plan.Result.Groups.Single(g => g.Name == "Slot (smile)").Containers[1].FileEntries().Single().Local;
+        Assert.True(plan.Files.Single(f => f.Destination == slot3).Content!.SequenceEqual(b), "option B's version is used");
     }
 
     private static void SwapInheritsName()
@@ -502,7 +760,7 @@ internal static class AnimationTests
             var name = new byte[32];
             Encoding.ASCII.GetBytes(entries[i].Name).CopyTo(name, 0);
             writer.Write(name);
-            writer.Write((short)0);
+            writer.Write((short)(entries[i].Face != 0 ? 17 : 0)); // facial animations are type 17
             writer.Write((short)i);
             writer.Write(entries[i].Face);
         }
@@ -515,20 +773,47 @@ internal static class AnimationTests
         return stream.ToArray();
     }
 
-    /// <summary>TMLB with one C009 entry whose string (the motion name) follows the entries.</summary>
-    private static byte[] Timeline(string motion)
+    /// <summary>
+    /// A timeline as the game lays one out: TMDH, TMAL, one actor (TMAC) with one track (TMTR)
+    /// playing <paramref name="motion"/> in a C009, then the id lists and the string.
+    /// </summary>
+    internal static byte[] Timeline(string motion, int duration = 40)
     {
-        var text = Encoding.ASCII.GetBytes(motion + "\0");
-        var length = 12 + 28 + text.Length;
-        var bytes = new byte[length];
+        const int tmal = 28, tmac = 44, tmtr = 72, c009 = 96, lists = 120, text = 126;
+        var name = Encoding.ASCII.GetBytes(motion + "\0");
+        var bytes = new byte[text + name.Length];
+        void Item(int at, string magic, int size, short id = -1)
+        {
+            Encoding.ASCII.GetBytes(magic).CopyTo(bytes, at);
+            BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(at + 4), size);
+            if (id >= 0) BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(at + 8), id);
+        }
+        // Pointers count from their item's start + 8; lists carry their length after the pointer.
+        void Pointer(int item, int field, int target, int count = -1)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(item + field), target - (item + 8));
+            if (count >= 0) BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(item + field + 4), count);
+        }
+
         "TMLB"u8.CopyTo(bytes);
-        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4), length);
-        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), 1);
-        "C009"u8.CopyTo(bytes.AsSpan(12));
-        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(16), 28);
-        // Displacement from the entry start + 8 to the string at offset 40.
-        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12 + 20), 40 - (12 + 8));
-        text.CopyTo(bytes, 40);
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4), bytes.Length);
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), 5);
+        Item(12, "TMDH", 16, 1);
+        BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(12 + 12), (short)duration);
+        BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(12 + 14), 3);
+        Item(tmal, "TMAL", 16);
+        Pointer(tmal, 8, lists, 1);
+        Item(tmac, "TMAC", 28, 2);
+        Pointer(tmac, 20, lists + 2, 1);
+        Item(tmtr, "TMTR", 24, 3);
+        Pointer(tmtr, 12, lists + 4, 1);
+        Item(c009, "C009", 24, 4);
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(c009 + 12), duration);
+        Pointer(c009, 20, text);
+        BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(lists), 2);
+        BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(lists + 2), 3);
+        BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(lists + 4), 4);
+        name.CopyTo(bytes, text);
         return bytes;
     }
 

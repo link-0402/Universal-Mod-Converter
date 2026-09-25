@@ -25,6 +25,14 @@ public static class RaceNames
         return $"{Races[index / 2]} {(index % 2 == 0 ? "Male" : "Female")}";
     }
 
+    /// <summary>"Midlander", without the gender, or the raw code when it is not a playable race.</summary>
+    public static string Race(ushort genderRace)
+    {
+        var index = genderRace / 100 - 1;
+        if (genderRace % 100 != 1 || index < 0 || index >= Races.Length * 2) return Code(genderRace);
+        return Races[index / 2];
+    }
+
     /// <summary>
     /// "Midlander Female (c0201)": the name for the reader, the code for anyone comparing the
     /// message against file paths. Collapses to the bare code when there is no name to add.

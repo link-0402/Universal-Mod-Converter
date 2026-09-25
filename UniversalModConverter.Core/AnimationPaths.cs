@@ -4,18 +4,26 @@ using System.Text.RegularExpressions;
 namespace UniversalModConverter.Core;
 
 /// <summary>
-/// A player body animation pack path:
+/// A player animation pack path:
 /// <c>chara/human/c{race}/animation/{set}/{directory}/{key}.pap</c>, for example
 /// <c>chara/human/c0101/animation/a0001/bt_common/emote/pose01_loop.pap</c>. The race is the
 /// only race-specific part; <see cref="Location"/> identifies the animation for every race.
-/// Facial animations live under <c>animation/f####</c> and bind to face skeletons, so they
-/// are not body animations and never parse.
+/// <para>
+/// Besides body animations (<c>a####</c>), a facial expression's own pack parses too:
+/// <c>chara/human/c0801/animation/f0002/nonresident/smile.pap</c>, one per race and face
+/// animation set, holding <c>cfxf_smile</c>. These play on the face skeleton, so only swapping
+/// applies to them (see <see cref="IsFacial"/>). The shared <c>resident</c> face packs hold every
+/// face at once and never parse.
+/// </para>
 /// </summary>
 public sealed partial record PapPath(ushort Race, string Set, string Directory, string Key)
 {
-    [GeneratedRegex(@"^chara/human/c(?<race>\d{4})/animation/(?<set>a\d{4})/(?<dir>[a-z0-9_]+)/(?<key>[a-z0-9_./-]+)\.pap$",
+    [GeneratedRegex(@"^chara/human/c(?<race>\d{4})/animation/(?:(?<set>a\d{4})/(?<dir>[a-z0-9_]+)/(?<key>[a-z0-9_./-]+)|(?<set>f\d{4})/(?<dir>nonresident)/(?<key>[a-z0-9_.-]+))\.pap$",
         RegexOptions.CultureInvariant)]
     private static partial Regex PathRegex();
+
+    /// <summary>A facial expression's pack; <see cref="Key"/> is then its pose, e.g. <c>smile</c>.</summary>
+    public bool IsFacial => Set.StartsWith('f');
 
     public string GamePath => $"chara/human/c{Race:D4}/animation/{Set}/{Directory}/{Key}.pap";
 

@@ -16,11 +16,11 @@ public sealed class QueuedConversion
     public AssetKind Kind { get; init; } = AssetKind.Gear;
 
     /// <summary>
-    /// Whether the source root replaces nothing but textures. Only such a root can be added to
-    /// this mod without disturbing the original, because only a texture can be shared by an
-    /// extra key rather than rewritten in place.
+    /// Whether this is a fan-out: the source root replaces nothing but textures (or face or skin
+    /// materials), whose paths are simply added for further races. Such a plan has output
+    /// choices of its own (see <see cref="TextureFanOutLayout"/>).
     /// </summary>
-    public bool IsTextureOnly { get; init; }
+    public bool CanFanOut { get; init; }
 
     /// <summary>What the queue row says: "Body e0164 → e0200".</summary>
     public string Description { get; init; } = string.Empty;

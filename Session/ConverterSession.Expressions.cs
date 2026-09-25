@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using UniversalModConverter.Core;
 using UniversalModConverter.Services;
 
@@ -9,19 +10,19 @@ namespace UniversalModConverter.Session;
 
 public enum ExpressionSourceKind
 {
-    /// <summary>The face a game emote plays, e.g. the one /smile carries.</summary>
+    /// <summary>A face from the game's Expressions list, e.g. /Smile.</summary>
     Vanilla,
 
     /// <summary>A facial animation another installed Penumbra mod ships.</summary>
     Mod,
 }
 
-/// <summary>A .pap in another mod that carries facial animation.</summary>
-public sealed record ModExpression(string Label, string FullPath);
+/// <summary>A facial expression another mod provides in a face pack, or plays in one of its animations.</summary>
+public sealed record ModExpression(string Label, FacialAnimation Face);
 
 /// <summary>
 /// Attaching a facial expression to an animation: on its own, or on top of a swap or retarget.
-/// The face comes from a game emote or from another Penumbra mod.
+/// The face comes from the game's Expressions list or from another Penumbra mod.
 /// </summary>
 public sealed partial class ConverterSession
 {
@@ -30,7 +31,7 @@ public sealed partial class ConverterSession
 
     public ExpressionSourceKind ExpressionSource { get; private set; } = ExpressionSourceKind.Vanilla;
 
-    /// <summary>Vanilla: the emote whose face is attached, or 0.</summary>
+    /// <summary>Vanilla: the expression (its Emote row) that is attached, or 0.</summary>
     public uint ExpressionEmote { get; private set; }
 
     /// <summary>Mod: the Penumbra mod the face is taken from, or null.</summary>
@@ -42,8 +43,6 @@ public sealed partial class ConverterSession
     private string? _scannedExpressionMod;
     private IReadOnlyList<ModExpression>? _modExpressions;
     private bool _scanningExpressions;
-
-    public string? ExpressionUnavailableReason => _plugin.Converter.ExpressionUnavailableReason;
 
     /// <summary>Whether the current operation will attach an expression.</summary>
     public bool WantsExpression => AnimationOperation == AnimationOperation.Expression || AttachExpression;
@@ -85,9 +84,10 @@ public sealed partial class ConverterSession
     }
 
     /// <summary>
-    /// The facial animations the chosen mod ships, or null while they are being found. A mod is
-    /// scanned once, off the framework thread: every .pap it redirects is opened and kept when
-    /// it carries at least one facial entry.
+    /// The facial expressions the chosen mod offers, or null while they are being found. A mod
+    /// is scanned once, off the framework thread: the faces its timelines play (its expression
+    /// emotes and animations), each the way it plays it, and the expressions (<c>cfxf_</c>) of
+    /// the face packs it replaces.
     /// </summary>
     public IReadOnlyList<ModExpression>? ModExpressions
     {
@@ -112,9 +112,17 @@ public sealed partial class ConverterSession
         }
     }
 
+    /// <summary><c>chara/human/c0801/animation/f0002/nonresident/smile.pap</c>: a pack of a race's face animations.</summary>
+    [GeneratedRegex(@"^chara/human/c\d{4}/animation/f\d{4}/(?<where>resident|nonresident)/(?<name>[^/]+)\.pap$", RegexOptions.IgnoreCase)]
+    private static partial Regex FacePack();
+
+    private const string ExpressionPrefix = "cfxf_";
+
     private static List<ModExpression> ScanExpressions(string directory)
     {
-        var found = new List<ModExpression>();
+        // How the mod plays each face, by its timelines, and the faces its packs merely hold.
+        var played = new Dictionary<FacialAnimation, string>();
+        var packed = new Dictionary<FacialAnimation, string>();
         try
         {
             var mod = PenumbraMod.Load(directory);
@@ -122,20 +130,50 @@ public sealed partial class ConverterSession
             foreach (var container in mod.Containers)
             foreach (var (key, local) in container.FileEntries())
             {
-                if (!key.EndsWith(".pap", StringComparison.OrdinalIgnoreCase)) continue;
+                var isPap = key.EndsWith(".pap", StringComparison.OrdinalIgnoreCase);
+                if (!isPap && !key.EndsWith(".tmb", StringComparison.OrdinalIgnoreCase)) continue;
                 string full;
                 try { full = PathSafety.ResolveRelative(directory, GamePath.ToLocal(local)); }
                 catch (InvalidDataException) { continue; }
                 if (!seen.Add(full) || !File.Exists(full)) continue;
                 try
                 {
-                    var pap = new PapFile(File.ReadAllBytes(full));
-                    if (!pap.FaceEntries.Any()) continue;
-                    var name = Path.GetFileNameWithoutExtension(GamePath.Normalize(key));
-                    var where = container.Group == null ? string.Empty : $" ({container.Label})";
-                    found.Add(new ModExpression($"{name}{where}", full));
+                    var gamePath = GamePath.Normalize(key);
+                    var bytes = File.ReadAllBytes(full);
+                    var file = Path.GetFileName(gamePath);
+                    var where = container.Group == null ? string.Empty : $", {container.Label}";
+                    void Played(TmbTimeline timeline)
+                    {
+                        foreach (var face in timeline.Faces.Where(f => f.StartsWith(ExpressionPrefix, StringComparison.Ordinal)))
+                            played.TryAdd(new FacialAnimation(face, timeline.FacePack, timeline.TimingOf(face)),
+                                $"{face[ExpressionPrefix.Length..]} (as {file} plays it{where})");
+                    }
+
+                    if (!isPap)
+                    {
+                        Played(TmbTimeline.Parse(bytes));
+                        continue;
+                    }
+
+                    var pap = new PapFile(bytes);
+                    if (FacePack().Match(gamePath) is { Success: true } pack)
+                    {
+                        // The game loads a nonresident pack by the name the timeline gives.
+                        var name = pack.Groups["where"].Value.Equals("nonresident", StringComparison.OrdinalIgnoreCase)
+                            ? pack.Groups["name"].Value
+                            : null;
+                        foreach (var (entry, _) in pap.FaceEntries.Where(e => e.Entry.Name.StartsWith(ExpressionPrefix, StringComparison.Ordinal)))
+                            packed.TryAdd(new FacialAnimation(entry.Name, name), $"{entry.Name[ExpressionPrefix.Length..]} ({file}{where})");
+                        continue;
+                    }
+
+                    foreach (var (_, index) in pap.BodyEntries)
+                    {
+                        try { Played(TmbTimeline.Parse(pap.Timeline(index))); }
+                        catch (InvalidDataException) { /* a timeline this converter cannot read */ }
+                    }
                 }
-                catch (InvalidDataException) { /* not a readable animation */ }
+                catch (InvalidDataException) { /* not a readable animation or timeline */ }
             }
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
@@ -143,42 +181,46 @@ public sealed partial class ConverterSession
             // A mod that cannot be read offers nothing.
         }
 
-        return found.OrderBy(e => e.Label, StringComparer.OrdinalIgnoreCase).ToList();
+        // A face the mod plays is offered the ways it plays it, which carry its pace; one it only
+        // ships plays as the game plays that expression, or holds its first frame.
+        var faces = played.Keys.Select(f => f.Entry).ToHashSet(StringComparer.Ordinal);
+        return played.Concat(packed.Where(p => !faces.Contains(p.Key.Entry)))
+            .Select(f => new ModExpression(f.Value, f.Key))
+            .OrderBy(e => e.Label, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     /// <summary>Why the expression inputs are incomplete, or null.</summary>
     private string? ExpressionBlockReason()
     {
         if (!WantsExpression) return null;
-        if (_plugin.Converter.ExpressionUnavailableReason is { } unavailable) return unavailable;
         return ExpressionSource switch
         {
-            ExpressionSourceKind.Vanilla when AnimationEmotes == null => "Reading the emote list…",
-            ExpressionSourceKind.Vanilla when ExpressionEmote == 0 => "Choose the emote whose expression to attach.",
+            ExpressionSourceKind.Vanilla when AnimationExpressions == null => "Reading the expression list…",
+            ExpressionSourceKind.Vanilla when GameData.Animations.FindExpression(ExpressionEmote) == null
+                => "Choose the expression to attach.",
             ExpressionSourceKind.Mod when ExpressionModDirectory == null => "Choose the mod to take the expression from.",
             ExpressionSourceKind.Mod when ExpressionModFile == null => "Choose the expression in that mod.",
             _ => null,
         };
     }
 
-    /// <summary>The donor the planner reads, for the race the animation plays on.</summary>
+    /// <summary>The expression the planner attaches; a game pose is looked up for each animation's own race.</summary>
     private ExpressionDonor? CurrentExpression(AnimationSource source)
     {
         if (!WantsExpression) return null;
         if (ExpressionSource == ExpressionSourceKind.Mod)
             return ExpressionModFile is { } file
-                ? new ExpressionDonor($"{Path.GetFileName(ExpressionModDirectory)}: {file.Label}", FilePath: file.FullPath)
+                ? new ExpressionDonor($"{Path.GetFileName(ExpressionModDirectory)}: {file.Label}", Face: file.Face)
                 : null;
 
-        if (GameData.Animations.FindEmote(ExpressionEmote) is not { } emote || emote.Timelines.Length == 0) return null;
-        var race = source.Races.Contains((ushort)101) ? (ushort)101 : source.Races.FirstOrDefault();
-        // The planner swaps in each animation's own race; this is only the starting point.
-        return new ExpressionDonor($"/{emote.Name}",
-            GamePath: $"chara/human/c{race:D4}/animation/{emote.Timelines[0].Location}.pap");
+        // The planner reads the pose for each animation's own race.
+        return GameData.Animations.FindExpression(ExpressionEmote) is { } expression
+            ? new ExpressionDonor($"/{expression.Name}", Pose: expression.Pose)
+            : null;
     }
 
     private string ExpressionLabel
         => ExpressionSource == ExpressionSourceKind.Mod
             ? ExpressionModFile?.Label ?? "expression"
-            : GameData.Animations.FindEmote(ExpressionEmote) is { } emote ? $"/{emote.Name} face" : "expression";
+            : GameData.Animations.FindExpression(ExpressionEmote) is { } expression ? $"/{expression.Name}" : "expression";
 }

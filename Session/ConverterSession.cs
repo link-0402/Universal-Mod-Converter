@@ -51,8 +51,10 @@ public sealed partial class ConverterSession
 
     public ConverterSession(Plugin plugin)
     {
-        _plugin    = plugin;
-        OutputMode = plugin.Configuration.OutputMode;
+        _plugin         = plugin;
+        OutputMode      = plugin.Configuration.OutputMode;
+        TextureLayout   = plugin.Configuration.TextureLayout;
+        TextureAsNewMod = plugin.Configuration.TextureAsNewMod;
     }
 
     public BackgroundRunner Runner { get; } = new();
@@ -99,11 +101,9 @@ public sealed partial class ConverterSession
     public int TargetCustomizationId { get; private set; } = 1;
 
     /// <summary>
-    /// Texture-only customization roots: every (race, ID) pair the same textures are written for,
-    /// e.g. a face texture offered to several face IDs of a race at once. Each becomes its own
-    /// toggleable option in a new group built for its race (see <see cref="CustomizationPlanner"/>
-    /// in Services), so ticking or unticking one here has nothing special about it — the source's
-    /// own race is just pre-ticked, since that is what the mod already has.
+    /// Fan-out roots (textures, and face or skin materials): every further (race, ID) the source's
+    /// paths are added for, e.g. a skin offered to Au Ra and Viera, or a face texture to several
+    /// face IDs. The source itself is always kept and never part of this set.
     /// </summary>
     private readonly HashSet<(ushort Race, ushort Id)> _textureTargets = new();
 
@@ -114,14 +114,33 @@ public sealed partial class ConverterSession
 
     public bool IsTextureTarget(ushort race, ushort id) => _textureTargets.Contains((race, id));
 
-    /// <summary>Whether the selected root can be written for several races at once.</summary>
-    public bool CanFanOutTextures => Source is { IsCustomization: true, IsTextureOnly: true };
+    /// <summary>Whether the selected root's paths can simply be added for further races or IDs.</summary>
+    public bool CanFanOutTextures => Source is { IsCustomization: true, CanFanOut: true };
+
+    /// <summary>Whether (race, ID) is the source itself, which a fan-out always keeps.</summary>
+    public bool IsTextureSource(ushort race, ushort id)
+        => Source is { GenderRace: { } sourceRace } source && TargetCustomizationKind == source.Kind &&
+           race == sourceRace && ushort.TryParse(source.ModelIdPadded, out var sourceId) && id == sourceId;
 
     public void SetTextureTarget(ushort race, ushort id, bool on)
     {
-        if (!AllowedTargetRaces.Contains(race)) return;
+        if (!AllowedTargetRaces.Contains(race) || IsTextureSource(race, id)) return;
         var key = (race, id);
         if (on ? !_textureTargets.Add(key) : !_textureTargets.Remove(key)) return;
+        MarkDirty();
+    }
+
+    /// <summary>
+    /// Fan-outs with materials: give each target its own copy of every material, with the texture
+    /// paths inside moved to the target (so it gets its own face or skin textures where the mod has
+    /// none), instead of sharing the source's material as it is.
+    /// </summary>
+    public bool RetargetMaterials { get; private set; } = true;
+
+    public void SetRetargetMaterials(bool on)
+    {
+        if (on == RetargetMaterials) return;
+        RetargetMaterials = on;
         MarkDirty();
     }
 
@@ -129,7 +148,33 @@ public sealed partial class ConverterSession
 
     // ── Output ───────────────────────────────────────────────────────────────
 
+    /// <summary>Where gear, model and animation conversions write.</summary>
     public ConversionOutputMode OutputMode { get; private set; }
+
+    /// <summary>How a texture fan-out adds its paths; see <see cref="UsesTextureOutput"/>.</summary>
+    public TextureFanOutLayout TextureLayout { get; private set; }
+
+    /// <summary>
+    /// Whether a texture fan-out is written to a new mod, a copy of this one with the paths added,
+    /// instead of this mod. Either way the source keeps working, so only these two apply to it.
+    /// </summary>
+    public bool TextureAsNewMod { get; private set; }
+
+    /// <summary>
+    /// Whether the plan is a texture fan-out, which has output choices of its own. It runs on its
+    /// own like every customization conversion, so one fan-out entry decides; with nothing
+    /// planned yet, the selected source does.
+    /// </summary>
+    public bool UsesTextureOutput => _queue.Count > 0 ? _queue.Any(e => e.CanFanOut) : CanFanOutTextures;
+
+    /// <summary>The output mode the plan actually runs with.</summary>
+    public ConversionOutputMode EffectiveOutputMode => UsesTextureOutput
+        ? TextureAsNewMod ? ConversionOutputMode.NewMod : ConversionOutputMode.AddToMod
+        // A preference for converting in place waits while the plan cannot use it, rather than
+        // being overwritten by the fallback.
+        : OutputMode == ConversionOutputMode.InPlace && InPlaceBlockReason != null ? ConversionOutputMode.AddToMod
+        : OutputMode;
+
     public string NewModName { get; private set; } = string.Empty;
     private bool _newModNameIsDefault = true;
 
@@ -266,7 +311,7 @@ public sealed partial class ConverterSession
             if (Source is not { } source) return DetectedItems.Count == 0 ? "No convertible item was found in this mod." : "Select a source item.";
             if (source.Animation is { } animation) return AnimationBlockReason(animation);
             if (!source.IsCustomization) return TargetItem == null ? "Select a target item." : null;
-            if (source.IsTextureOnly) return _textureTargets.Count == 0 ? "Choose at least one race to convert to." : null;
+            if (source.CanFanOut) return _textureTargets.Count == 0 ? "Tick at least one race or face to add the paths for." : null;
             if (TargetCustomizationId is < 1 or > 9999) return "Customization IDs must be between 1 and 9999.";
             if (CustomizationTargets.BlockReason(source.Kind, source.GenderRace ?? 0, TargetCustomizationKind, TargetRace) is { } blocked)
                 return blocked;
@@ -288,7 +333,7 @@ public sealed partial class ConverterSession
             if (Task.HasBlockers) return "The plan has blockers. Resolve them first.";
             if (Task.IsApplied) return "This plan was already applied.";
             if (_queue.Count > 0 && _queue.All(e => !e.Enabled)) return "Enable at least one conversion in the list.";
-            if (OutputMode.IsNewMod())
+            if (EffectiveOutputMode.IsNewMod())
             {
                 if (string.IsNullOrWhiteSpace(NewModName)) return "Enter a name for the new mod.";
                 if (NewModPath is not { } path) return "Cannot determine where to create the new mod.";
@@ -385,10 +430,6 @@ public sealed partial class ConverterSession
             var races = AllowedTargetRaces;
             TargetRace = source.GenderRace is { } race && races.Contains(race) ? race : races.FirstOrDefault();
             _fixTargetId = true;
-            // The mod already has this race working; start with it ticked so nothing is
-            // silently dropped unless the user unticks it.
-            if (source.IsTextureOnly && source.GenderRace is { } sourceRace)
-                _textureTargets.Add((sourceRace, (ushort)TargetCustomizationId));
         }
         else
             ReloadCandidates();
@@ -535,23 +576,52 @@ public sealed partial class ConverterSession
     /// <summary>
     /// Why the converted item cannot be added beside the original, or null. Hair, face, tail
     /// and Viera-ear conversions rewrite their model and material files in place, which would
-    /// retarget the original as well, so they still have to replace it. A texture-only root is
-    /// exempt: adding it to this mod always keeps the source race working alongside the target.
+    /// retarget the original as well, so they still have to replace it. A fan-out has output
+    /// choices of its own and never uses this one.
     /// </summary>
     public string? AddToModBlockReason
-        => _queue.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind) && !e.IsTextureOnly) is { } entry
+        => _queue.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind) && !e.CanFanOut) is { } entry
             ? $"{CustomizationKinds.Get(entry.Kind).DisplayName} conversions replace the original; " +
               "create a new mod to keep it."
+            : null;
+
+    /// <summary>
+    /// Why the plan cannot be converted in place, or null: a slot group for an animation is added
+    /// beside what the mod already has, into this mod or a new one.
+    /// </summary>
+    public string? InPlaceBlockReason
+        => AnimationGroupOutput is { } group
+            ? $"{(group.Length > 0 ? $"'{group}'" : "The option group")} is added beside what the mod already has, " +
+              "so there is nothing to convert in place. Add it to this mod or create a new mod."
             : null;
 
     public void SetOutputMode(ConversionOutputMode mode)
     {
         if (mode == ConversionOutputMode.AddToMod && AddToModBlockReason != null) return;
+        if (mode == ConversionOutputMode.InPlace && InPlaceBlockReason != null) return;
         if (mode == OutputMode) return;
         OutputMode = mode;
         Config.OutputMode = mode;
         Config.Save();
         MarkPlanDirty(); // The gear plan depends on the output mode.
+    }
+
+    public void SetTextureLayout(TextureFanOutLayout layout)
+    {
+        if (layout == TextureLayout) return;
+        TextureLayout = layout;
+        Config.TextureLayout = layout;
+        Config.Save();
+        MarkPlanDirty();
+    }
+
+    public void SetTextureAsNewMod(bool asNewMod)
+    {
+        if (asNewMod == TextureAsNewMod) return;
+        TextureAsNewMod = asNewMod;
+        Config.TextureAsNewMod = asNewMod;
+        Config.Save();
+        MarkPlanDirty();
     }
 
     public void SetNewModName(string name)
@@ -572,7 +642,7 @@ public sealed partial class ConverterSession
         var label = _queue.Count switch
         {
             0 => string.Empty,
-            1 => _queue[0].Target.Name,
+            1 => _queue[0].CanFanOut ? $"+ {_queue[0].Target.Detail}" : _queue[0].Target.Name,
             _ => $"{_queue.Count} conversions",
         };
         NewModName = HasMod ? (label.Length == 0 ? ModName : $"{ModName} ({label})") : string.Empty;
@@ -599,13 +669,6 @@ public sealed partial class ConverterSession
     /// <summary>The conversion the current inputs describe, ready to plan.</summary>
     private ConversionTask BuildTask(DetectedItem source)
     {
-        var task = BuildTaskCore(source);
-        AddExtraTargets(task, source);
-        return task;
-    }
-
-    private ConversionTask BuildTaskCore(DetectedItem source)
-    {
         var target = TargetItem;
         if (source.Animation is { } animation)
             return new ConversionTask
@@ -616,11 +679,23 @@ public sealed partial class ConverterSession
                 AnimationRequest = BuildAnimationRequest(animation),
             };
 
-        // A texture-only root has no single target: whatever is ticked in the list becomes one
-        // new option, one per (race, ID). One of them still has to carry the task's scalar
-        // fields; which one does not matter; AddExtraTargets adds the rest.
-        var textureOnly = source is { IsCustomization: true, IsTextureOnly: true };
-        var primary = textureOnly ? _textureTargets.OrderBy(t => t.Race).ThenBy(t => t.Id).FirstOrDefault() : default;
+        // A fan-out has no single target: everything ticked in the list gets the source's paths.
+        if (source is { IsCustomization: true, CanFanOut: true, GenderRace: { } sourceRace })
+            return new ConversionTask
+            {
+                Kind                    = source.Kind,
+                TargetCustomizationKind = TargetCustomizationKind,
+                ModDirectory            = ModDirectory,
+                OutputMode              = EffectiveOutputMode,
+                SourceGenderRace        = sourceRace,
+                OldIdPadded             = source.ModelIdPadded,
+                TextureRequest          = new TextureFanOutRequest(
+                    new CustomizationPathEndpoint(source.Kind, sourceRace, ushort.Parse(source.ModelIdPadded)),
+                    [.. _textureTargets.OrderBy(t => t.Race).ThenBy(t => t.Id)
+                        .Select(t => new CustomizationPathEndpoint(TargetCustomizationKind, t.Race, t.Id))],
+                    EffectiveOutputMode, TextureLayout, RetargetMaterials, Describe(source)),
+            };
+
         return new ConversionTask
         {
             Kind                    = source.Kind,
@@ -629,23 +704,13 @@ public sealed partial class ConverterSession
             OutputMode              = OutputMode,
             Slot                    = source.Slot,
             OldIdPadded             = source.ModelIdPadded,
-            NewIdPadded             = textureOnly ? primary.Id.ToString("D4")
-                : source.IsCustomization ? TargetCustomizationId.ToString("D4") : target!.ModelIdPadded,
+            NewIdPadded             = source.IsCustomization ? TargetCustomizationId.ToString("D4") : target!.ModelIdPadded,
             TargetVariant           = source.IsCustomization ? 1 : target!.Variant,
             SourceVariant           = source.Variant,
             SourceGenderRace        = source.GenderRace,
-            TargetGenderRace        = textureOnly ? primary.Race : source.IsCustomization ? TargetRace : null,
+            TargetGenderRace        = source.IsCustomization ? TargetRace : null,
             TargetSlot              = !source.IsCustomization && TargetSlot != source.Slot ? TargetSlot : null,
         };
-    }
-
-    /// <summary>Adds every texture-only target beyond the one carried as the task's primary.</summary>
-    private void AddExtraTargets(ConversionTask task, DetectedItem source)
-    {
-        if (source is not { IsCustomization: true, IsTextureOnly: true }) return;
-        var primary = _textureTargets.OrderBy(t => t.Race).ThenBy(t => t.Id).FirstOrDefault();
-        foreach (var (race, id) in _textureTargets.Where(e => e != primary))
-            task.ExtraTargets.Add(new ConversionEndpoint(TargetCustomizationKind, id, GenderRace: race));
     }
 
     public void Preview()
@@ -660,12 +725,14 @@ public sealed partial class ConverterSession
             // One conversion needs no merging: it runs the way it always has, with everything
             // a single conversion supports, customization and mesh editing included.
             task = enabled[0].Task.CloneInputs();
-            task.OutputMode = OutputMode;
+            task.OutputMode = EffectiveOutputMode;
+            // Like the output mode, the layout is chosen for the plan, not per entry.
+            if (task.TextureRequest is { } fanOut) task.TextureRequest = fanOut with { Layout = TextureLayout };
             description = enabled[0].Description;
         }
         else
         {
-            task = new ConversionTask { ModDirectory = ModDirectory, OutputMode = OutputMode };
+            task = new ConversionTask { ModDirectory = ModDirectory, OutputMode = EffectiveOutputMode };
             task.Entries.AddRange(enabled);
             description = DescribeQueue();
         }
@@ -691,6 +758,8 @@ public sealed partial class ConverterSession
                     ? $"{plan.Changes.Count} change(s), {plan.Files.Count} file operation(s)"
                     : planned.AnimationPlan is { } animationPlan
                     ? $"{animationPlan.Changes.Count} change(s), {animationPlan.Files.Count} file operation(s)"
+                    : planned.TexturePlan is { } texturePlan
+                    ? $"{texturePlan.Outputs.Count} path(s) added, {texturePlan.Files.Count} material file(s) written"
                     : $"{planned.PlannedRenames.Count} rename(s), {planned.PlannedJsonChanges.Sum(j => j.Changes.Count)} metadata change(s), " +
                       $"{planned.PlannedBinaryPatches.Sum(b => b.Patches.Count)} binary patch(es), {planned.PlannedMdlChanges.Count} model rewrite(s)";
                 Log.Add(planned.HasBlockers ? LogLevel.Warning : LogLevel.Info,
@@ -881,25 +950,29 @@ public sealed partial class ConverterSession
     {
         if (source.Animation is { } animation) return DescribeAnimation(animation);
         if (source.IsCustomization)
-            return source.IsTextureOnly
-                ? $"{RaceLabel(source.GenderRace ?? 0)} {source.ItemName} → {DescribeTextureTargets()}"
+            return source.CanFanOut
+                ? $"{RaceLabel(source.GenderRace ?? 0)} {source.ItemName} → also {DescribeTextureTargets()}"
                 : $"{RaceLabel(source.GenderRace ?? 0)} {source.ItemName} → {RaceLabel(TargetRace)} {TargetOptionLabel}";
         var target = TargetItem == null ? "?" : $"{TargetItem.Name} ({TargetItem.ModelIdDisplay})";
         return $"{source.ItemName} ({source.ModelIdDisplay}) → {target}" +
                (TargetSlot != source.Slot ? $" [{SlotInfo.DisplayLabelMap[source.Slot]} → {SlotInfo.DisplayLabelMap[TargetSlot]}]" : string.Empty);
     }
 
-    /// <summary>The whole ticked (race, ID) set of a texture-only root, for summaries.</summary>
+    /// <summary>The whole ticked (race, ID) set of a fan-out root, for summaries.</summary>
     private string DescribeTextureTargets()
     {
         if (_textureTargets.Count == 0) return "?";
         if (_textureTargets.Count == 1)
         {
             var (race, id) = _textureTargets.First();
-            return $"{RaceLabel(race)} {GameDataService.OptionLabel(TargetCustomizationKind, id)}";
+            return TargetCustomizationKind == AssetKind.Body
+                ? RaceLabel(race)
+                : $"{RaceLabel(race)} {GameDataService.OptionLabel(TargetCustomizationKind, id)}";
         }
         var races = _textureTargets.Select(t => t.Race).Distinct().Count();
-        return $"{_textureTargets.Count} option(s) across {races} race(s)";
+        return races == _textureTargets.Count
+            ? $"{races} races"
+            : $"{_textureTargets.Count} {CustomizationKinds.Get(TargetCustomizationKind).DisplayName.ToLowerInvariant()}s across {races} race(s)";
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -913,14 +986,15 @@ public sealed partial class ConverterSession
         if (enabledEntries.Count == 0) return;
 
         var task        = Task;
-        var isNewMod    = OutputMode.IsNewMod();
+        var mode        = EffectiveOutputMode;
+        var isNewMod    = mode.IsNewMod();
         var newModDir   = NewModPath;
         var newModName  = NewModName.Trim();
         var sourceName  = ModName;
         var description = enabledEntries.Count == 1 ? enabledEntries[0].Description : DescribeQueue();
         Result = null;
         Log.BeginOperation(isConversion: true);
-        Log.Add($"Converting {description} ({OutputModeLabel(OutputMode, newModName)})…");
+        Log.Add($"Converting {description} ({OutputModeLabel(mode, newModName)})…");
         if (task.MeshRemovals.Count > 0)
             Log.Add($"Removing {task.MeshRemovals.Values.Sum(r => r.Groups.Length)} mesh group(s) and " +
                     $"{task.MeshRemovals.Values.Sum(r => r.PartsOrEmpty.Length)} single part(s) from {task.MeshRemovals.Count} model(s).");

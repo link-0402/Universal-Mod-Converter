@@ -12,10 +12,19 @@ namespace UniversalModConverter.Core;
 /// </summary>
 public sealed class PapFile
 {
-    /// <summary>One animation of the pack. <see cref="Face"/> is non-zero for facial animations.</summary>
+    /// <summary>
+    /// One animation of the pack. <see cref="Face"/> is a flag the game sets on facial
+    /// animations and on some body animations alike, so it does not tell them apart.
+    /// </summary>
     public sealed record Entry(string Name, short Type, short Binding, int Face)
     {
-        public bool IsBody => Face == 0;
+        /// <summary>
+        /// Facial animations (<c>cfxf_</c> expressions, <c>cfxb_</c> blinks, <c>cfxl_</c> lips)
+        /// play on the face skeleton and only live in the face packs a body timeline names.
+        /// </summary>
+        public bool IsFacial => Type is 17 or 18 or 19 || Name.StartsWith("cfx", StringComparison.Ordinal);
+
+        public bool IsBody => !IsFacial;
     }
 
     public const int MaxFileSize = 256 * 1024 * 1024;
@@ -106,61 +115,25 @@ public sealed class PapFile
     }
 
     /// <summary>
-    /// Adds animations to the pack: their info entries after the existing ones, the Havok
-    /// container that now also holds their bindings, and their timelines after the existing
-    /// ones. Every existing entry, its bytes and its timeline are kept exactly; only offsets
-    /// move. The caller supplies <paramref name="havok"/> with the new bindings appended, so
-    /// each new entry's <see cref="Entry.Binding"/> must already point past the old ones.
+    /// Replaces the embedded timelines, one per entry, keeping everything before them. They are
+    /// aligned relative to the first, as <see cref="Timeline"/> reads them; the last is not padded.
     /// </summary>
-    public byte[] WithAppendedEntries(byte[] havok, IReadOnlyList<(Entry Entry, byte[] Timeline)> appended)
+    public byte[] WithTimelines(IReadOnlyList<byte[]> timelines)
     {
-        if (appended.Count == 0) throw new InvalidDataException("No animation to add was supplied.");
-        if (havok.Length < 8 || havok.Length > MaxFileSize) throw new InvalidDataException("Invalid Havok container size.");
-        var count = Entries.Length + appended.Count;
-        if (count > 4096) throw new InvalidDataException("The PAP would hold too many animations.");
-
-        var info = ReadInt(_bytes, InfoOffsetField);
-        var stream = new MemoryStream();
-        stream.Write(_bytes, 0, info);
-        stream.Write(_bytes, info, Entries.Length * EntrySize);
-        foreach (var (entry, _) in appended)
+        if (timelines.Count != Entries.Length) throw new InvalidDataException("Every animation needs exactly one timeline.");
+        var footer = new MemoryStream();
+        for (var i = 0; i < timelines.Count; i++)
         {
-            var name = Encoding.ASCII.GetBytes(entry.Name);
-            if (!PapTimeline.IsSafeMotionName(entry.Name) || name.Length > NameSize - 1)
-                throw new InvalidDataException($"'{entry.Name}' is not a valid animation name.");
-            var record = new byte[EntrySize];
-            name.CopyTo(record, 0);
-            BinaryPrimitives.WriteInt16LittleEndian(record.AsSpan(32), entry.Type);
-            BinaryPrimitives.WriteInt16LittleEndian(record.AsSpan(34), entry.Binding);
-            BinaryPrimitives.WriteInt32LittleEndian(record.AsSpan(36), entry.Face);
-            stream.Write(record);
+            if (timelines[i].Length < 12 || !timelines[i].AsSpan(0, 4).SequenceEqual("TMLB"u8))
+                throw new InvalidDataException("An animation has no valid timeline.");
+            footer.Write(timelines[i]);
+            if (i + 1 < timelines.Count) footer.Write(new byte[(int)(-footer.Length & 3)]);
         }
 
-        // Keep the gap the file had between its entry table and its Havok container.
-        var gap = HavokOffset - (info + Entries.Length * EntrySize);
-        stream.Write(new byte[Math.Max(0, gap)]);
-        var havokOffset = (int)stream.Length;
-        stream.Write(havok);
-
-        // The timelines keep the alignment the file used for its first one.
-        var pad = (TimelineOffset - (int)stream.Length) & 3;
-        stream.Write(new byte[pad]);
-        var timelineOffset = (int)stream.Length;
-        stream.Write(_bytes, TimelineOffset, _bytes.Length - TimelineOffset);
-        foreach (var (_, timeline) in appended)
-        {
-            if (timeline.Length < 12 || !timeline.AsSpan(0, 4).SequenceEqual("TMLB"u8))
-                throw new InvalidDataException("An added animation has no valid timeline.");
-            stream.Write(new byte[(timelineOffset - (int)stream.Length) & 3]);
-            stream.Write(timeline);
-        }
-
-        var result = stream.ToArray();
+        var result = new byte[checked(TimelineOffset + (int)footer.Length)];
         if (result.Length > MaxFileSize) throw new InvalidDataException("The rebuilt PAP exceeds the size limit.");
-        BinaryPrimitives.WriteInt16LittleEndian(result.AsSpan(8), (short)count);
-        BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(HavokOffsetField), havokOffset);
-        BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(TimelineOffsetField), timelineOffset);
-        _ = new PapFile(result);
+        _bytes.AsSpan(0, TimelineOffset).CopyTo(result);
+        footer.ToArray().CopyTo(result, TimelineOffset);
         _ = PapTimeline.ReadStrings(result); // every timeline, and nothing after them
         return result;
     }
@@ -269,13 +242,16 @@ public static class PapTimeline
     /// <summary>
     /// Rewrites motion names inside the embedded timelines.
     /// <para>
-    /// A name that fits where the old one lived is written in place. A longer one is appended
-    /// to the end of its own timeline and the referencing entry is re-pointed at it. String
-    /// displacements are relative to their own entry, so appending never invalidates another
-    /// one, and the TMAL/TMAC/TMTR byte counts end before the string area. Only the TMLB
-    /// length covers the whole timeline, and it is rewritten here. Swapping a numbered idle
-    /// with its family's base member needs this: <c>jmn</c> and <c>cbem_pose03_2lp</c> are
-    /// nothing like the same length.
+    /// Each timeline is rebuilt with its new names by <see cref="TmbTimeline"/>, in the layout
+    /// the game and VFXEditor use, so no old name is left behind. Swapping a numbered idle with
+    /// its family's base member changes the name's length a lot: <c>jmn</c> and
+    /// <c>cbem_pose03_2lp</c> are nothing like the same length.
+    /// </para>
+    /// <para>
+    /// A timeline that cannot be taken apart (damaged, or with an entry of an unknown layout) is
+    /// patched instead: a name that fits is written over the old one, a longer one is appended
+    /// to the end of the timeline and its entry re-pointed there. String displacements are
+    /// relative to their own entry, so this never moves another one.
     /// </para>
     /// </summary>
     public static byte[] RenameMotions(byte[] pap, IReadOnlyDictionary<string, string> renames)
@@ -286,53 +262,68 @@ public static class PapTimeline
                 throw new InvalidDataException($"'{from}' → '{to}' is not a valid timeline motion rename.");
 
         var file = new PapFile(pap);
-        var footer = new MemoryStream();
+        var timelines = new List<byte[]>();
         var replaced = 0;
-        var offset = file.TimelineOffset;
         for (var i = 0; i < file.Entries.Length; i++)
         {
-            var sites = new List<TimelineString>();
-            var length = ReadTimeline(pap, offset, sites);
-            var timeline = new MemoryStream();
-            timeline.Write(pap, offset, length);
-            foreach (var site in sites)
+            var original = file.Timeline(i);
+            TmbTimeline? parsed;
+            try
             {
-                if (!site.IsMotion || !renames.TryGetValue(site.Value, out var name)) continue;
-                replaced++;
-                var local = site.Position - offset;
-                if (name.Length <= site.Value.Length)
-                {
-                    var buffer = timeline.GetBuffer();
-                    for (var c = 0; c < name.Length; c++) buffer[local + c] = (byte)name[c];
-                    buffer[local + name.Length] = 0;
-                    continue;
-                }
-                var appended = (int)timeline.Length;
-                timeline.Write(Encoding.ASCII.GetBytes(name));
-                timeline.WriteByte(0);
-                BinaryPrimitives.WriteInt32LittleEndian(timeline.GetBuffer().AsSpan(site.Field - offset),
-                    appended - (site.Anchor - offset));
+                parsed = TmbTimeline.Parse(original);
+            }
+            catch (InvalidDataException)
+            {
+                parsed = null;
             }
 
-            var bytes = timeline.ToArray();
-            BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4), bytes.Length);
-            footer.Write(bytes);
-            offset = checked(offset + length);
-            if (i + 1 < file.Entries.Length)
+            if (parsed != null)
             {
-                // Timelines are aligned relative to the first one, not to zero.
-                offset += (file.TimelineOffset - offset) & 3;
-                footer.Write(new byte[(int)(-footer.Length & 3)]);
+                var count = parsed.RenameMotions(renames);
+                replaced += count;
+                timelines.Add(count == 0 ? original : parsed.ToArray());
+            }
+            else
+            {
+                timelines.Add(PatchMotions(original, renames, out var count));
+                replaced += count;
             }
         }
         if (replaced == 0) throw new InvalidDataException("The animation's timeline does not reference the motion being renamed.");
 
-        var result = new byte[checked(file.TimelineOffset + (int)footer.Length)];
-        if (result.Length > PapFile.MaxFileSize) throw new InvalidDataException("The renamed PAP exceeds the size limit.");
-        pap.AsSpan(0, file.TimelineOffset).CopyTo(result);
-        footer.ToArray().CopyTo(result, file.TimelineOffset);
+        var result = file.WithTimelines(timelines);
         Verify(pap, result, renames);
         return result;
+    }
+
+    /// <summary>Renames motions in place in a timeline <see cref="TmbTimeline"/> cannot read.</summary>
+    private static byte[] PatchMotions(byte[] original, IReadOnlyDictionary<string, string> renames, out int replaced)
+    {
+        replaced = 0;
+        var sites = new List<TimelineString>();
+        ReadTimeline(original, 0, sites);
+        var timeline = new MemoryStream();
+        timeline.Write(original);
+        foreach (var site in sites)
+        {
+            if (!site.IsMotion || !renames.TryGetValue(site.Value, out var name)) continue;
+            replaced++;
+            if (name.Length <= site.Value.Length)
+            {
+                var buffer = timeline.GetBuffer();
+                for (var c = 0; c < name.Length; c++) buffer[site.Position + c] = (byte)name[c];
+                buffer[site.Position + name.Length] = 0;
+                continue;
+            }
+            var appended = (int)timeline.Length;
+            timeline.Write(Encoding.ASCII.GetBytes(name));
+            timeline.WriteByte(0);
+            BinaryPrimitives.WriteInt32LittleEndian(timeline.GetBuffer().AsSpan(site.Field), appended - site.Anchor);
+        }
+
+        var bytes = timeline.ToArray();
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4), bytes.Length);
+        return bytes;
     }
 
     /// <summary>

@@ -5,8 +5,9 @@ A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](ht
 ## What it does
 
 - **Gear and facewear:** retarget an item to any other wearable item, including a different slot. Weapons are not supported.
-- **Hair, faces, tails, Viera ears and skins:** retarget to another ID and/or race, reshaped for the target. Tails and Viera ears can convert into each other; texture-only roots can fan out to several races at once.
-- **Animations:** move an idle to another idle slot, move an emote's animations to another emote, retarget body animations to other races, and attach a donor's facial expression.
+- **Hair, faces, tails, Viera ears and skins:** retarget to another ID and/or race, reshaped for the target. Tails and Viera ears can convert into each other.
+- **Skin and face retextures:** add a mod's textures (and face or skin materials) for more races or faces at once, either beside the original in its existing options or in new option groups per race. Skins only list the races that have a skin of their own (Elezen and Miqo'te wear the Midlander one, for example).
+- **Animations:** move an idle to another idle slot, move an emote's animations to another emote, move a facial expression to another expression, retarget body animations to other races, and attach a facial expression from the game's list or another mod.
 - **Merge modpacks:** combine two modpacks into one new mod, with an explicit choice of which one wins where they overlap.
 - **Batch conversions:** queue up several conversions and apply or revert them together as one result.
 - **Safe by default:** everything is previewed before anything is written, and every conversion can be reverted.
@@ -31,7 +32,7 @@ Open the window with `/umc` (settings: `/umcconfig` or the cog icon).
 1. **Pick a mod** in the browser on the left, or enter a folder path under **Other folder**.
 2. **From/To:** pick the source item, hair, face, tail, ear, skin or animation, and its target.
 3. **Add selection to conversion plan.** Repeat for anything else to convert in the same pass.
-4. **Output:** **Create a new mod** (recommended), **Add to this mod** to put the result beside the original, or **Convert in place** to replace it.
+4. **Output:** **Create a new mod** (recommended), **Add to this mod** to put the result beside the original, or **Convert in place** to replace it. Skin and face retextures instead offer **Add paths on existing options** or **Create new groups for new paths**, optionally with **Create as a new mod** to write them to a copy; the original always keeps working. An animation option group (a variant per slot) is added to this mod or created as a new mod, never converted in place.
 5. **Review:** the plan previews automatically. **Mesh groups** lets you leave parts of a gear model out, with a live preview on your character via Glamourer.
 6. Click **Create new mod**, **Add to this mod** or **Convert in place**. The result is verified and loaded in Penumbra.
 

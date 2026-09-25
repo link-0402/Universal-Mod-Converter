@@ -44,6 +44,47 @@ public static class ConversionOutputModes
     public static bool KeepsSource(this ConversionOutputMode mode) => mode == ConversionOutputMode.AddToMod;
 }
 
+/// <summary>What kinds of files a mod replaces under a root, for telling the user what a conversion touches.</summary>
+[Flags]
+public enum AssetContents
+{
+    None     = 0,
+    Model    = 1,
+    Material = 2,
+    Texture  = 4,
+    Other    = 8,
+}
+
+public static class AssetContentsExtensions
+{
+    /// <summary>The kind of file a game path is, by its extension.</summary>
+    public static AssetContents Of(string gamePath) => Path.GetExtension(gamePath).ToLowerInvariant() switch
+    {
+        ".mdl"  => AssetContents.Model,
+        ".mtrl" => AssetContents.Material,
+        ".tex"  => AssetContents.Texture,
+        _       => AssetContents.Other,
+    };
+
+    private static readonly AssetContents[] Tagged = [AssetContents.Model, AssetContents.Material, AssetContents.Texture];
+
+    /// <summary>
+    /// Every kind present that a conversion of the root works on, most significant first. Other
+    /// files (metadata, VFX) are not what the user picks a root by, so they get no tag.
+    /// </summary>
+    public static IEnumerable<AssetContents> Tags(this AssetContents contents)
+        => Tagged.Where(kind => contents.HasFlag(kind));
+
+    /// <summary>"Model", "Material" or "Texture" for a single kind.</summary>
+    public static string Name(this AssetContents kind) => kind switch
+    {
+        AssetContents.Model    => "Model",
+        AssetContents.Material => "Material",
+        AssetContents.Texture  => "Texture",
+        _                      => "Other",
+    };
+}
+
 public enum ConversionResultStatus
 {
     NotStarted,
@@ -52,13 +93,6 @@ public enum ConversionResultStatus
     RolledBack,
     Failed,
 }
-
-public sealed record ConversionEndpoint(
-    AssetKind Kind,
-    ushort ModelId,
-    ushort Variant = 0,
-    string? Slot = null,
-    ushort? GenderRace = null);
 
 public sealed record PlanDiagnostic(string Code, string Message, bool IsBlocker);
 

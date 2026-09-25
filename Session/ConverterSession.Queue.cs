@@ -50,7 +50,7 @@ public sealed partial class ConverterSession
         _queue.Add(new QueuedConversion
         {
             Kind          = task.Kind,
-            IsTextureOnly = source.IsTextureOnly,
+            CanFanOut     = source.CanFanOut,
             Description   = Describe(source),
             Source        = SideOf(source),
             Target        = TargetSide(source),
@@ -119,7 +119,7 @@ public sealed partial class ConverterSession
                 } + (AttachExpression && AnimationOperation != AnimationOperation.Expression ? " + expression" : ""),
             };
         if (source.IsCustomization)
-            return source.IsTextureOnly
+            return source.CanFanOut
                 ? new ConversionSide { Name = CustomizationKinds.Get(TargetCustomizationKind).DisplayName, Detail = DescribeTextureTargets() }
                 : new ConversionSide
                 {

@@ -20,24 +20,43 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
     public void Draw(AnimationSource source)
     {
         var operation = session.AnimationOperation;
+        var facial = source.Kind == AnimationSourceKind.Expression;
         using (ImRaii.Disabled(!session.CanSwapAnimation))
         {
-            if (ImGui.RadioButton(source.Kind == AnimationSourceKind.Emote ? "Swap to another emote" : "Swap to another slot",
-                    operation == AnimationOperation.Swap))
+            var label = source.Kind switch
+            {
+                AnimationSourceKind.Emote      => "Swap to another emote",
+                AnimationSourceKind.Expression => "Swap to another expression",
+                _                              => "Swap to another slot",
+            };
+            if (ImGui.RadioButton(label, operation == AnimationOperation.Swap))
                 session.SetAnimationOperation(AnimationOperation.Swap);
         }
-        Widgets.Tooltip(session.CanSwapAnimation
-            ? "Play this animation from another slot or emote, for the same race."
-            : "Only idles and emotes can be swapped.");
-        ImGui.SameLine(0, 20f * Theme.Scale);
-        if (ImGui.RadioButton("Retarget to other races", operation == AnimationOperation.Retarget))
-            session.SetAnimationOperation(AnimationOperation.Retarget);
-        Widgets.Tooltip("Rebuild the animation for other races' skeletons, rescaled to their proportions.");
-        ImGui.SameLine(0, 20f * Theme.Scale);
-        if (ImGui.RadioButton("Only add an expression", operation == AnimationOperation.Expression))
-            session.SetAnimationOperation(AnimationOperation.Expression);
-        Widgets.Tooltip("Keep the animation where it is and give it a facial expression.");
+        Widgets.Tooltip(!session.CanSwapAnimation ? "Only idles, emotes and expressions can be swapped."
+            : facial ? "Play this face for another expression of the emote list, with its pace and options."
+            : "Play this animation from another slot or emote, for the same race.");
+        using (ImRaii.Disabled(facial))
+        {
+            ImGui.SameLine(0, 20f * Theme.Scale);
+            if (ImGui.RadioButton("Retarget to other races", operation == AnimationOperation.Retarget))
+                session.SetAnimationOperation(AnimationOperation.Retarget);
+            Widgets.Tooltip(facial
+                ? "Faces play on each race's own face skeleton, so there is nothing to retarget."
+                : "Rebuild the animation for other races' skeletons, rescaled to their proportions.");
+            ImGui.SameLine(0, 20f * Theme.Scale);
+            if (ImGui.RadioButton("Only add an expression", operation == AnimationOperation.Expression))
+                session.SetAnimationOperation(AnimationOperation.Expression);
+            Widgets.Tooltip(facial
+                ? "This already is a facial expression."
+                : "Keep the animation where it is and give it a facial expression.");
+        }
         ImGui.Spacing();
+
+        if (facial)
+        {
+            DrawExpressionSwap(source);
+            return;
+        }
 
         if (operation == AnimationOperation.Expression)
         {
@@ -65,13 +84,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
     /// </summary>
     private void DrawExpressionPicker()
     {
-        if (session.ExpressionUnavailableReason is { } unavailable)
-        {
-            Widgets.ColoredWrapped(Theme.Warning, unavailable);
-            return;
-        }
-
-        if (ImGui.RadioButton("From a game emote", session.ExpressionSource == ExpressionSourceKind.Vanilla))
+        if (ImGui.RadioButton("From the game", session.ExpressionSource == ExpressionSourceKind.Vanilla))
             session.SetExpressionSource(ExpressionSourceKind.Vanilla);
         ImGui.SameLine(0, 20f * Theme.Scale);
         if (ImGui.RadioButton("From another mod", session.ExpressionSource == ExpressionSourceKind.Mod))
@@ -83,30 +96,30 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
 
     private void DrawVanillaExpression()
     {
-        var emotes = session.AnimationEmotes;
-        if (emotes == null)
+        var expressions = session.AnimationExpressions;
+        if (expressions == null)
         {
             Widgets.Spinner(Theme.Accent);
             ImGui.SameLine();
-            Widgets.Muted("Reading the emote list…");
+            Widgets.Muted("Reading the expression list…");
             return;
         }
 
-        var chosen = emotes.FirstOrDefault(e => e.Id == session.ExpressionEmote);
+        var chosen = expressions.FirstOrDefault(e => e.Id == session.ExpressionEmote);
         ImGui.SetNextItemWidth(-1);
-        using var combo = ImRaii.Combo("##ExpressionEmote", chosen == null ? "Choose an emote…" : $"/{chosen.Name}",
+        using var combo = ImRaii.Combo("##ExpressionEmote", chosen == null ? "Choose an expression…" : $"/{chosen.Name}",
             ImGuiComboFlags.HeightLarge);
-        Widgets.Tooltip("The emote's own face is used. Emotes without one are reported when previewing.");
+        Widgets.Tooltip("The expressions of the game's emote list. Each race gets the face the game plays for it.");
         if (!combo.Success) return;
 
         ImGui.SetNextItemWidth(-1);
-        ImGui.InputTextWithHint("##ExpressionFilter", "Filter emotes…", ref _expressionFilter, 64);
+        ImGui.InputTextWithHint("##ExpressionFilter", "Filter expressions…", ref _expressionFilter, 64);
         var filter = _expressionFilter.Trim();
-        foreach (var emote in emotes.Where(e => filter.Length == 0 || e.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)))
+        foreach (var expression in expressions.Where(e => filter.Length == 0 || e.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)))
         {
-            using var id = ImRaii.PushId((int)emote.Id);
-            if (ImGui.Selectable($"/{emote.Name}", emote.Id == session.ExpressionEmote))
-                session.SetExpressionEmote(emote.Id);
+            using var id = ImRaii.PushId((int)expression.Id);
+            if (ImGui.Selectable($"/{expression.Name}", expression.Id == session.ExpressionEmote))
+                session.SetExpressionEmote(expression.Id);
         }
     }
 
@@ -141,7 +154,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         }
         if (expressions.Count == 0)
         {
-            Widgets.MutedWrapped("That mod has no animation with a facial expression.");
+            Widgets.MutedWrapped("That mod has no facial expression: no face animations, and no animation that plays one.");
             return;
         }
 
@@ -170,7 +183,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         ImGui.SameLine(0, 20f * Theme.Scale);
         if (ImGui.RadioButton("Option group with a variant per slot", group)) session.SetAnimationAsGroup(true);
         Widgets.Tooltip("Create a Penumbra option group whose options place the animation in each chosen slot, " +
-                        "so the slot can be picked in Penumbra at any time.");
+                        "so the slot can be picked in Penumbra at any time. Its first option, \"-\", switches it off.");
 
         if (group)
         {
@@ -178,6 +191,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
             ImGui.SetNextItemWidth(-1);
             if (ImGui.InputTextWithHint("##GroupName", "Name of the option group", ref _groupName, 128))
                 session.SetAnimationGroupName(_groupName);
+            if (session.NeedsAnimationSourceContainer) DrawSourceContainer(source);
             if (ImGui.SmallButton("All")) session.SetAnimationGroupSlots(slots.Select(s => s.Index));
             ImGui.SameLine();
             if (ImGui.SmallButton("None")) session.SetAnimationGroupSlots([]);
@@ -210,6 +224,30 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
             if (slot.StartKey == null) Widgets.Tooltip($"{slot.LoopKey} (no start animation)");
             else Widgets.Tooltip($"{slot.LoopKey} and {slot.StartKey}");
         }
+    }
+
+    /// <summary>
+    /// The version the group uses, when several options of the mod have their own: one group can
+    /// hold only one file per slot. Nothing is preselected, so the choice is always deliberate.
+    /// </summary>
+    private void DrawSourceContainer(AnimationSource source)
+    {
+        var chosen = source.Providers.FirstOrDefault(p => p.Address == session.AnimationSourceContainer);
+        ImGui.AlignTextToFramePadding();
+        Widgets.ColoredWrapped(Theme.Warning, "Take it from");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(-1);
+        using (var combo = ImRaii.Combo("##SourceContainer", chosen?.Label ?? "Choose an option…", ImGuiComboFlags.HeightLarge))
+        {
+            if (combo.Success)
+                foreach (var provider in source.Providers)
+                {
+                    using var id = ImRaii.PushId($"{provider.Address.Group}/{provider.Address.Index}");
+                    if (ImGui.Selectable(provider.Label, provider == chosen)) session.SetAnimationSourceContainer(provider.Address);
+                }
+        }
+        Widgets.Tooltip("Several options of this mod have their own version of this idle, and an option group can " +
+                        "hold only one of them per slot. Choose the one to use; the options themselves stay as they are.");
     }
 
     // ── Emotes ──────────────────────────────────────────────────────────────
@@ -256,6 +294,57 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
             ImGui.SameLine();
             ImGui.SetCursorPosY(start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2);
             ImGui.TextUnformatted($"/{emote.Name}");
+        });
+    }
+
+    // ── Facial expressions ──────────────────────────────────────────────────
+
+    /// <summary>The expressions of the emote list the face can move to.</summary>
+    private void DrawExpressionSwap(AnimationSource source)
+    {
+        var expressions = session.AnimationExpressions;
+        if (expressions == null)
+        {
+            Widgets.Spinner(Theme.Accent);
+            ImGui.SameLine();
+            Widgets.Muted("Reading the expression list…");
+            return;
+        }
+
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputTextWithHint("##ExpressionSwapFilter", "Filter expressions…", ref _emoteFilter, 64);
+        if (expressions.FirstOrDefault(e => e.Id == session.AnimationTargetEmote) is { } chosen)
+            ImGui.TextColored(Theme.Success, $"/{chosen.Name}");
+        else Widgets.Muted("No expression selected.");
+
+        var filter = _emoteFilter.Trim();
+        var shown = expressions.Where(e => e.Id != source.EmoteId &&
+                                           (filter.Length == 0 || e.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                                            e.Pose.Contains(filter, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        using var list = ImRaii.Child("##Expressions", new Vector2(-1, -1), true);
+        if (!list.Success) return;
+        var rowHeight = ImGui.GetTextLineHeight() * 1.5f;
+        Widgets.Clipped(shown.Count, rowHeight + ImGui.GetStyle().ItemSpacing.Y, i =>
+        {
+            var expression = shown[i];
+            using var id = ImRaii.PushId((int)expression.Id);
+            var start = ImGui.GetCursorPos();
+            using (ImRaii.Disabled(!expression.OwnPack))
+            {
+                if (ImGui.Selectable("##row", expression.Id == session.AnimationTargetEmote, ImGuiSelectableFlags.None,
+                        new Vector2(0, rowHeight)))
+                    session.SetAnimationTargetEmote(expression.Id);
+            }
+            Widgets.Tooltip(expression.OwnPack
+                ? $"facial/pose/{expression.Pose}"
+                : "The game keeps this face in the shared face pack with every other face, so it cannot be replaced on its own.");
+            ImGui.SetCursorPos(start);
+            Widgets.GameIcon(expression.Icon, rowHeight);
+            ImGui.SameLine();
+            ImGui.SetCursorPosY(start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2);
+            if (expression.OwnPack) ImGui.TextUnformatted($"/{expression.Name}");
+            else Widgets.Muted($"/{expression.Name}");
         });
     }
 

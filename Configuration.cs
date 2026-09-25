@@ -22,6 +22,16 @@ public class Configuration : IPluginConfiguration
     public ConversionOutputMode OutputMode { get; set; } = ConversionOutputMode.NewMod;
 
     /// <summary>
+    /// How a texture fan-out (skins, face textures) adds its paths: beside the source's in the
+    /// options that hold them, or in new groups. Kept apart from <see cref="OutputMode"/>, whose
+    /// choices do not apply to it.
+    /// </summary>
+    public TextureFanOutLayout TextureLayout { get; set; } = TextureFanOutLayout.AddPathsToOptions;
+
+    /// <summary>Write a texture fan-out to a copy of the mod instead of the mod itself.</summary>
+    public bool TextureAsNewMod { get; set; }
+
+    /// <summary>
     /// Replaced by <see cref="OutputMode"/> in version 3. Kept so an older configuration file
     /// still deserializes, and migrated once.
     /// </summary>

@@ -259,6 +259,12 @@ public sealed record ModSnapshot(string Meta, string Default, IReadOnlyList<stri
 
 public sealed class ModGroup
 {
+    /// <summary>
+    /// The empty option every single-select group the converter creates starts with. Such a group
+    /// always has one option selected, so without it the group could never be switched off.
+    /// </summary>
+    public const string OffOptionName = "-";
+
     internal ModGroup(JsonObject node, int index)
     {
         Node = node;
