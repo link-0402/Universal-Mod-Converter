@@ -16,8 +16,9 @@ namespace UniversalModConverter.Services;
 /// Plans, applies and verifies conversions of a Penumbra mod.
 /// Gear (equipment, accessories, facewear) goes through the game-path based
 /// <see cref="GearConversionPlanner"/>; hair, face, tail and ear roots go through the
-/// <see cref="CustomizationPlanner"/>. Both publish through a staged copy so a failure
-/// never leaves a half-converted mod behind.
+/// <see cref="CustomizationPlanner"/>, except texture fan-outs, which go through the
+/// <see cref="TextureFanOutPlanner"/>. All publish through a staged copy so a failure never
+/// leaves a half-converted mod behind.
 /// </summary>
 public sealed class ModConverterService
 {
@@ -32,18 +33,15 @@ public sealed class ModConverterService
     private readonly Configuration?       _configuration;
     private readonly CustomizationPlanner _customizationPlanner;
     private readonly IAnimationRetargeter? _retargeter;
-    private readonly IExpressionMerger? _expressions;
     private HumanPbd? _pbd;
     private bool _pbdLoaded;
 
     public ModConverterService(IPluginLog log, GameDataService? gameData = null, IFramework? framework = null,
-        IAnimationRetargeter? retargeter = null, Configuration? configuration = null,
-        IExpressionMerger? expressions = null)
+        IAnimationRetargeter? retargeter = null, Configuration? configuration = null)
     {
         _log           = log;
         _gameData      = gameData;
         _retargeter    = retargeter;
-        _expressions   = expressions;
         _configuration = configuration;
         _gameFiles     = (IGameFileProvider?)gameData ?? NoGameFiles.Instance;
         var skeletons = gameData == null || framework == null
@@ -76,10 +74,6 @@ public sealed class ModConverterService
         return (true, string.Empty);
     }
 
-    /// <summary>Why expressions cannot be attached in this session, or null.</summary>
-    public string? ExpressionUnavailableReason
-        => _expressions == null ? "Attaching expressions is not available." : _expressions.UnavailableReason;
-
     /// <summary>Plans all changes without touching disk and sets <c>task.IsPlanned</c>.</summary>
     public void PlanConversion(ConversionTask task)
     {
@@ -95,6 +89,7 @@ public sealed class ModConverterService
         task.Diagnostics.Clear();
         task.GearPlan = null;
         task.AnimationPlan = null;
+        task.TexturePlan = null;
         task.MergedPlan = null;
         task.IsPlanned = false;
         task.IsApplied = false;
@@ -114,6 +109,12 @@ public sealed class ModConverterService
             if (task.Kind == AssetKind.Animation)
             {
                 PlanAnimation(task);
+                return;
+            }
+
+            if (task.TextureRequest != null)
+            {
+                PlanTextureFanOut(task);
                 return;
             }
 
@@ -179,7 +180,7 @@ public sealed class ModConverterService
             entry.Task.ModDirectory = task.ModDirectory;
             var merged = entry.Kind == AssetKind.Animation
                 ? merger.Add(entry.Description, AnimationRoots(entry),
-                    ctx => new AnimationConversionPlanner(_gameFiles, ParentRace, _retargeter, _expressions)
+                    ctx => new AnimationConversionPlanner(_gameFiles, ParentRace, _retargeter)
                         .Plan(ctx, ForMode(entry.Task.AnimationRequest
                                   ?? throw new InvalidOperationException("Choose what to do with the animation."),
                               task.OutputMode)))
@@ -268,7 +269,7 @@ public sealed class ModConverterService
     {
         var request = ForMode(task.AnimationRequest ?? throw new InvalidOperationException("Choose what to do with the animation."),
             task.OutputMode);
-        var plan = new AnimationConversionPlanner(_gameFiles, ParentRace, _retargeter, _expressions)
+        var plan = new AnimationConversionPlanner(_gameFiles, ParentRace, _retargeter)
             .Plan(task.ModDirectory, request);
         task.AnimationPlan = plan;
         task.Diagnostics.AddRange(plan.Diagnostics);
@@ -280,6 +281,39 @@ public sealed class ModConverterService
             : null;
         _log.Information("[UMC] Planned animation {0} ({1}): {2} file operation(s), {3} diagnostic(s).",
             request.Description, request.Mode, plan.Files.Count, plan.Diagnostics.Count);
+    }
+
+    private void PlanTextureFanOut(ConversionTask task)
+    {
+        // The request is made before the output mode may change, so the mode is applied here.
+        var request = task.TextureRequest! with { Mode = task.OutputMode };
+        var plan = new TextureFanOutPlanner(_gameFiles, _gameData == null
+                ? null
+                : target => _gameData.DescribeCustomization(target.Kind, target.GenderRace, target.ModelId))
+            .Plan(task.ModDirectory, request);
+        task.TexturePlan = plan;
+        task.SourceRoot = CustomizationKinds.Get(request.Source.Kind).Root(request.Source.GenderRace, request.Source.ModelId);
+        task.Diagnostics.AddRange(plan.Diagnostics);
+        task.SourceFingerprint = TextureSourceFingerprint(task) ?? string.Empty;
+        task.PlanFingerprint = plan.Fingerprint();
+        task.IsPlanned = true;
+        task.ErrorMessage = task.HasBlockers
+            ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
+            : null;
+        _log.Information("[UMC] Planned texture fan-out {0} ({1}): {2} path(s), {3} file operation(s), {4} diagnostic(s).",
+            request.Description, request.Mode, plan.Outputs.Count, plan.Files.Count, plan.Diagnostics.Count);
+    }
+
+    private static string? TextureSourceFingerprint(ConversionTask task)
+    {
+        try
+        {
+            return ModFingerprint.Compute(task.ModDirectory, task.TexturePlan!.InputFiles);
+        }
+        catch (Exception)
+        {
+            return null; // A planned input no longer exists.
+        }
     }
 
     /// <summary>The skeleton parent of a race in the game's race tree (human.pbd).</summary>
@@ -344,12 +378,13 @@ public sealed class ModConverterService
         if (!task.IsPlanned) throw new InvalidOperationException("Preview the conversion before applying it.");
         if (task.HasBlockers) throw new InvalidOperationException(task.ErrorMessage ?? "The conversion plan has blockers.");
         var planned = task.MergedPlan?.Mode ?? task.GearPlan?.Request.Mode
-                      ?? task.AnimationPlan?.Request.Mode ?? task.OutputMode;
+                      ?? task.AnimationPlan?.Request.Mode ?? task.TexturePlan?.Request.Mode ?? task.OutputMode;
         if (planned != task.OutputMode || planned.IsNewMod() != newMod)
             throw new InvalidOperationException("The output mode changed after the preview. Wait for the preview to update, then try again.");
         var current = task.MergedPlan != null ? MergedSourceFingerprint(task)
             : task.GearPlan != null ? GearSourceFingerprint(task)
             : task.AnimationPlan != null ? AnimationSourceFingerprint(task)
+            : task.TexturePlan != null ? TextureSourceFingerprint(task)
             : ConversionPlanValidator.RecomputeSourceFingerprint(task);
         if (!string.Equals(current, task.SourceFingerprint, StringComparison.Ordinal))
             throw new InvalidOperationException("The mod changed on disk after the preview. The preview is updated now; try again once it is ready.");
@@ -400,6 +435,8 @@ public sealed class ModConverterService
             }
             else if (task.AnimationPlan is { } animation)
                 GearConversionExecutor.ApplyInPlace(animation, stageDir, Log);
+            else if (task.TexturePlan is { } texture)
+                GearConversionExecutor.ApplyInPlace(texture, stageDir, Log);
             else
             {
                 var stagedTask = RemapTask(task, stageDir);
@@ -568,7 +605,8 @@ public sealed class ModConverterService
 
     /// <summary>
     /// Creates a new mod next to the source mod. Gear conversions contain only the converted
-    /// item (with the source's option structure); customization conversions copy the mod.
+    /// item (with the source's option structure); customization conversions and texture fan-outs
+    /// copy the mod.
     /// The source mod is never modified.
     /// </summary>
     public string? CreateNewModFromAssetChain(
@@ -600,6 +638,13 @@ public sealed class ModConverterService
             }
             else if (task.AnimationPlan is { } animation)
                 GearConversionExecutor.WriteNewMod(animation, task.ModDirectory, stageDir, modDisplayName, Log);
+            else if (task.TexturePlan is { } texture)
+            {
+                // A fan-out keeps its source, so the new mod is all of this one plus the added paths.
+                CopyDirectory(task.ModDirectory, stageDir);
+                GearConversionExecutor.ApplyInPlace(texture, stageDir, Log);
+                UpdateMetaJsonName(stageDir, modDisplayName, Log);
+            }
             else
             {
                 CopyDirectory(task.ModDirectory, stageDir);
@@ -830,6 +875,14 @@ public sealed class ModConverterService
                 return hits;
             }
 
+            if (task.TexturePlan is { } texture)
+            {
+                // The source's paths stay on purpose; what matters is that every added one resolves.
+                foreach (var problem in texture.Verify(modDirectory))
+                    hits.Add(new LeftoverHit { FilePath = modDirectory, HitType = "missing", Detail = problem });
+                return hits;
+            }
+
             if (CustomizationKinds.IsCustomization(task.Kind))
             {
                 var remapped = directory == null ? task : RemapTask(task, directory);
@@ -1005,7 +1058,7 @@ public sealed class ModConverterService
 
         int applied = 0;
         // Key renames and copies go last so value edits can still find their original key.
-        foreach (var change in selectedChanges.OrderBy(c => c.ChangeType is "path_key" or "path_key_copy" or "path_key_delete" ? 1 : 0))
+        foreach (var change in selectedChanges.OrderBy(c => c.ChangeType is "path_key" or "path_key_copy" ? 1 : 0))
             if (ApplyJsonChangeAtPath(node, change)) applied++;
 
         if (applied != selectedChanges.Count)
@@ -1040,16 +1093,6 @@ public sealed class ModConverterService
                 var identity = GearManipulations.Identity(manipulation);
                 if (!manipulations.OfType<JsonObject>().Any(m => GearManipulations.Identity(m) == identity))
                     manipulations.Add(manipulation);
-                return true;
-            }
-
-            if (change.ChangeType == "group_insert")
-            {
-                // A whole new option group (see CustomizationPlanner.PlanTextureGroups), appended
-                // to the mod's group list, creating it if this is the mod's first group.
-                if (root is not JsonObject rootObj) return false;
-                if (rootObj["Groups"] is not JsonArray groups) rootObj["Groups"] = groups = new JsonArray();
-                groups.Add((JsonObject)JsonNode.Parse(change.NewValue)!);
                 return true;
             }
 
@@ -1113,13 +1156,6 @@ public sealed class ModConverterService
                     if (string.Equals(kv.Key, change.OldValue, StringComparison.OrdinalIgnoreCase))
                     {
                         var val = dictNode[kv.Key];
-                        // A texture root's key that moved into its own new option group; nothing
-                        // takes its place here (see CustomizationPlanner.RemoveSourceKeys).
-                        if (change.ChangeType == "path_key_delete")
-                        {
-                            dictNode.Remove(kv.Key);
-                            return true;
-                        }
                         // Keys under shared material roots are copied: other customizations still load them.
                         if (change.ChangeType == "path_key_copy")
                         {

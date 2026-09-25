@@ -24,7 +24,14 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
     {
         Widgets.SectionTitle("Output", FontAwesomeIcon.FileExport);
 
-        var mode = session.OutputMode;
+        if (session.UsesTextureOutput)
+        {
+            DrawTextureOutput();
+            return;
+        }
+
+        var mode  = session.EffectiveOutputMode;
+        var group = session.AnimationGroupOutput is { } name ? name.Length > 0 ? $"'{name}'" : "the option group" : null;
         if (ImGui.RadioButton("Create a new mod", mode.IsNewMod()))
             session.SetOutputMode(ConversionOutputMode.NewMod);
         Widgets.Tooltip("Safest: the source mod is never modified.");
@@ -39,15 +46,33 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         Widgets.Badge("Keeps the original", Theme.Info);
         if (additiveBlock != null) Widgets.Tooltip(additiveBlock);
 
-        if (ImGui.RadioButton("Convert in place", mode == ConversionOutputMode.InPlace))
-            session.SetOutputMode(ConversionOutputMode.InPlace);
+        var inPlaceBlock = session.InPlaceBlockReason;
+        using (ImRaii.Disabled(inPlaceBlock != null))
+        {
+            if (ImGui.RadioButton("Convert in place", mode == ConversionOutputMode.InPlace))
+                session.SetOutputMode(ConversionOutputMode.InPlace);
+        }
         ImGui.SameLine();
         Widgets.Badge("Advanced", Theme.Warning);
+        if (inPlaceBlock != null) Widgets.Tooltip(inPlaceBlock);
+
+        if (group != null)
+        {
+            // A slot group is the same wherever it goes; only where it goes differs.
+            Widgets.MutedWrapped(mode.IsNewMod()
+                ? $"Creates a new mod holding {group}: a variant of the animation for each chosen slot, and \"-\" " +
+                  "to switch it off. This mod is not modified."
+                : $"Adds {group} to this mod: a variant of the animation for each chosen slot, and \"-\" to switch " +
+                  "it off. Everything already in the mod stays as it is. The mod as it is now is kept as a backup.");
+            if (mode.IsNewMod()) DrawNewModName();
+            return;
+        }
 
         if (mode == ConversionOutputMode.AddToMod)
         {
-            Widgets.MutedWrapped("The original item keeps working. Each race ticked becomes its own new toggle " +
-                                 "group in this mod. The mod as it is now is kept as a backup.");
+            Widgets.MutedWrapped("The original item keeps working. The converted paths are added to the same " +
+                                 "options, so the toggles this mod already has control both. The mod as it is " +
+                                 "now is kept as a backup.");
             return;
         }
 
@@ -59,6 +84,12 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
             return;
         }
 
+        DrawNewModName();
+    }
+
+    /// <summary>The new mod's name and where its folder goes.</summary>
+    private void DrawNewModName()
+    {
         if (_newModName != session.NewModName) _newModName = session.NewModName;
         ImGui.Spacing();
         ImGui.TextUnformatted("Name of the new mod");
@@ -89,6 +120,42 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         }
     }
 
+    /// <summary>
+    /// A fan-out keeps the source as it is and only adds paths, so the question is mostly how the
+    /// added paths are switched on; whether they go into this mod or a copy of it comes on top.
+    /// </summary>
+    private void DrawTextureOutput()
+    {
+        var asNewMod = session.TextureAsNewMod;
+        if (ImGui.Checkbox("Create as a new mod", ref asNewMod)) session.SetTextureAsNewMod(asNewMod);
+        Widgets.Tooltip("Write the result to a copy of this mod, with the paths added, and leave this mod " +
+                        "untouched.");
+
+        var layout = session.TextureLayout;
+        if (ImGui.RadioButton("Add paths on existing options", layout == TextureFanOutLayout.AddPathsToOptions))
+            session.SetTextureLayout(TextureFanOutLayout.AddPathsToOptions);
+        Widgets.Tooltip("Each ticked race or face gets the source's paths right beside them, in Default or " +
+                        "whichever options already hold them, so the mod's existing toggles govern them too.");
+
+        if (ImGui.RadioButton("Create new groups for new paths", layout == TextureFanOutLayout.NewGroups))
+            session.SetTextureLayout(TextureFanOutLayout.NewGroups);
+        Widgets.Tooltip("Each ticked race gets option groups of its own: a toggle per face or skin for what " +
+                        "Default holds, and a copy of every group whose options hold the source's paths, so " +
+                        "each race can be switched on, or pick its variant, separately.");
+
+        var where = asNewMod ? "the new mod" : "this mod";
+        Widgets.MutedWrapped((layout == TextureFanOutLayout.NewGroups
+                                 ? $"Every ticked race gets new groups in {where}. "
+                                 : $"The paths are added to {where} beside the source's. ") +
+                             "The source keeps working as it is. " +
+                             (asNewMod
+                                 ? "This mod is not modified."
+                                 : "The mod as it is now is kept as a backup, so this can be reverted from the " +
+                                   "result or the History tab until that backup expires."));
+
+        if (asNewMod) DrawNewModName();
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Readiness and actions
     // ─────────────────────────────────────────────────────────────────────────
@@ -101,7 +168,7 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
 
         var width      = 150f * Theme.Scale;
         var applyBlock = session.ApplyBlockReason;
-        var mode       = session.OutputMode;
+        var mode       = session.EffectiveOutputMode;
         var applyLabel = mode switch
         {
             ConversionOutputMode.NewMod   => "Create new mod",
@@ -120,15 +187,33 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
             return;
         }
 
-        var (title, what, verb) = mode == ConversionOutputMode.AddToMod
-            ? ("Add the converted item to this mod?",
-               $"'{session.ModName}' will be modified, but the original item keeps working. The mod as it is " +
-               "now is kept as a backup and can be restored with Revert until that backup expires.",
-               "Add")
-            : ("Convert this mod in place?",
-               $"'{session.ModName}' will be modified directly. The original is kept as a backup and can be " +
-               "restored with Revert until the backup expires; see Settings for how long they are kept.",
-               "Convert");
+        var (title, what, verb) = mode switch
+        {
+            ConversionOutputMode.AddToMod when session.UsesTextureOutput && session.TextureLayout == TextureFanOutLayout.NewGroups
+                => ("Add new option groups to this mod?",
+                    $"'{session.ModName}' will get new option groups for every ticked race. The mod as it is now is " +
+                    "kept as a backup and can be restored with Revert until that backup expires.",
+                    "Add"),
+            ConversionOutputMode.AddToMod when session.UsesTextureOutput
+                => ("Add the paths to this mod?",
+                    $"'{session.ModName}' will get the paths for every ticked race or face, beside the source's. The " +
+                    "mod as it is now is kept as a backup and can be restored with Revert until that backup expires.",
+                    "Add"),
+            ConversionOutputMode.AddToMod when session.AnimationGroupOutput is { } group
+                => ("Add the option group to this mod?",
+                    $"'{session.ModName}' gets the new option group{(group.Length > 0 ? $" '{group}'" : string.Empty)}; " +
+                    "everything already in it stays as it is. The mod as it is now is kept as a backup and can be " +
+                    "restored with Revert until that backup expires.",
+                    "Add"),
+            ConversionOutputMode.AddToMod => ("Add the converted item to this mod?",
+                $"'{session.ModName}' will be modified, but the original item keeps working. The mod as it is " +
+                "now is kept as a backup and can be restored with Revert until that backup expires.",
+                "Add"),
+            _ => ("Convert this mod in place?",
+                $"'{session.ModName}' will be modified directly. The original is kept as a backup and can be " +
+                "restored with Revert until the backup expires; see Settings for how long they are kept.",
+                "Convert"),
+        };
         confirm.Request(title, what, verb, session.Apply);
     }
 

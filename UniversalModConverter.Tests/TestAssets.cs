@@ -311,4 +311,43 @@ internal static class TestAssets
         return bytes;
     }
 
+    /// <summary>A material that loads <paramref name="textures"/> and nothing else.</summary>
+    public static byte[] BuildMtrl(params string[] textures)
+    {
+        using var stringStream = new MemoryStream();
+        using var stringWriter = new BinaryWriter(stringStream, Encoding.UTF8, leaveOpen: true);
+        var offsets = new short[textures.Length];
+        for (var index = 0; index < textures.Length; index++)
+        {
+            offsets[index] = checked((short)stringStream.Position);
+            stringWriter.Write(Encoding.UTF8.GetBytes(textures[index]));
+            stringWriter.Write((byte)0);
+        }
+        var shaderOffset = checked((ushort)stringStream.Position);
+        stringWriter.Write(Encoding.UTF8.GetBytes("skin.shpk"));
+        stringWriter.Write((byte)0);
+        while ((stringStream.Length & 3) != 0) stringWriter.Write((byte)0);
+
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, Encoding.UTF8, leaveOpen: true);
+        writer.Write(0x01030000);
+        writer.Write((ushort)0);
+        writer.Write((ushort)0);
+        writer.Write(checked((ushort)stringStream.Length));
+        writer.Write(shaderOffset);
+        writer.Write(checked((byte)textures.Length));
+        writer.Write((byte)0);
+        writer.Write((byte)0);
+        writer.Write((byte)0);
+        foreach (var offset in offsets)
+        {
+            writer.Write(offset);
+            writer.Write((ushort)0);
+        }
+        writer.Write(stringStream.GetBuffer(), 0, checked((int)stringStream.Length));
+        writer.Write(new byte[] { 0xaa, 0xbb });
+        var bytes = output.ToArray();
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4), checked((ushort)bytes.Length));
+        return bytes;
+    }
 }

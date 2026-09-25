@@ -46,13 +46,16 @@ public static class CustomizationTargets
 
     /// <summary>
     /// Lalafell convert only among Lalafell (never to or from other races), and faces stay
-    /// within the source's gender.
+    /// within the source's gender. Skins are only offered for the races the game loads a skin
+    /// for (Elezen and Miqo'te use the Midlander one, for example), plus the source's own.
     /// </summary>
     public static ImmutableArray<ushort> AllowedRaces(AssetKind sourceKind, ushort sourceRace, AssetKind targetKind)
         => CustomizationKinds.Get(targetKind).AllowedGenderRaces
             .Where(race => IsLalafell(race) == IsLalafell(sourceRace))
             .Where(race => targetKind is not (AssetKind.Face or AssetKind.Body) ||
                            IsFemale(race) == IsFemale(sourceRace))
+            .Where(race => targetKind != AssetKind.Body || race == sourceRace ||
+                           CustomizationPaths.GetSkinGenderRace(race) == race)
             .ToImmutableArray();
 
     /// <summary>Why <paramref name="targetRace"/> is not a valid target, or null.</summary>
@@ -64,6 +67,9 @@ public static class CustomizationTargets
             return targetKind == AssetKind.Body
                 ? "Skin textures cannot be converted between genders: the bodies are shaped differently."
                 : "Faces cannot be converted between genders.";
+        if (targetKind == AssetKind.Body && targetRace != sourceRace &&
+            CustomizationPaths.GetSkinGenderRace(targetRace) is var skin && skin != targetRace)
+            return $"{RaceNames.Name(targetRace)} wears the {RaceNames.Name(skin)} skin; choose {RaceNames.Name(skin)} instead.";
         return AllowedRaces(sourceKind, sourceRace, targetKind).Contains(targetRace)
             ? null
             : $"{CustomizationKinds.Get(targetKind).DisplayName} is not valid for {RaceNames.Describe(targetRace)}.";
@@ -340,6 +346,12 @@ public static partial class CustomizationPaths
         1201 => 1101,
         _ => genderRace,
     };
+
+    /// <summary>Every playable race that wears <paramref name="skinGenderRace"/>'s skin, itself included.</summary>
+    public static IReadOnlyList<ushort> SkinUsers(ushort skinGenderRace)
+        => CustomizationKinds.Get(AssetKind.Body).AllowedGenderRaces
+            .Where(race => GetSkinGenderRace(race) == skinGenderRace)
+            .ToList();
 
     /// <summary>Returns the hard-coded material-sharing root used by hair.</summary>
     public static CustomizationPathEndpoint GetHairMaterialEndpoint(CustomizationPathEndpoint endpoint)

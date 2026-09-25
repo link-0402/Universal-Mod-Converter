@@ -102,9 +102,9 @@ internal static class GearConversionTests
     }
 
     /// <summary>
-    /// A skin mod replaces only textures under obj/body. It must be detected, recognised as
-    /// texture-only (the condition for writing one file under several races), retargeted by
-    /// path and file name, and kept within its gender.
+    /// A skin mod replaces only textures under obj/body. It must be detected, recognised as a
+    /// fan-out (the condition for offering one file under several races), retargeted by path
+    /// and file name, and kept within its gender.
     /// </summary>
     private static void SkinTextureRoots()
     {
@@ -118,7 +118,7 @@ internal static class GearConversionTests
         var loaded = PenumbraMod.Load(mod.Path);
         var root = CustomizationDetection.FindRoots(loaded, mod.Path).Single();
         Assert.Equal(new CustomizationPathEndpoint(AssetKind.Body, 201, 1), root);
-        Assert.True(CustomizationDetection.IsTextureOnly(loaded, root), "a skin retexture is texture-only");
+        Assert.True(CustomizationDetection.CanFanOut(loaded, root), "a skin retexture can fan out");
 
         // Each extra race gets the same file under its own path; the file name follows the race.
         var highlander = CustomizationPaths.Rewrite(skin, root, root with { GenderRace = 401 });
@@ -128,12 +128,12 @@ internal static class GearConversionTests
         Assert.True(CustomizationTargets.BlockReason(AssetKind.Body, 201, AssetKind.Body, 101) != null);
         Assert.True(CustomizationTargets.BlockReason(AssetKind.Body, 201, AssetKind.Body, 401) == null);
 
-        // A root with a model is not texture-only, so it never offers the fan-out.
+        // A root with a model has to be converted, so it never offers the fan-out.
         mod.Json("meta.json", $$$"""
             {"FileVersion":4,"Name":"Skin","DefaultData":{"Files":{"{{{skin}}}":"skin.tex",
               "chara/human/c0201/obj/body/b0001/model/c0201b0001_top.mdl":"body.mdl"} } }
             """);
-        Assert.True(!CustomizationDetection.IsTextureOnly(PenumbraMod.Load(mod.Path), root));
+        Assert.True(!CustomizationDetection.CanFanOut(PenumbraMod.Load(mod.Path), root));
     }
 
     private const string G1 = "11111111-1111-1111-1111-111111111111";

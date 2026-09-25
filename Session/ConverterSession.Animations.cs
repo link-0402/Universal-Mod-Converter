@@ -24,6 +24,16 @@ public sealed partial class ConverterSession
 
     public string AnimationGroupName { get; private set; } = string.Empty;
 
+    /// <summary>
+    /// Idle swap into a group, when several options hold their own version of the idle: the one
+    /// whose version the group uses, or null until the user chooses.
+    /// </summary>
+    public ContainerAddress? AnimationSourceContainer { get; private set; }
+
+    /// <summary>Whether the user has to choose <see cref="AnimationSourceContainer"/> for the selection.</summary>
+    public bool NeedsAnimationSourceContainer
+        => AnimationAsGroup && Source?.Animation is { Kind: AnimationSourceKind.Idle, HasVariants: true };
+
     /// <summary>In place, plain replacement: keep the source slot as well.</summary>
     public bool AnimationKeepOriginal { get; private set; }
 
@@ -58,7 +68,27 @@ public sealed partial class ConverterSession
         }
     }
 
-    public bool CanSwapAnimation => Source?.Animation is { Kind: AnimationSourceKind.Idle or AnimationSourceKind.Emote };
+    /// <summary>The game's Expressions list, or null while it is being read (with the emotes).</summary>
+    public IReadOnlyList<ExpressionInfo>? AnimationExpressions
+        => AnimationEmotes == null ? null : GameData.Animations.Expressions;
+
+    /// <summary>
+    /// The name of the option group the plan creates for an animation ("Option group with a variant
+    /// per slot"), or null when it creates none. With nothing planned yet, the selection decides.
+    /// </summary>
+    public string? AnimationGroupOutput
+        => _queue.Count > 0
+            ? _queue.Select(e => e.Task.AnimationRequest?.GroupName).FirstOrDefault(name => name != null)
+            : Source?.Animation is { Kind: AnimationSourceKind.Idle } &&
+              AnimationOperation == AnimationOperation.Swap && AnimationAsGroup
+                ? AnimationGroupName.Trim()
+                : null;
+
+    public bool CanSwapAnimation
+        => Source?.Animation is { Kind: AnimationSourceKind.Idle or AnimationSourceKind.Emote or AnimationSourceKind.Expression };
+
+    /// <summary>A facial expression: it can only be swapped to another expression.</summary>
+    public bool IsFacialAnimation => Source?.Animation is { Kind: AnimationSourceKind.Expression };
 
     private void ResetAnimationTarget(AnimationSource source)
     {
@@ -67,6 +97,7 @@ public sealed partial class ConverterSession
         AnimationTargetSlot = -1;
         AnimationKeepOriginal = false;
         AnimationTargetEmote = 0;
+        AnimationSourceContainer = null;
         AttachExpression = false;
         _animationGroupSlots.Clear();
         _animationTargetRaces.Clear();
@@ -81,6 +112,7 @@ public sealed partial class ConverterSession
     public void SetAnimationOperation(AnimationOperation operation)
     {
         if (operation == AnimationOperation || operation == AnimationOperation.Swap && !CanSwapAnimation) return;
+        if (IsFacialAnimation && operation != AnimationOperation.Swap) return;
         AnimationOperation = operation;
         MarkDirty();
     }
@@ -109,6 +141,13 @@ public sealed partial class ConverterSession
     {
         _animationGroupSlots.Clear();
         _animationGroupSlots.UnionWith(slots);
+        MarkDirty();
+    }
+
+    public void SetAnimationSourceContainer(ContainerAddress? address)
+    {
+        if (address == AnimationSourceContainer) return;
+        AnimationSourceContainer = address;
         MarkDirty();
     }
 
@@ -150,7 +189,7 @@ public sealed partial class ConverterSession
 
     /// <summary>Why the animation inputs are incomplete, or null.</summary>
     private string? AnimationBlockReason(AnimationSource source)
-        => OperationBlockReason(source) ?? ExpressionBlockReason();
+        => OperationBlockReason(source) ?? (source.Kind == AnimationSourceKind.Expression ? null : ExpressionBlockReason());
 
     private string? OperationBlockReason(AnimationSource source)
     {
@@ -165,10 +204,17 @@ public sealed partial class ConverterSession
         {
             case AnimationSourceKind.Idle when AnimationAsGroup:
                 if (string.IsNullOrWhiteSpace(AnimationGroupName)) return "Enter a name for the option group.";
+                if (NeedsAnimationSourceContainer && source.Providers.All(p => p.Address != AnimationSourceContainer))
+                    return "Several options have their own version of this idle; choose the one the option group uses.";
                 return _animationGroupSlots.Count == 0 ? "Choose the slots the option group offers." : null;
             case AnimationSourceKind.Idle:
                 if (AnimationTargetSlot < 0) return "Choose the slot the animation moves to.";
                 return AnimationTargetSlot == source.SlotIndex ? "Choose a different slot than the current one." : null;
+            case AnimationSourceKind.Expression:
+                if (AnimationExpressions == null) return "Reading the expression list…";
+                if (GameData.Animations.FindExpression(AnimationTargetEmote) is not { } target) return "Choose the expression the face moves to.";
+                if (target.Id == source.EmoteId || FacePose(source) == target.Pose) return "Choose a different expression than the current one.";
+                return target.OwnPack ? null : $"/{target.Name} is kept in the shared face pack with every other face, so it cannot be replaced.";
             case AnimationSourceKind.Emote:
                 if (AnimationEmotes == null) return "Reading the emote list…";
                 if (AnimationTargetEmote == 0) return "Choose the emote the animation moves to.";
@@ -184,7 +230,7 @@ public sealed partial class ConverterSession
         if (AnimationBlockReason(source) != null) return null;
         var request = new AnimationConversionRequest(source.Locations, AnimationOperation, OutputMode, DescribeAnimation(source))
         {
-            Expression = CurrentExpression(source),
+            Expression = source.Kind == AnimationSourceKind.Expression ? null : CurrentExpression(source),
         };
         if (AnimationOperation == AnimationOperation.Expression) return request;
         if (AnimationOperation == AnimationOperation.Retarget)
@@ -192,6 +238,10 @@ public sealed partial class ConverterSession
 
         if (source.Kind == AnimationSourceKind.Emote)
             return request with { Variants = [EmoteVariant(source)] };
+        if (source.Kind == AnimationSourceKind.Expression)
+            return GameData.Animations.FindExpression(AnimationTargetEmote) is { } expression
+                ? request with { Variants = [FaceVariant(source, expression)] }
+                : null;
 
         var slots = AnimationSlots;
         if (!AnimationAsGroup)
@@ -208,6 +258,7 @@ public sealed partial class ConverterSession
         {
             Variants = [.. chosen.Select(slot => SlotVariant(source, slot))],
             GroupName = AnimationGroupName.Trim(),
+            SourceContainer = source.HasVariants ? AnimationSourceContainer : null,
             DefaultVariant = Math.Max(0, chosen.FindIndex(s => s.Index == source.SlotIndex)),
         };
     }
@@ -226,6 +277,19 @@ public sealed partial class ConverterSession
             else if (slot.StartKey != null) map[location] = prefix + slot.StartKey;
         }
         return new AnimationSwapVariant(slot.Label, map.ToImmutable()) { SourceRoles = roles.ToImmutable() };
+    }
+
+    /// <summary>The pose a facial expression source's packs hold, e.g. <c>smile</c>.</summary>
+    private static string FacePose(AnimationSource source)
+        => source.Locations.Select(l => l[(l.LastIndexOf('/') + 1)..]).FirstOrDefault() ?? string.Empty;
+
+    /// <summary>Every pack of the face moves to the destination pose, in the same face animation set.</summary>
+    private static AnimationSwapVariant FaceVariant(AnimationSource source, ExpressionInfo target)
+    {
+        var map = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
+        foreach (var location in source.Locations)
+            map[location] = location[..(location.LastIndexOf('/') + 1)] + target.Pose;
+        return new AnimationSwapVariant($"/{target.Name}", map.ToImmutable());
     }
 
     /// <summary>An emote's animations pair with the destination's by their position in the emote.</summary>
@@ -259,6 +323,12 @@ public sealed partial class ConverterSession
             ? $", with the {ExpressionLabel}"
             : string.Empty);
 
+    /// <summary>" from 'Group / Option'" when the group uses one of several versions.</summary>
+    private string ChosenProviderSuffix(AnimationSource source)
+        => source.HasVariants && source.Providers.FirstOrDefault(p => p.Address == AnimationSourceContainer) is { } chosen
+            ? $" from '{chosen.Label}'"
+            : string.Empty;
+
     private string DescribeOperation(AnimationSource source)
     {
         if (AnimationOperation == AnimationOperation.Expression)
@@ -268,8 +338,11 @@ public sealed partial class ConverterSession
                    string.Join(", ", _animationTargetRaces.Select(RaceLabel));
         if (source.Kind == AnimationSourceKind.Emote)
             return $"{source.Label} → /{GameData.Animations.FindEmote(AnimationTargetEmote)?.Name ?? "?"}";
+        if (source.Kind == AnimationSourceKind.Expression)
+            return $"{source.Label} → /{GameData.Animations.FindExpression(AnimationTargetEmote)?.Name ?? "?"}";
         if (AnimationAsGroup)
-            return $"{source.Label} → option group '{AnimationGroupName.Trim()}' ({_animationGroupSlots.Count} slots)";
+            return $"{source.Label}{ChosenProviderSuffix(source)} → option group '{AnimationGroupName.Trim()}' " +
+                   $"({_animationGroupSlots.Count} slots)";
         return $"{source.Label} → {IdleSlots.SlotLabel(source.Family ?? string.Empty, AnimationTargetSlot)}";
     }
 
@@ -282,6 +355,10 @@ public sealed partial class ConverterSession
         if (source.Kind == AnimationSourceKind.Emote)
             return GameData.Animations.EmotesReady && GameData.Animations.FindEmote(AnimationTargetEmote) is { } emote
                 ? $"as /{emote.Name}"
+                : "Swapped";
+        if (source.Kind == AnimationSourceKind.Expression)
+            return GameData.Animations.EmotesReady && GameData.Animations.FindExpression(AnimationTargetEmote) is { } face
+                ? $"as /{face.Name}"
                 : "Swapped";
         if (AnimationAsGroup) return "Slot options";
         return AnimationTargetSlot < 0 ? "Swapped" : IdleSlots.SlotLabel(source.Family ?? string.Empty, AnimationTargetSlot);

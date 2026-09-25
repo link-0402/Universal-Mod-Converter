@@ -44,18 +44,24 @@ public sealed class DetectedItem
     /// <summary>Animations only: what the mod replaces and for which races.</summary>
     public AnimationSource? Animation { get; init; }
 
-    /// <summary>Game item name resolved from the Item sheet, or "Unknown (ID {n})" if not found.</summary>
+    /// <summary>
+    /// Game item name resolved from the Item sheet; "Smallclothes" for equipment model 0, which the
+    /// game shows when nothing is equipped; otherwise "Unknown (ID {n})" if not found.
+    /// </summary>
     public string ItemName        { get; init; } = string.Empty;
 
     /// <summary>Game icon of the resolved item, 0 when unknown or for customization roots.</summary>
     public uint   Icon            { get; init; }
 
     /// <summary>
-    /// Customization roots only: the mod replaces nothing but textures here. Such a root can be
-    /// offered to several races or model IDs at once, because a texture holds no paths that
-    /// would have to differ between them.
+    /// Customization roots only: the mod replaces nothing but textures here (or textures and
+    /// materials, for faces and skins), so the same files can simply be offered to further races
+    /// or IDs (see <see cref="CustomizationDetection.CanFanOut"/>).
     /// </summary>
-    public bool   IsTextureOnly   { get; init; }
+    public bool   CanFanOut       { get; init; }
+
+    /// <summary>What kinds of files the mod replaces for this root; none for animations.</summary>
+    public AssetContents Contents { get; init; }
 }
 
 /// <summary>A face, hair, tail or ear ID a player can choose.</summary>
@@ -482,7 +488,9 @@ public sealed class GameDataService : IGameFileProvider
 
         // Key: (slot, 4-digit-id), Value: isAccessory
         var found = new Dictionary<(EquipSlot, string), bool>();
-        var custom = new HashSet<(AssetKind Kind, ushort Race, string Id, bool TextureOnly)>();
+        var gearKeys = new Dictionary<(EquipSlot, string), HashSet<string>>();
+        var contents = new Dictionary<(EquipSlot, string), AssetContents>();
+        var custom = new HashSet<(AssetKind Kind, ushort Race, string Id, bool FanOut, AssetContents Contents)>();
         var animations = new List<AnimationSource>();
 
         try
@@ -499,13 +507,20 @@ public sealed class GameDataService : IGameFileProvider
                     if (normalized.StartsWith("chara/equipment/", StringComparison.Ordinal) ||
                         normalized.StartsWith("chara/accessory/", StringComparison.Ordinal))
                         foreach (Match m in TokenRx.Matches(Path.GetFileName(normalized)))
-                            RecordToken(m, found);
+                            if (RecordToken(m, found) is { } token)
+                            {
+                                if (!gearKeys.TryGetValue(token, out var keys)) gearKeys[token] = keys = new(StringComparer.Ordinal);
+                                keys.Add(normalized);
+                            }
                 }
             }
 
             foreach (var root in CustomizationDetection.FindRoots(mod, modDir))
                 custom.Add((root.Kind, root.GenderRace, root.ModelId.ToString("D4"),
-                    CustomizationDetection.IsTextureOnly(mod, root)));
+                    CustomizationDetection.CanFanOut(mod, root), CustomizationDetection.Affected(mod, modDir, root)));
+
+            foreach (var (token, keys) in gearKeys)
+                contents[token] = ModContents.Of(mod, modDir, keys.Contains);
 
             animations = Animations.Scan(mod);
         }
@@ -539,7 +554,9 @@ public sealed class GameDataService : IGameFileProvider
                         Slot          = logicalSlot,
                         ModelIdPadded = id,
                         IsAccessory   = isAcc,
-                        ItemName      = $"Unknown (ID {modelId})",
+                        Contents      = contents.GetValueOrDefault((slot, id)),
+                        // Equipment model 0 is what a slot shows with nothing equipped; no item uses it.
+                        ItemName      = modelId == 0 && !isAcc ? "Smallclothes" : $"Unknown (ID {modelId})",
                     });
                     continue;
                 }
@@ -557,6 +574,7 @@ public sealed class GameDataService : IGameFileProvider
                         IsAccessory   = match.IsAccessory,
                         IsFacewear    = match.IsFacewear,
                         IsAmbiguous   = ambiguous,
+                        Contents      = contents.GetValueOrDefault((slot, id)),
                         Icon          = match.Icon,
                         ItemName      = ambiguous ? $"{match.Name} (+{variantGroup.Count() - 1} shared items)" : match.Name,
                     });
@@ -571,7 +589,8 @@ public sealed class GameDataService : IGameFileProvider
                 Slot          = EquipSlot.Head,
                 ModelIdPadded = entry.Id,
                 GenderRace    = entry.Race,
-                IsTextureOnly = entry.TextureOnly,
+                CanFanOut     = entry.FanOut,
+                Contents      = entry.Contents,
                 ItemName      = DescribeCustomization(entry.Kind, entry.Race, ushort.Parse(entry.Id)),
             });
 
@@ -591,16 +610,18 @@ public sealed class GameDataService : IGameFileProvider
     // Internal helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static void RecordToken(Match m, Dictionary<(EquipSlot, string), bool> found)
+    /// <summary>Records the item a token names; returns its key, or null when the slot is unknown.</summary>
+    private static (EquipSlot, string)? RecordToken(Match m, Dictionary<(EquipSlot, string), bool> found)
     {
         var prefix  = char.ToLower(m.Groups[1].Value[0]); // 'e' or 'a'
         var id      = m.Groups[2].Value;                  // "0164"
         var slotKey = m.Groups[3].Value.ToLower();        // "top" etc.
 
-        if (!SlotInfo.ReverseMap.TryGetValue(slotKey, out var slot)) return;
+        if (!SlotInfo.ReverseMap.TryGetValue(slotKey, out var slot)) return null;
 
         bool isAcc = prefix == 'a';
         found.TryAdd((slot, id), isAcc);
+        return (slot, id);
     }
 
     private List<GameItem> GetItemCache()

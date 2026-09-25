@@ -127,7 +127,8 @@ internal sealed class ConversionCards(ConverterSession session)
             .Where(e => filter.Length == 0 ||
                         e.Item.ItemName.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
                         IdLabel(e.Item).Contains(filter, StringComparison.OrdinalIgnoreCase) ||
-                        KindLabel(e.Item).Contains(filter, StringComparison.OrdinalIgnoreCase))
+                        KindLabel(e.Item).Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                        e.Item.Contents.Tags().Any(t => t.Name().Contains(filter, StringComparison.OrdinalIgnoreCase)))
             .ToList();
 
         // Leave room for the detail lines below without letting the list collapse.
@@ -157,10 +158,53 @@ internal sealed class ConversionCards(ConverterSession session)
             ImGui.SameLine();
             ImGui.SetCursorPosY(start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2);
             ImGui.TextUnformatted(item.ItemName);
-            var idText = $"{KindLabel(item)} · {IdLabel(item)}";
-            ImGui.SameLine(ImGui.GetContentRegionMax().X - ImGui.CalcTextSize(idText).X);
+            var idText  = $"{KindLabel(item)} · {IdLabel(item)}";
+            var idWidth = ImGui.CalcTextSize(idText).X;
+            var textY   = start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2;
+            if (item.Contents.Tags().Any())
+            {
+                ImGui.SameLine(ImGui.GetContentRegionMax().X - idWidth - ImGui.GetStyle().ItemSpacing.X - ContentsTagsWidth(item));
+                ImGui.SetCursorPosY(textY - BadgePadding.Y);
+                DrawContentsTags(item);
+            }
+            ImGui.SameLine(ImGui.GetContentRegionMax().X - idWidth);
+            ImGui.SetCursorPosY(textY);
             Widgets.Muted(idText);
         });
+    }
+
+    /// <summary>Matches the padding <see cref="Widgets.Badge"/> draws with.</summary>
+    private static Vector2 BadgePadding => new Vector2(5f, 1f) * Theme.Scale;
+
+    private static float BadgeWidth(string text) => ImGui.CalcTextSize(text).X + BadgePadding.X * 2;
+
+    /// <summary>The width <see cref="DrawContentsTags"/> takes, tags and the gaps between them.</summary>
+    private static float ContentsTagsWidth(DetectedItem item)
+    {
+        var tags = item.Contents.Tags().ToList();
+        return tags.Sum(t => BadgeWidth(t.Name())) + Math.Max(0, tags.Count - 1) * ImGui.GetStyle().ItemSpacing.X;
+    }
+
+    /// <summary>
+    /// What selecting the root actually works on, one tag per kind: a model, materials, textures
+    /// (counting the ones its materials load), in any combination.
+    /// </summary>
+    private static void DrawContentsTags(DetectedItem item)
+    {
+        var first = true;
+        foreach (var tag in item.Contents.Tags())
+        {
+            if (!first) ImGui.SameLine();
+            first = false;
+            var (color, tooltip) = tag switch
+            {
+                AssetContents.Model    => (Theme.Accent, "The mod replaces a model here; its materials and textures come along."),
+                AssetContents.Material => (Theme.Info, "The mod replaces materials here."),
+                _                      => (Theme.Success, "The mod replaces textures here, or textures its materials load."),
+            };
+            Widgets.Badge(tag.Name(), color);
+            Widgets.Tooltip(tooltip);
+        }
     }
 
     private static string KindLabel(DetectedItem item) => item switch
@@ -169,6 +213,7 @@ internal sealed class ConversionCards(ConverterSession session)
         {
             AnimationSourceKind.Idle  => "Idle",
             AnimationSourceKind.Emote => "Emote",
+            AnimationSourceKind.Expression => "Expression",
             _                         => "Animation",
         },
         { IsCustomization: true } => CustomizationKinds.Get(item.Kind).DisplayName,
@@ -218,6 +263,11 @@ internal sealed class ConversionCards(ConverterSession session)
             Widgets.Badge(KindLabel(source), Theme.Accent);
             ImGui.SameLine();
             Widgets.Badge(IdLabel(source), Theme.Info);
+            if (source.Contents.Tags().Any())
+            {
+                ImGui.SameLine();
+                DrawContentsTags(source);
+            }
         }
     }
 
@@ -335,20 +385,27 @@ internal sealed class ConversionCards(ConverterSession session)
 
     /// <summary>
     /// Every allowed race/gender, in race-code order, each an expandable list of every ID it has
-    /// (or a single toggle when there is only one, e.g. skins). A texture has no paths inside it,
-    /// so the very same file can serve every ticked (race, ID); each becomes its own toggleable
-    /// option in a new group built for its race, the same way an idle animation becomes one option
-    /// per slot. The source's own race starts ticked, since that is what the mod already has.
+    /// (or a single toggle when there is only one, e.g. skins). The source's paths are simply
+    /// added for every ticked (race, ID), pointing at the same files; the source itself is always
+    /// kept, so it is shown ticked and locked.
     /// </summary>
-    private void DrawTextureTargetList()
+    private void DrawTextureTargetList(DetectedItem source)
     {
-        ImGui.TextUnformatted("Convert to");
-        Widgets.Tooltip(session.OutputMode == ConversionOutputMode.InPlace
-            ? "Everything ticked below is added straight into whatever option already has the source's own " +
-              "paths, right alongside them. Untick the source's own race to remove it from there instead of " +
-              "leaving it."
-            : "Everything ticked below becomes its own toggleable option in a new group built for its race. " +
-              "Untick the source's own race to move it away instead of keeping it.");
+        ImGui.TextUnformatted("Also add for");
+        Widgets.Tooltip(session.TextureLayout == TextureFanOutLayout.NewGroups
+            ? "Every race ticked below gets new option groups of its own holding its paths, so it can be " +
+              "switched on or off separately. The source stays as it is."
+            : "Everything ticked below gets the source's paths right beside them, in Default or whichever " +
+              "options already hold them. The source stays as it is.");
+
+        if (source.Contents.HasFlag(AssetContents.Material))
+        {
+            var retarget = session.RetargetMaterials;
+            if (ImGui.Checkbox("Update texture paths inside materials", ref retarget)) session.SetRetargetMaterials(retarget);
+            Widgets.Tooltip("On: every race or face gets its own copy of each material, pointing at its own " +
+                            "textures (the mod's, added for it here, or the game's own where the mod has none). " +
+                            "Off: every target shares the source's material as it is, source textures included.");
+        }
 
         var kind  = session.TargetCustomizationKind;
         var races = session.AllowedTargetRaces.OrderBy(r => r).ToList();
@@ -376,21 +433,27 @@ internal sealed class ConversionCards(ConverterSession session)
     /// <summary>
     /// One race/gender row. A kind with at most one ID per race (skins, and any race/kind pair
     /// with a single option) is a single toggle; a kind with several (faces, mostly) expands into
-    /// a checkbox per ID the players of that race can choose.
+    /// a checkbox per ID the players of that race can choose. A skin row names every race that
+    /// wears that skin.
     /// </summary>
     private void DrawTextureTargetRace(AssetKind kind, ushort race)
     {
         var options = kind == AssetKind.Body ? null : session.GameData.TryGetCustomizationOptions(kind, race);
         if (options is not { Count: > 1 })
         {
-            var id = options is { Count: > 0 } list ? list[0].Id : (ushort)1;
-            var on = session.IsTextureTarget(race, id);
-            if (ImGui.Checkbox(ConverterSession.RaceLabel(race), ref on)) session.SetTextureTarget(race, id, on);
+            // A skin keeps the source's body ID; there is one per race.
+            var id = kind == AssetKind.Body && ushort.TryParse(session.Source?.ModelIdPadded, out var bodyId)
+                ? bodyId
+                : options is { Count: > 0 } list ? list[0].Id : (ushort)1;
+            var label = kind == AssetKind.Body ? SkinLabel(race) : ConverterSession.RaceLabel(race);
+            DrawTextureTargetCheckbox(label, $"{race}", race, id);
             return;
         }
 
         var selected = session.TextureTargetCount(race);
-        var header   = selected > 0 ? $"{ConverterSession.RaceLabel(race)}  ·  {selected} selected" : ConverterSession.RaceLabel(race);
+        var header = ConverterSession.RaceLabel(race) +
+                     (options.Any(o => session.IsTextureSource(race, o.Id)) ? "  ·  source" : string.Empty) +
+                     (selected > 0 ? $"  ·  {selected} selected" : string.Empty);
         if (!ImGui.CollapsingHeader($"{header}###TextureRace{race}")) return;
 
         // CollapsingHeader does not leave a lasting ID scope, so the race is folded into every
@@ -398,10 +461,39 @@ internal sealed class ConversionCards(ConverterSession session)
         using var indent = ImRaii.PushIndent();
         foreach (var option in options)
         {
-            var on = session.IsTextureTarget(race, option.Id);
-            if (ImGui.Checkbox($"{option.Label}##{race}_{option.Id}", ref on)) session.SetTextureTarget(race, option.Id, on);
-            if (option.Clans != null) Widgets.Tooltip($"Only {option.Clans} players can choose this.");
+            DrawTextureTargetCheckbox(option.Label, $"{race}_{option.Id}", race, option.Id);
+            if (option.Clans != null && !session.IsTextureSource(race, option.Id))
+                Widgets.Tooltip($"Only {option.Clans} players can choose this.");
         }
+    }
+
+    /// <summary>A target toggle; the source's own is always on and cannot be changed.</summary>
+    private void DrawTextureTargetCheckbox(string label, string id, ushort race, ushort modelId)
+    {
+        if (session.IsTextureSource(race, modelId))
+        {
+            var always = true;
+            using (ImRaii.Disabled())
+                ImGui.Checkbox($"{label} (source)##{id}", ref always);
+            Widgets.Tooltip("The mod already has this; it is always kept as it is.");
+            return;
+        }
+
+        var on = session.IsTextureTarget(race, modelId);
+        if (ImGui.Checkbox($"{label}##{id}", ref on)) session.SetTextureTarget(race, modelId, on);
+    }
+
+    /// <summary>"Midlander Female — also Elezen, Miqo'te": every race that wears this skin.</summary>
+    private static string SkinLabel(ushort race)
+    {
+        var others = CustomizationPaths.SkinUsers(race).Where(r => r != race)
+            .Select(r => CustomizationTargets.IsFemale(r) == CustomizationTargets.IsFemale(race)
+                ? RaceNames.Race(r)
+                : RaceNames.Name(r))
+            .ToList();
+        return others.Count == 0
+            ? ConverterSession.RaceLabel(race)
+            : $"{ConverterSession.RaceLabel(race)} — also {string.Join(", ", others)}";
     }
 
     private void DrawCustomizationTarget(DetectedItem source)
@@ -425,7 +517,7 @@ internal sealed class ConversionCards(ConverterSession session)
 
         if (session.CanFanOutTextures)
         {
-            DrawTextureTargetList();
+            DrawTextureTargetList(source);
             return;
         }
 

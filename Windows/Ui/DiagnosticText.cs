@@ -16,7 +16,6 @@ internal static class DiagnosticText
         ["unpaired"]               = "Nothing to convert to",
         ["inherited_name"]         = "Inherited animation",
         ["destination_replaced"]   = "Replaces the mod's own file",
-        ["destination_extras"]     = "Extra animations in the target",
         ["multiple_animations"]    = "Several animations in one file",
         ["swap_failed"]            = "Swap not possible",
         ["invalid_destination"]    = "Invalid destination",

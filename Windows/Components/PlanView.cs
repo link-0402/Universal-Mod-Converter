@@ -131,6 +131,13 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
             return;
         }
 
+        if (task.TexturePlan is { } texture)
+        {
+            ImGui.TextColored(Theme.Accent, texture.Request.Description);
+            DrawBadges(task);
+            return;
+        }
+
         var kind = task.TargetCustomizationKind is { } targetKind && targetKind != task.Kind
             ? $"{task.Kind} → {targetKind}"
             : task.Kind.ToString();
@@ -153,6 +160,12 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
 
         ImGui.SameLine();
         Widgets.Badge(OutputModeBadge(task.OutputMode), Theme.Muted);
+        if (task.TexturePlan is { } texture)
+        {
+            ImGui.SameLine();
+            Widgets.Badge(texture.Request.Layout == TextureFanOutLayout.NewGroups ? "New groups" : "Paths beside the source",
+                Theme.Muted);
+        }
         ImGui.Spacing();
     }
 
@@ -273,6 +286,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         _sections    = task.IsQueue ? BuildRun(task)
             : task.GearPlan is { } plan ? BuildGear(plan.Changes, plan.Files)
             : task.AnimationPlan is { } animation ? BuildGear(animation.Changes, animation.Files, AnimationSections)
+            : task.TexturePlan is { } texture ? BuildGear(texture.Changes, texture.Files, TextureSections)
             : BuildCustomization(task);
         _sections.RemoveAll(s => s.Rows.Count == 0);
     }
@@ -283,6 +297,13 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         ("Retarget", "Retargeted animations"),
         ("Option", "Option group contents"),
         ("Group", "Option groups"),
+    ];
+
+    private static readonly (string Category, string Title)[] TextureSections =
+    [
+        ("Game path", "Paths added"),
+        ("Group", "New option groups"),
+        ("Option", "New option contents"),
     ];
 
     /// <summary>
@@ -391,10 +412,8 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         "numeric_id"          => "ID",
         "numeric_id_string"   => "ID",
         "path_key_copy"       => "Copy",
-        "path_key_delete"     => "Remove",
         "dependency_files"    => "Add",
         "manipulation_insert" => "Meta",
-        "group_insert"        => "New group",
         _                     => changeType,
     };
 }

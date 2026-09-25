@@ -20,6 +20,12 @@ public class ConversionTask
     /// <summary>Animations only: the complete plan.</summary>
     public AnimationConversionPlan? AnimationPlan { get; set; }
 
+    /// <summary>Texture fan-outs only: what to add, set before planning.</summary>
+    public TextureFanOutRequest? TextureRequest { get; set; }
+
+    /// <summary>Texture fan-outs only: the complete plan.</summary>
+    public TextureFanOutPlan? TexturePlan { get; set; }
+
     /// <summary>Target customization kind; null means the same kind as <see cref="Kind"/>.</summary>
     public AssetKind? TargetCustomizationKind { get; set; }
 
@@ -113,15 +119,6 @@ public class ConversionTask
     /// </summary>
     public HashSet<string> MeshDefaultsApplied { get; } = new(System.StringComparer.OrdinalIgnoreCase);
 
-    // ── Extra targets ────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Customization textures only: further races or model IDs the same files are offered
-    /// under, on top of <see cref="TargetGenderRace"/> and <see cref="NewIdPadded"/>. One
-    /// texture can serve all of them because a texture holds no paths to retarget.
-    /// </summary>
-    public List<ConversionEndpoint> ExtraTargets { get; } = new();
-
     // ── Runs of several conversions ──────────────────────────────────────────
 
     /// <summary>
@@ -147,6 +144,7 @@ public class ConversionTask
             Kind                    = Kind,
             OutputMode              = OutputMode,
             AnimationRequest        = AnimationRequest,
+            TextureRequest          = TextureRequest,
             TargetCustomizationKind = TargetCustomizationKind,
             SourceGenderRace        = SourceGenderRace,
             TargetGenderRace        = TargetGenderRace,
@@ -159,7 +157,6 @@ public class ConversionTask
             TargetVariant           = TargetVariant,
             SourceVariant           = SourceVariant,
         };
-        copy.ExtraTargets.AddRange(ExtraTargets);
         return copy;
     }
 
