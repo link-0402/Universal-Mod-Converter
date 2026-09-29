@@ -32,7 +32,8 @@ Open the window with `/umc` (settings: `/umcconfig` or the cog icon).
 1. **Pick a mod** in the browser on the left, or enter a folder path under **Other folder**.
 2. **From/To:** pick the source item, hair, face, tail, ear, skin or animation, and its target.
 3. **Add selection to conversion plan.** Repeat for anything else to convert in the same pass.
-4. **Output:** **Create a new mod** (recommended), **Add to this mod** to put the result beside the original, or **Convert in place** to replace it. 
+4. **Output:**:
+   - **Create a new mod**, **Add to this mod** to put the result beside the original, or **Convert in place** to replace it. 
    - A new mod holds only the converted items or animations; hair, face, tail, ear and skin conversions instead copy the whole mod with that part converted.
    - Retextures instead offer **Add paths on existing options** or **Create new groups for new paths**, optionally with **Create as a new mod** to write them to a copy of the whole mod; the original always keeps working.
    - An animation option group (a variant per slot) is added to this mod or created as a new mod, never converted in place.
