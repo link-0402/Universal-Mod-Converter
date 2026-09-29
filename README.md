@@ -33,11 +33,11 @@ Open the window with `/umc` (settings: `/umcconfig` or the cog icon).
 2. **From/To:** pick the source item, hair, face, tail, ear, skin or animation, and its target.
 3. **Add selection to conversion plan.** Repeat for anything else to convert in the same pass.
 4. **Output:** **Create a new mod** (recommended), **Add to this mod** to put the result beside the original, or **Convert in place** to replace it. 
-   A new mod holds only the converted items or animations; hair, face, tail, ear and skin conversions instead copy the whole mod with that part converted.
-   Retextures instead offer **Add paths on existing options** or **Create new groups for new paths**, optionally with **Create as a new mod** to write them to a copy of the whole mod; the original always keeps working.
-   An animation option group (a variant per slot) is added to this mod or created as a new mod, never converted in place.
-   An expression added to this mod gets an option group of its own, so the animation can still be played without it.
-   Hovering an option explains it, and the text under the selected one says what it does with what you planned.
+   - A new mod holds only the converted items or animations; hair, face, tail, ear and skin conversions instead copy the whole mod with that part converted.
+   - Retextures instead offer **Add paths on existing options** or **Create new groups for new paths**, optionally with **Create as a new mod** to write them to a copy of the whole mod; the original always keeps working.
+   - An animation option group (a variant per slot) is added to this mod or created as a new mod, never converted in place.
+   - An expression added to this mod gets an option group of its own, so the animation can still be played without it.
+   - Hovering an option explains it, and the text under the selected one says what it does with what you planned.
 6. **Review:** the plan previews automatically.**Mesh groups** lets you leave parts of a gear model out, for every gear conversion in the plan, with a live preview on your character (Glamourer can put the original item on for you). Body parts of a model that changes slots start switched off.
 7. Click **Create new mod**, **Add to this mod** or **Convert in place** based on the selection above. The result is verified and loaded in Penumbra.
 
