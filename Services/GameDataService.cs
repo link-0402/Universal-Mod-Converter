@@ -465,12 +465,18 @@ public sealed class GameDataService : IGameFileProvider
     public GameItem? FindItem(GearItem item)
     {
         if (!ItemsReady) return null;
-        var candidates = GetItemCache()
-            .Where(i => i.ModelId == item.SetId && FitsSlot(i, item.Slot))
-            .OrderBy(i => i.RowId)
-            .ToList();
-        return candidates.FirstOrDefault(i => i.Variant == item.Variant) ?? candidates.FirstOrDefault();
+        // The Mesh groups tab asks every frame, and the answer never changes once the items are in.
+        return _foundItems.GetOrAdd(item, key =>
+        {
+            var candidates = GetItemCache()
+                .Where(i => i.ModelId == key.SetId && FitsSlot(i, key.Slot))
+                .OrderBy(i => i.RowId)
+                .ToList();
+            return candidates.FirstOrDefault(i => i.Variant == key.Variant) ?? candidates.FirstOrDefault();
+        });
     }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<GearItem, GameItem?> _foundItems = new();
 
     // ─────────────────────────────────────────────────────────────────────────
     // Mod scan
@@ -498,29 +504,27 @@ public sealed class GameDataService : IGameFileProvider
             // Only the game paths a mod redirects decide what it changes; local file names are
             // arbitrary. This reads both the legacy multi-file and the Penumbra 1.7+ layout.
             var mod = PenumbraMod.Load(modDir);
-            foreach (var container in mod.Containers)
+            // Every root asks about the same redirects and materials; they are gathered and read once.
+            var index = new ModIndex(mod, modDir);
+            foreach (var redirect in index.Redirects)
             {
-                foreach (var gamePath in container.FileEntries().Select(e => e.Key)
-                             .Concat(container.SwapEntries().Select(e => e.Key)))
-                {
-                    var normalized = GamePath.Normalize(gamePath);
-                    if (normalized.StartsWith("chara/equipment/", StringComparison.Ordinal) ||
-                        normalized.StartsWith("chara/accessory/", StringComparison.Ordinal))
-                        foreach (Match m in TokenRx.Matches(Path.GetFileName(normalized)))
-                            if (RecordToken(m, found) is { } token)
-                            {
-                                if (!gearKeys.TryGetValue(token, out var keys)) gearKeys[token] = keys = new(StringComparer.Ordinal);
-                                keys.Add(normalized);
-                            }
-                }
+                var normalized = redirect.GamePath;
+                if (normalized.StartsWith("chara/equipment/", StringComparison.Ordinal) ||
+                    normalized.StartsWith("chara/accessory/", StringComparison.Ordinal))
+                    foreach (Match m in TokenRx.Matches(Path.GetFileName(normalized)))
+                        if (RecordToken(m, found) is { } token)
+                        {
+                            if (!gearKeys.TryGetValue(token, out var keys)) gearKeys[token] = keys = new(StringComparer.Ordinal);
+                            keys.Add(normalized);
+                        }
             }
 
-            foreach (var root in CustomizationDetection.FindRoots(mod, modDir))
+            foreach (var root in CustomizationDetection.FindRoots(index))
                 custom.Add((root.Kind, root.GenderRace, root.ModelId.ToString("D4"),
-                    CustomizationDetection.CanFanOut(mod, root), CustomizationDetection.Affected(mod, modDir, root)));
+                    CustomizationDetection.CanFanOut(index, root), CustomizationDetection.Affected(index, root)));
 
             foreach (var (token, keys) in gearKeys)
-                contents[token] = ModContents.Of(mod, modDir, keys.Contains);
+                contents[token] = ModContents.Of(index, keys.Contains);
 
             animations = Animations.Scan(mod);
         }
@@ -722,19 +726,22 @@ public sealed class GameDataService : IGameFileProvider
 
             var cat = row.EquipSlotCategory.Value;
 
+            // 1 is the slot the item is worn in; -1 is a slot it merely blocks (a hooded robe's
+            // head, a full outfit's hands, legs and feet).
+
             // Equipment (prefix 'e')
-            if (cat.Head   != 0) { slot = EquipSlot.Head;      return true; }
-            if (cat.Body   != 0) { slot = EquipSlot.Body;      return true; }
-            if (cat.Gloves != 0) { slot = EquipSlot.Hands;     return true; }
-            if (cat.Legs   != 0) { slot = EquipSlot.Legs;      return true; }
-            if (cat.Feet   != 0) { slot = EquipSlot.Feet;      return true; }
+            if (cat.Head   > 0) { slot = EquipSlot.Head;      return true; }
+            if (cat.Body   > 0) { slot = EquipSlot.Body;      return true; }
+            if (cat.Gloves > 0) { slot = EquipSlot.Hands;     return true; }
+            if (cat.Legs   > 0) { slot = EquipSlot.Legs;      return true; }
+            if (cat.Feet   > 0) { slot = EquipSlot.Feet;      return true; }
 
             // Accessories (prefix 'a')
-            if (cat.Ears     != 0) { slot = EquipSlot.Earring;   isAcc = true; return true; }
-            if (cat.Neck     != 0) { slot = EquipSlot.Neck;      isAcc = true; return true; }
-            if (cat.Wrists   != 0) { slot = EquipSlot.Wrists;    isAcc = true; return true; }
-            if (cat.FingerR  != 0) { slot = EquipSlot.RingRight; isAcc = true; return true; }
-            if (cat.FingerL  != 0) { slot = EquipSlot.RingLeft;  isAcc = true; return true; }
+            if (cat.Ears     > 0) { slot = EquipSlot.Earring;   isAcc = true; return true; }
+            if (cat.Neck     > 0) { slot = EquipSlot.Neck;      isAcc = true; return true; }
+            if (cat.Wrists   > 0) { slot = EquipSlot.Wrists;    isAcc = true; return true; }
+            if (cat.FingerR  > 0) { slot = EquipSlot.RingRight; isAcc = true; return true; }
+            if (cat.FingerL  > 0) { slot = EquipSlot.RingLeft;  isAcc = true; return true; }
         }
         catch
         {

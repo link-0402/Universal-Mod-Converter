@@ -151,11 +151,33 @@ public static class MdlMeshGroups
 /// <param name="EditError">Why mesh groups of this model cannot be removed, or null.</param>
 /// <param name="SourceFile">The mod file it was converted from, with the same parts; null for a game copy.</param>
 /// <param name="SourceGamePaths">The source item's game paths it replaces, for the preview on a character.</param>
+/// <param name="Conversion">
+/// The conversion that produced it. A run of several conversions ships the models of all of them,
+/// and each follows the rules of its own: whether it changes slots, whether it becomes an accessory.
+/// </param>
 public sealed record GearOutputModel(string Local, ImmutableArray<string> GamePaths, ImmutableArray<string> Options,
     ushort? GenderRace, IReadOnlyList<MdlMeshGroup> Groups, string? EditError,
-    string? SourceFile = null, ImmutableArray<string> SourceGamePaths = default)
+    string? SourceFile = null, ImmutableArray<string> SourceGamePaths = default, GearConversionRequest? Conversion = null)
 {
     public bool Editable => EditError == null && Groups.Count > 0;
+
+    /// <summary>
+    /// Whether <paramref name="group"/> can never be kept: a body material (skin, bibo, pubes,
+    /// piercings) on an accessory. Only equipment slots send those to the character's body; an
+    /// accessory looks for them in its own folder, never finds them, and then draws nothing of
+    /// the model at all.
+    /// </summary>
+    public bool IsForcedOff(int group) => Conversion?.Target.IsAccessory == true && IsSkin(group);
+
+    /// <summary>
+    /// Whether <paramref name="group"/> starts switched off: a body material in a model that
+    /// changes slots. Those are the old slot's body parts, which would show wherever the new item
+    /// is worn. Unlike <see cref="IsForcedOff"/>, the user may keep it.
+    /// </summary>
+    public bool StartsOff(int group)
+        => Conversion is { } conversion && conversion.Source.Slot != conversion.Target.Slot && IsSkin(group);
+
+    private bool IsSkin(int group) => group >= 0 && group < Groups.Count && Groups[group].IsSkin;
 }
 
 public static partial class GearOutputModels
@@ -170,6 +192,11 @@ public static partial class GearOutputModels
     public static List<GearOutputModel> Collect(GearConversionPlan plan, string modDirectory)
     {
         var prefix = plan.Request.Target.Root + "/model/";
+        // Only the models this conversion produced: the mod may hold other items under the same
+        // set (a top beside the converted gloves), and a run holds the other conversions' too.
+        var produced = plan.GamePathMap.Values.Select(GamePath.Normalize)
+            .Where(p => p.StartsWith(prefix, StringComparison.Ordinal) && p.EndsWith(".mdl", StringComparison.Ordinal))
+            .ToHashSet(StringComparer.Ordinal);
         var targets = new Dictionary<string, (List<string> Keys, List<string> Options, string Local)>(StringComparer.Ordinal);
         var sources = new Dictionary<string, string>(StringComparer.Ordinal);
         var otherUses = new HashSet<string>(StringComparer.Ordinal);
@@ -178,7 +205,7 @@ public static partial class GearOutputModels
         {
             var path = GamePath.Normalize(key);
             var normalized = GamePath.NormalizeLocal(local);
-            if (!path.StartsWith(prefix, StringComparison.Ordinal) || !path.EndsWith(".mdl", StringComparison.Ordinal))
+            if (!produced.Contains(path))
             {
                 otherUses.Add(normalized);
                 continue;
@@ -224,7 +251,7 @@ public static partial class GearOutputModels
                 .Distinct(StringComparer.Ordinal)
                 .ToImmutableArray();
             result.Add(new GearOutputModel(local, keys.ToImmutableArray(), options.ToImmutableArray(), race, groups, error,
-                sources.GetValueOrDefault(normalized), sourcePaths));
+                sources.GetValueOrDefault(normalized), sourcePaths, plan.Request));
         }
         return result;
     }

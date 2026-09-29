@@ -27,6 +27,12 @@ internal static class AnimationTests
         ("A facial expression swaps to another, with its timeline in every option", FaceSwap),
         ("Attaching an expression names the face in the body's timeline", ExpressionAttach),
         ("Game expressions: one pose, read from the race's own face animations", GameExpressionDonor),
+        ("An expression added for a new mod stays in every option that plays the file", ExpressionNewModKeepsEveryOption),
+        ("An expression added to this mod goes into an option group beside the original", ExpressionAddedAsGroup),
+        ("A new mod of an animation leaves the mod's IMC groups behind", AnimationNewModDropsImcGroups),
+        ("A slot group gets a name of its own, and a key written in any case moves", SlotGroupNameAndKeyCase),
+        ("Every animation conversion of a run removes its own unused files", RunRemovesEveryOrphan),
+        ("A face from another mod is checked for every race it plays on", ModFacePerRace),
         ("Retarget adds target races and reports inheritance", RetargetPlan),
     ];
 
@@ -63,7 +69,10 @@ internal static class AnimationTests
         var pap = new PapFile(bytes);
         Assert.Equal(1, pap.BodyEntries.Count());
         // The flag the game sets on facial entries is set on some body animations too.
-        Assert.True(new PapFile.Entry("cbem_dogeza", 0, 0, 1).IsBody, "the face flag alone does not make a facial animation");
+        var dogeza = BuildPap([("cbem_dogeza", 0)]);
+        // The face flag, set on a body animation as the game sometimes does.
+        BinaryPrimitives.WriteInt32LittleEndian(dogeza.AsSpan(BinaryPrimitives.ReadInt32LittleEndian(dogeza.AsSpan(14)) + 36), 1);
+        Assert.True(new PapFile(dogeza).Entries[0].IsBody, "the face flag alone does not make a facial animation");
 
         // Shorter: the timeline shrinks, keeping nothing of the old name.
         var shorter = PapTimeline.RenameMotions(new PapFile(bytes).WithEntryNames(new Dictionary<int, string> { [0] = "jmn" }),
@@ -254,6 +263,9 @@ internal static class AnimationTests
         var face = TmbTimeline.Parse(result.Timeline(1));
         Assert.Equal(["cfxf_smile"], face.Faces);
         Assert.Equal("smile", face.FacePack);
+        // Checking a pack reads every string an edit may touch, the face pack attaching names included.
+        Assert.True(PapTimeline.ReadStrings(result.ToArray()).Any(s => s.Magic == "TMPP" && s.Value == "smile"),
+            "reading a pack's strings includes the face pack it loads");
 
         // A face in the resident pack needs no pack loaded.
         var resident = new PapFile(PapExpressions.Attach(target, new FacialAnimation("cfxf_bow", null), ["cbnm_id0"], notes));
@@ -324,6 +336,208 @@ internal static class AnimationTests
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
         output = new PapFile(plan.Files.Single(f => f.Operation == LocalFileOperation.Write).Content!);
         Assert.Equal(pace, TmbTimeline.Parse(output.Timeline(0)).TimingOf("cfxf_smile"));
+    }
+
+    /// <summary>
+    /// Attaching an expression for a new mod edits the file once and keeps it in every option
+    /// that plays it: a new mod's options start out empty, so each has to be given it again.
+    /// </summary>
+    private static void ExpressionNewModKeepsEveryOption()
+    {
+        const string joy = "chara/human/c0101/animation/a0001/bt_common/emote/joy.pap";
+        using var mod = new TempDir();
+        Definition(mod, """{"Files":{}}""", $$$"""
+            [{"Type":"Single","Name":"Mouth","DefaultSettings":0,"Options":[
+              {"Name":"Open","Files":{"{{{joy}}}":"joy.pap"}},
+              {"Name":"Closed","Files":{"{{{joy}}}":"joy.pap"}}]}]
+            """);
+        mod.File("joy.pap", BuildPap([("cbem_joy", 0)]));
+        var game = new FakeGame();
+        game.Files["chara/human/c0101/animation/f0002/nonresident/smile.pap"] = BuildPap([("cfxf_smile", 1)]);
+
+        var request = new AnimationConversionRequest([PapPath.TryParse(joy, out var path) ? path.Location : ""],
+            AnimationOperation.Expression, ConversionOutputMode.NewMod, "test")
+        {
+            Expression = new ExpressionDonor("/Smile", Pose: "smile"),
+        };
+        var plan = new AnimationConversionPlanner(game, _ => null, null).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(1, plan.Files.Count(f => f.Operation == LocalFileOperation.Write));
+
+        var group = plan.Result.Groups.Single(g => g.Name == "Mouth");
+        foreach (var container in group.Containers)
+            Assert.True(container.FileEntries().Any(e => GamePath.Normalize(e.Key) == joy),
+                $"'{container.Label}' plays the edited file too");
+        Assert.Equal(1, group.Containers.SelectMany(c => c.FileEntries()).Select(e => GamePath.NormalizeLocal(e.Local)).Distinct().Count());
+        Assert.Equal(2, plan.Outputs.Count);
+    }
+
+    /// <summary>
+    /// Adding an expression to this mod keeps the animation as it was and adds the edited one as
+    /// an option group that outranks the mod's own groups: "-" plays the original, the other option
+    /// the one with the face. The group holds one file per game path, so where options have their
+    /// own versions, the chosen one is used.
+    /// </summary>
+    private static void ExpressionAddedAsGroup()
+    {
+        const string joy = "chara/human/c0101/animation/a0001/bt_common/emote/joy.pap";
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{joy}}}":"joy.pap"}}""", $$$"""
+            [{"Type":"Single","Name":"Style","Priority":4,"DefaultSettings":0,"Options":[
+              {"Name":"Calm","Files":{}},
+              {"Name":"Wild","Files":{"{{{joy}}}":"wild.pap"}}]}]
+            """);
+        mod.File("joy.pap", BuildPap([("cbem_joy", 0)]));
+        mod.File("wild.pap", BuildPap([("cbem_joy", 0)], havokSize: 40));
+        var game = new FakeGame();
+        game.Files["chara/human/c0101/animation/f0002/nonresident/smile.pap"] = BuildPap([("cfxf_smile", 1)]);
+
+        var request = new AnimationConversionRequest([PapPath.TryParse(joy, out var path) ? path.Location : ""],
+            AnimationOperation.Expression, ConversionOutputMode.AddToMod, "test")
+        {
+            Expression = new ExpressionDonor("/Smile", Pose: "smile"),
+        };
+        var planner = new AnimationConversionPlanner(game, _ => null, null);
+        var plan = planner.Plan(mod.Path, request);
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "several_sources" && d.IsBlocker),
+            "Default and 'Wild' have their own version, and one option can hold only one");
+
+        plan = planner.Plan(mod.Path, request with { SourceContainer = ContainerAddress.Default });
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal("joy.pap", plan.Result.Default.FileEntries().Single().Local);
+        Assert.Equal("wild.pap", plan.Result.Groups[0].Containers[1].FileEntries().Single().Local);
+
+        var group = plan.Result.Groups.Single(g => g.Name == AnimationConversionPlanner.ExpressionGroupName);
+        Assert.Equal("Single", group.Type);
+        Assert.Equal(new[] { "-", "/Smile" }, group.Options.Select(o => Json.GetString(o["Name"])).ToArray());
+        Assert.Equal(1, Json.GetInt(group.Node["DefaultSettings"], -1));
+        Assert.Equal(5, Json.GetInt(group.Node["Priority"], 0));
+        Assert.Equal(0, group.Containers[0].FileEntries().Count());
+
+        var edited = group.Containers[1].FileEntries().Single();
+        Assert.Equal(joy, GamePath.Normalize(edited.Key));
+        var write = plan.Files.Single(f => f.Operation == LocalFileOperation.Write);
+        Assert.True(string.Equals(write.Destination, edited.Local, StringComparison.OrdinalIgnoreCase) && edited.Local != "joy.pap",
+            $"the face goes into a copy of its own, not the original: {edited.Local}");
+        Assert.Equal(["cfxf_smile"], TmbTimeline.Parse(new PapFile(write.Content!).Timeline(0)).Faces);
+
+        GearConversionExecutor.ApplyInPlace(plan, mod.Path);
+        Assert.Equal(0, AnimationConversionVerifier.Verify(mod.Path, plan).Count);
+        Assert.True(File.Exists(Path.Combine(mod.Path, "joy.pap")), "the original stays for \"-\"");
+    }
+
+    /// <summary>
+    /// Penumbra tells groups apart by name, so a slot group named like one the mod has gets a
+    /// number. And a mod that writes its keys in another case still has the moved one removed.
+    /// </summary>
+    private static void SlotGroupNameAndKeyCase()
+    {
+        using var mod = new TempDir();
+        var shouting = "Chara/Human" + Loop3["chara/human".Length..];
+        Definition(mod, $$$"""{"Files":{"{{{shouting}}}":"anim\\loop.pap","{{{Start3}}}":"anim\\start.pap"}}""",
+            """[{"Type":"Single","Name":"Idle slot","Options":[{"Name":"A"}]}]""");
+        mod.File("anim/loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        mod.File("anim/start.pap", BuildPap([("cbem_pose03_1st", 0)]));
+
+        var group = Planner(Game()).Plan(mod.Path, SlotRequest(ConversionOutputMode.AddToMod, ("Standing idle 5", Loop5, Start5)) with
+        {
+            GroupName = "Idle slot",
+        });
+        Assert.True(!group.HasBlockers, string.Join(" ", group.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { "Idle slot", "Idle slot (2)" }, group.Result.Groups.Select(g => g.Name).ToArray());
+
+        var moved = Planner(Game()).Plan(mod.Path, SlotRequest(ConversionOutputMode.InPlace, ("Standing idle 5", Loop5, Start5)));
+        Assert.True(!moved.HasBlockers, string.Join(" ", moved.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { Loop5, Start5 }, moved.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
+    }
+
+    /// <summary>
+    /// Converting in place removes the files nothing plays any more, for every conversion of a
+    /// run and not only the first.
+    /// </summary>
+    private static void RunRemovesEveryOrphan()
+    {
+        const string loop7 = "chara/human/c0101/animation/a0001/bt_common/emote/pose07_loop.pap";
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"anim\\loop.pap","{{{Start3}}}":"anim\\start.pap","{{{Idle0}}}":"anim\\idle.pap"}}""");
+        mod.File("anim/loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        mod.File("anim/start.pap", BuildPap([("cbem_pose03_1st", 0)]));
+        mod.File("anim/idle.pap", BuildPap([("cbnm_id0", 0)]));
+        var game = Game();
+        game.Files["chara/action/emote/pose07_loop.tmb"] = ActionTimeline("cbem_pose07_1lp");
+        game.Files[loop7] = BuildPap([("cbem_pose07_1lp", 0)]);
+
+        string Location(string path) => PapPath.TryParse(path, out var p) ? p.Location : throw new Exception(path);
+        var context = new ModPlanContext(mod.Path, ConversionOutputMode.InPlace, shared: true);
+        var merger = new ModPlanMerger(context);
+        var slot = merger.Add("pose 3 → 5", [Location(Loop3), Location(Start3)],
+            ctx => Planner(game).Plan(ctx, SlotRequest(ConversionOutputMode.InPlace, ("Standing idle 5", Loop5, Start5))));
+        var idle = merger.Add("idle → 7", [Location(Idle0)], ctx => Planner(game).Plan(ctx,
+            new AnimationConversionRequest([Location(Idle0)], AnimationOperation.Swap, ConversionOutputMode.InPlace, "test")
+            {
+                Variants = [new AnimationSwapVariant("Standing idle 7", ImmutableDictionary<string, string>.Empty.Add(Location(Idle0), Location(loop7)))],
+            }));
+        Assert.True(!slot.Rejected && !idle.Rejected, string.Join(" ", slot.Diagnostics.Concat(idle.Diagnostics).Select(d => d.Message)));
+        context.RunFinalizers();
+
+        var deleted = merger.Build().Files.Where(f => f.Operation == LocalFileOperation.Delete)
+            .Select(f => f.Destination.Replace('\\', '/')).Order().ToArray();
+        Assert.Equal(new[] { "anim/idle.pap", "anim/loop.pap", "anim/start.pap" }, deleted);
+    }
+
+    /// <summary>
+    /// A face from another mod is played by name from the character's own face pack, so a race
+    /// neither that mod nor the game has one for shows no face, and the plan says so.
+    /// </summary>
+    private static void ModFacePerRace()
+    {
+        const string joy = "chara/human/c0101/animation/a0001/bt_common/emote/joy.pap";
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{joy}}}":"joy.pap"}}""");
+        mod.File("joy.pap", BuildPap([("cbem_joy", 0)]));
+        var game = new FakeGame();
+
+        AnimationConversionPlan Plan(params ushort[] races) => new AnimationConversionPlanner(game, _ => null, null).Plan(mod.Path,
+            new AnimationConversionRequest([PapPath.TryParse(joy, out var path) ? path.Location : ""],
+                AnimationOperation.Expression, ConversionOutputMode.InPlace, "test")
+            {
+                Expression = new ExpressionDonor("Other mod: grin", Face: new FacialAnimation("cfxf_grin", "grin")) { PackRaces = races },
+            });
+
+        var missing = Plan(801);
+        Assert.True(!missing.HasBlockers, string.Join(" ", missing.Diagnostics.Select(d => d.Message)));
+        Assert.True(missing.Diagnostics.Any(d => d.Code == "expression_race_missing" && d.Message.Contains("c0101")),
+            string.Join(" ", missing.Diagnostics.Select(d => d.Message)));
+        Assert.True(Plan(101).Diagnostics.All(d => d.Code != "expression_race_missing"), "the mod ships the pack for the race");
+
+        game.Files["chara/human/c0101/animation/f0002/nonresident/grin.pap"] = BuildPap([("cfxf_grin", 1)]);
+        Assert.True(Plan(801).Diagnostics.All(d => d.Code != "expression_race_missing"), "the game has a face of that name");
+    }
+
+    /// <summary>
+    /// A new mod made from an animation carries none of the mod's IMC groups: one changes an
+    /// item's metadata even without files, and none of them is about the animation.
+    /// </summary>
+    private static void AnimationNewModDropsImcGroups()
+    {
+        using var mod = new TempDir();
+        using var output = new TempDir(create: false);
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"anim\\loop.pap","{{{Start3}}}":"anim\\start.pap"}}""", """
+            [{"Type":"Imc","Id":"33333333-3333-3333-3333-333333333333","Name":"Hood",
+              "Identifier":{"PrimaryId":6001,"SecondaryId":0,"Variant":1,"ObjectType":"Equipment","EquipSlot":"Head","BodySlot":"Unknown"},
+              "DefaultEntry":{"MaterialId":2,"DecalId":0,"VfxId":0,"MaterialAnimationId":0,"AttributeMask":0,"SoundId":0},
+              "Options":[{"Id":"a3333333-3333-3333-3333-333333333333","Name":"Up","AttributeMask":1}]}]
+            """);
+        mod.File("anim/loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        mod.File("anim/start.pap", BuildPap([("cbem_pose03_1st", 0)]));
+
+        var plan = Planner(Game()).Plan(mod.Path, SlotRequest(ConversionOutputMode.NewMod, ("Standing idle 5", Loop5, Start5)));
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        GearConversionExecutor.WriteNewMod(plan, mod.Path, output.Path, "Idle 5");
+
+        var result = PenumbraMod.Load(output.Path);
+        Assert.Equal(0, result.Groups.Count);
+        Assert.Equal(new[] { Loop5, Start5 }, result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
     }
 
     /// <summary>

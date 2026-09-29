@@ -39,12 +39,12 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         var newId = ParseId(task.NewIdPadded);
         var root = Path.GetFullPath(task.ModDirectory);
         var source = new CustomizationPathEndpoint(task.Kind, sourceRace, oldId);
-        task.SourceRoot = descriptor.Root(sourceRace, oldId);
 
         // Textures (and face or skin materials) alone are offered to other races by the
         // TextureFanOutPlanner instead; anything with a model carries its race and ID inside it
         // and has exactly one target.
-        if (CustomizationDetection.CanFanOut(PenumbraMod.Load(root), source))
+        var mod = PenumbraMod.Load(root);
+        if (CustomizationDetection.CanFanOut(mod, source))
             throw new InvalidDataException("This root only holds textures or materials; choose where to add its paths instead.");
 
         if (oldId == newId && sourceRace == targetRace && task.Kind == targetKind)
@@ -53,14 +53,15 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         var target = new CustomizationPathEndpoint(targetKind, targetRace, newId);
         var resources = ReadResources(root);
         var keys = new KeyRules(source, target, resources);
-        var assets = DiscoverAssets(root, resources.Files, source);
+        var references = new References();
+        var assets = DiscoverAssets(root, resources.Files, source, references);
         if (assets.Count == 0)
             throw new InvalidDataException($"No {descriptor.DisplayName.ToLowerInvariant()} root matched " +
                                            $"c{sourceRace:D4}/{descriptor.Token(oldId)}.");
 
         task.AllAssetFiles.Clear();
         task.AllAssetFiles.AddRange(assets);
-        var keepInPlace = KeepInPlace(root, keys);
+        var keepInPlace = KeepInPlace(root, mod, keys);
         foreach (var file in assets)
         {
             // Files behind shared material roots stay where they are; the target gets
@@ -72,8 +73,8 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                 task.PlannedRenames.Add(new PlannedRename { OldPath = file, NewPath = renamed });
 
             if (!StructuredExtensions.Contains(Path.GetExtension(file))) continue;
-            var planned = new PlannedBinaryPatch { FilePath = file, IsStructured = true };
-            foreach (var path in BinaryPathRewriter.ExtractPaths(File.ReadAllBytes(file)))
+            var planned = new PlannedBinaryPatch { FilePath = file };
+            foreach (var path in references.Of(file))
             {
                 var replacement = CustomizationPaths.RewriteOwnedReference(path, source, target);
                 // An embedded texture is a dependency, not a destination declaration.
@@ -104,7 +105,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         var materialDependencies = PlanMaterialDependencies(task, source, target, resources, keys);
         PlanJson(task, root, descriptor, source, target, resources, materialDependencies, keys);
-        PlanExtraSkeleton(task, root, descriptor, source, target, resources);
+        PlanExtraSkeleton(task, root, mod, descriptor, source, target, resources);
         PlanDeformation(task, sourceRace, targetRace, source, resources);
     }
 
@@ -167,7 +168,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
     }
 
     private static HashSet<string> DiscoverAssets(string root,
-        IReadOnlyDictionary<string, string> mappings, CustomizationPathEndpoint source)
+        IReadOnlyDictionary<string, string> mappings, CustomizationPathEndpoint source, References references)
     {
         var assets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var queue = new Queue<string>();
@@ -179,15 +180,14 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         {
             if (CustomizationPaths.Contains(file, source)) Add(file);
             if (!StructuredExtensions.Contains(Path.GetExtension(file))) continue;
-            if (BinaryPathRewriter.ExtractPaths(File.ReadAllBytes(file))
-                    .Any(path => CustomizationPaths.Contains(path, source))) Add(file);
+            if (references.Of(file).Any(path => CustomizationPaths.Contains(path, source))) Add(file);
         }
 
         while (queue.Count > 0)
         {
             var file = queue.Dequeue();
             if (!StructuredExtensions.Contains(Path.GetExtension(file))) continue;
-            foreach (var dependency in BinaryPathRewriter.ExtractPaths(File.ReadAllBytes(file)))
+            foreach (var dependency in references.Of(file))
                 foreach (var local in ResolveMappedDependencies(mappings, dependency)) Add(local);
         }
         return assets;
@@ -197,6 +197,23 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             var full = Path.GetFullPath(path);
             PathSafety.EnsureContained(root, full, true);
             if (assets.Add(full)) queue.Enqueue(full);
+        }
+    }
+
+    /// <summary>
+    /// The resource paths inside each structured file, read from disk once per plan: discovery
+    /// scans the whole folder, and the assets it finds are asked again for their dependencies and
+    /// again for the paths to rewrite.
+    /// </summary>
+    private sealed class References
+    {
+        private readonly Dictionary<string, IReadOnlyList<string>> _paths = new(StringComparer.OrdinalIgnoreCase);
+
+        public IReadOnlyList<string> Of(string file)
+        {
+            if (!_paths.TryGetValue(file, out var paths))
+                _paths[file] = paths = BinaryPathRewriter.ExtractPaths(File.ReadAllBytes(file));
+            return paths;
         }
     }
 
@@ -244,7 +261,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                     foreach (var (gamePath, value) in fileSwaps)
                         if (value is JsonValue v && v.TryGetValue<string>(out var target))
                             swaps[Normalize(gamePath)] = Normalize(target);
-                if (string.Equals(obj["Type"]?.GetValue<string>(), "Est", StringComparison.OrdinalIgnoreCase) &&
+                if (string.Equals(Json.GetString(obj["Type"]), "Est", StringComparison.OrdinalIgnoreCase) &&
                     obj["Manipulation"] is JsonObject est)
                     AddEstOverride(est);
                 foreach (var (_, child) in obj) Walk(child);
@@ -255,10 +272,10 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         void AddEstOverride(JsonObject est)
         {
-            if (!TryInt(est["SetId"], out var setId) || setId is < 0 or > ushort.MaxValue ||
-                !TryInt(est["Entry"], out var skeletonId) || skeletonId is < 0 or > ushort.MaxValue ||
-                !TryEstKind(est["Slot"]?.GetValue<string>(), out var kind) ||
-                !GenderRaces.TryParse(est["Race"]?.GetValue<string>(), est["Gender"]?.GetValue<string>(), out var race))
+            if (!Json.TryGetInt(est["SetId"], out var setId) || setId is < 0 or > ushort.MaxValue ||
+                !Json.TryGetInt(est["Entry"], out var skeletonId) || skeletonId is < 0 or > ushort.MaxValue ||
+                !TryEstKind(Json.GetString(est["Slot"]), out var kind) ||
+                !GenderRaces.TryParse(Json.GetString(est["Race"]), Json.GetString(est["Gender"]), out var race))
                 return;
             estOverrides[new EstOverrideKey(kind, race, (ushort)setId)] = (ushort)skeletonId;
         }
@@ -275,6 +292,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             StringComparer.OrdinalIgnoreCase);
         var sourceNames = GenderRaces.Names(source.GenderRace);
         var targetNames = GenderRaces.Names(target.GenderRace);
+        var occupied = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var jsonFile in PenumbraMod.DefinitionFiles(root).Where(File.Exists))
         {
@@ -287,6 +305,13 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             file.Changes.AddRange(changes);
             task.PlannedJsonChanges.Add(file);
         }
+
+        // Renaming onto a path the mod already redirects replaces the mod's own file (another
+        // hair of a pack at the target ID, say), which the gear planner refuses as well.
+        if (occupied.Count > 0)
+            task.Diagnostics.Add(new PlanDiagnostic("target_conflict",
+                $"The mod already redirects {occupied.Count} of the target's path(s) itself, such as {occupied.First()}; " +
+                "converting would replace them. Choose another target, or remove those from the mod first.", true));
 
         void Walk(JsonNode? node, string path, List<JsonFieldChange> changes)
         {
@@ -307,7 +332,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                             NewValue = additions.ToJsonString() });
                 }
                 if (descriptor.SupportsEst &&
-                    string.Equals(obj["Type"]?.GetValue<string>(), "Est", StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(Json.GetString(obj["Type"]), "Est", StringComparison.OrdinalIgnoreCase) &&
                     obj["Manipulation"] is JsonObject est)
                     AddEstChanges(est, path + ".Manipulation", changes);
 
@@ -316,12 +341,16 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                     if (key is "Files" or "FileSwaps" && value is JsonObject dict)
                     {
                         var produced = new HashSet<string>(dict.Select(p => Normalize(p.Key)), StringComparer.OrdinalIgnoreCase);
+                        // Keys this conversion leaves where they are, which a moved key must not land on.
+                        var staying = dict.Where(p => keys.Target(p.Key) == null).Select(p => Normalize(p.Key))
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
                         var variantAdditions = new JsonObject();
                         foreach (var (dictKey, dictValue) in dict.ToList())
                         {
                             var newKey = keys.Target(dictKey);
                             if (newKey != null)
                             {
+                                if (staying.Contains(Normalize(newKey))) occupied.Add(Normalize(newKey));
                                 produced.Add(Normalize(newKey));
                                 changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[key]", OldValue = dictKey, NewValue = newKey,
                                     ChangeType = keys.IsShared(dictKey) ? "path_key_copy" : "path_key" });
@@ -365,11 +394,11 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         void AddEstChanges(JsonObject est, string path, List<JsonFieldChange> changes)
         {
-            if (!TryInt(est["SetId"], out var setId) || setId != source.ModelId) return;
+            if (!Json.TryGetInt(est["SetId"], out var setId) || setId != source.ModelId) return;
             // Hair and face share the same identifier space; the slot tells them apart.
-            if (!string.Equals(est["Slot"]?.GetValue<string>(), source.Kind.ToString(), StringComparison.OrdinalIgnoreCase)) return;
-            if (est["Race"]?.GetValue<string>() is { } race && !race.Equals(sourceNames.Race, StringComparison.OrdinalIgnoreCase)) return;
-            if (est["Gender"]?.GetValue<string>() is { } gender && !gender.Equals(sourceNames.Gender, StringComparison.OrdinalIgnoreCase)) return;
+            if (!string.Equals(Json.GetString(est["Slot"]), source.Kind.ToString(), StringComparison.OrdinalIgnoreCase)) return;
+            if (Json.GetString(est["Race"]) is { } race && !race.Equals(sourceNames.Race, StringComparison.OrdinalIgnoreCase)) return;
+            if (Json.GetString(est["Gender"]) is { } gender && !gender.Equals(sourceNames.Gender, StringComparison.OrdinalIgnoreCase)) return;
             changes.Add(new JsonFieldChange { JsonPath = path + ".SetId", OldValue = source.ModelId.ToString("D4"), NewValue = target.ModelId.ToString("D4"),
                 ChangeType = est["SetId"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
             // Only real edits: an unchanged value would count as a failed change at apply time.
@@ -384,10 +413,10 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
     /// Local files that must keep their name because a key that is copied or skipped
     /// (shared material root, unused Hrothgar variant) still points at them.
     /// </summary>
-    private static HashSet<string> KeepInPlace(string root, KeyRules keys)
+    private static HashSet<string> KeepInPlace(string root, PenumbraMod mod, KeyRules keys)
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var container in PenumbraMod.Load(root).Containers)
+        foreach (var container in mod.Containers)
         foreach (var (key, local) in container.FileEntries())
         {
             if (!keys.IsShared(key) && !keys.IsSkipped(key)) continue;
@@ -406,7 +435,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
     /// Options that override it keep doing so, because Penumbra applies option
     /// manipulations over the default ones.
     /// </summary>
-    private void PlanExtraSkeleton(ConversionTask task, string root, CustomizationKindDescriptor descriptor,
+    private void PlanExtraSkeleton(ConversionTask task, string root, PenumbraMod mod, CustomizationKindDescriptor descriptor,
         CustomizationPathEndpoint source, CustomizationPathEndpoint target, ModResourceIndex resources)
     {
         if (!descriptor.SupportsEst || source.Kind != target.Kind) return;
@@ -414,7 +443,6 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             ? "chara/xls/charadb/hairskeletontemplate.est"
             : "chara/xls/charadb/faceskeletontemplate.est";
 
-        var mod = PenumbraMod.Load(root);
         var defaultSource = FindEst(mod.Default, source);
         if (defaultSource == null && FindEst(mod.Default, target) != null)
             return; // The mod's default option already defines the target explicitly.
@@ -514,13 +542,13 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         foreach (var node in container.Manipulations ?? [])
         {
             if (node is not JsonObject obj ||
-                !string.Equals(obj["Type"]?.GetValue<string>(), "Est", StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(Json.GetString(obj["Type"]), "Est", StringComparison.OrdinalIgnoreCase) ||
                 obj["Manipulation"] is not JsonObject est) continue;
-            if (!TryInt(est["SetId"], out var setId) || setId != endpoint.ModelId ||
-                !TryInt(est["Entry"], out var entry) || entry is < 0 or > ushort.MaxValue ||
-                !string.Equals(est["Slot"]?.GetValue<string>(), endpoint.Kind.ToString(), StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(est["Race"]?.GetValue<string>(), race, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(est["Gender"]?.GetValue<string>(), gender, StringComparison.OrdinalIgnoreCase))
+            if (!Json.TryGetInt(est["SetId"], out var setId) || setId != endpoint.ModelId ||
+                !Json.TryGetInt(est["Entry"], out var entry) || entry is < 0 or > ushort.MaxValue ||
+                !string.Equals(Json.GetString(est["Slot"]), endpoint.Kind.ToString(), StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(Json.GetString(est["Race"]), race, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(Json.GetString(est["Gender"]), gender, StringComparison.OrdinalIgnoreCase))
                 continue;
             return (ushort)entry;
         }
@@ -659,18 +687,12 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                 WarnAboutTailBones(task, filePath, model);
                 var binary = task.PlannedBinaryPatches.FirstOrDefault(p =>
                     string.Equals(p.FilePath, filePath, StringComparison.OrdinalIgnoreCase));
-                var replacements = binary?.Patches.Where(p => p.Selected)
+                var replacements = binary?.Patches
                     .ToDictionary(p => p.OldString, p => p.NewString, StringComparer.Ordinal)
                     ?? new Dictionary<string, string>(StringComparer.Ordinal);
                 if (replacements.Count > 0) model.ReplacePaths(replacements);
-                RacialDeformationPlan? deformationPlan = null;
-                MdlConversionReport? report = null;
-                if (route != null)
-                {
-                    deformationPlan = route.Materialize(model.Bones, hierarchy.StepSkeletons,
-                        hierarchy.SourceSkeleton);
-                    report = MdlRaceConverter.Convert(model, deformationPlan);
-                }
+                var deformationPlan = route.Materialize(model.Bones, hierarchy.StepSkeletons, hierarchy.SourceSkeleton);
+                var report = MdlRaceConverter.Convert(model, deformationPlan);
                 var output = model.Write();
                 _ = MdlFile.Read(output);
 
@@ -681,14 +703,13 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                     TargetGenderRace = targetRace,
                     InputHash = MdlRaceConverter.Hash(input),
                     OutputHash = MdlRaceConverter.Hash(output),
-                    LodCount = report?.LodCount ?? model.Header.LodCount,
-                    MeshCount = report?.MeshCount ?? model.Meshes.Length,
-                    VertexCount = report?.VertexCount ?? 0,
-                    ShapeVertexCount = report?.ShapeVertexCount ?? 0,
-                    GeometryConverted = deformationPlan != null,
+                    LodCount = report.LodCount,
+                    MeshCount = report.MeshCount,
+                    VertexCount = report.VertexCount,
+                    ShapeVertexCount = report.ShapeVertexCount,
                     DeformationPlan = deformationPlan,
                 };
-                if (report != null) planned.BoneResolutions.AddRange(report.BoneResolutions);
+                planned.BoneResolutions.AddRange(report.BoneResolutions);
                 if (binary != null)
                 {
                     foreach (var patch in binary.Patches)
@@ -696,7 +717,6 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                         {
                             OldString = patch.OldString,
                             NewString = patch.NewString,
-                            Selected = true,
                         });
                     task.PlannedBinaryPatches.Remove(binary);
                 }
@@ -720,8 +740,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         }
 
         if (task.PlannedMdlChanges.Count > 0)
-            log.Information("[UMC] Planned parsed MDL rewrite for {0} file(s), including {1} racial deformation(s).",
-                task.PlannedMdlChanges.Count, task.PlannedMdlChanges.Count(change => change.GeometryConverted));
+            log.Information("[UMC] Planned racial deformation for {0} model(s).", task.PlannedMdlChanges.Count);
     }
 
     /// <summary>
@@ -743,14 +762,6 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
     private static ushort ParseId(string value) => ushort.TryParse(value, out var id)
         ? id
         : throw new InvalidDataException($"Invalid ID: {value}");
-    private static bool TryInt(JsonNode? node, out int value)
-    {
-        value = 0;
-        if (node is not JsonValue jsonValue) return false;
-        if (jsonValue.TryGetValue<int>(out value)) return true;
-        return jsonValue.TryGetValue<string>(out var text) && int.TryParse(text, out value);
-    }
-
     private static bool TryEstKind(string? slot, out AssetKind kind)
     {
         if (string.Equals(slot, "Hair", StringComparison.OrdinalIgnoreCase))

@@ -106,7 +106,7 @@ public sealed class MdlFile
     public ImmutableArray<MdlBoneTable> BoneTables { get; }
     public ImmutableArray<MdlShape> Shapes { get; private set; }
     public ImmutableArray<MdlShapeMesh> ShapeMeshes { get; private set; }
-    public ImmutableArray<MdlShapeValue> ShapeValues { get; }
+    public ImmutableArray<MdlShapeValue> ShapeValues { get; private set; }
     public ImmutableArray<ushort> SubmeshBoneMap { get; }
     public ImmutableArray<MdlNeckMorph> NeckMorphs { get; }
     public ImmutableArray<MdlFaceData> FaceData { get; private set; }
@@ -120,6 +120,9 @@ public sealed class MdlFile
     private ushort StringTableUnknown { get; init; }
     private ImmutableArray<byte> MetadataTail { get; init; }
     private bool RequiresRebuild { get; set; }
+
+    /// <summary>Where the shape-value table starts in the file, for edits made in place.</summary>
+    private int ShapeValuesOffset { get; init; }
 
     private MdlFile(byte[] bytes, MdlFileHeader header, MdlModelHeader modelHeader,
         ImmutableArray<MdlVertexDeclaration> vertexDeclarations, ImmutableArray<string> strings,
@@ -317,6 +320,7 @@ public sealed class MdlFile
         for (var i = 0; i < modelHeader.ShapeMeshCount; i++)
             shapeMeshes.Add(new MdlShapeMesh(r.U32(), r.U32(), r.U32()));
         var shapeValues = ImmutableArray.CreateBuilder<MdlShapeValue>(modelHeader.ShapeValueCount);
+        var shapeValuesStart = r.Position;
         for (var i = 0; i < modelHeader.ShapeValueCount; i++)
             shapeValues.Add(new MdlShapeValue(r.U16(), r.U16()));
 
@@ -365,6 +369,7 @@ public sealed class MdlFile
             StringTableUnknown = stringUnknown,
             MetadataTail = metadataTail,
             NeckMorphDataMissing = neckMorphDataMissing,
+            ShapeValuesOffset = shapeValuesStart,
         };
     }
 
@@ -582,8 +587,9 @@ public sealed class MdlFile
     /// Hides submeshes (by absolute submesh-table index) by turning their triangles into
     /// zero-area ones: every index of the submesh's range is set to its first index. Nothing
     /// moves and no table changes, so this is safe whether the game draws a mesh as a whole or
-    /// submesh by submesh, and a shape that replaces one of those indices still yields
-    /// zero-area triangles.
+    /// submesh by submesh. A shape replaces index-buffer entries with vertices of its own, which
+    /// could open a triangle up again whose every corner it replaces, so the shape values aimed
+    /// at those entries are pointed at the same vertex.
     /// </summary>
     public void RemoveSubmeshes(IReadOnlyCollection<int> submeshIndices)
     {
@@ -612,7 +618,43 @@ public sealed class MdlFile
                 checked((int)submesh.IndexCount * 2));
             var first = BinaryPrimitives.ReadUInt16LittleEndian(span);
             for (var i = 2; i < span.Length; i += 2) BinaryPrimitives.WriteUInt16LittleEndian(span[i..], first);
+            CollapseShapeValues(lod, mesh, submesh.IndexOffset, submesh.IndexCount, first);
         }
+    }
+
+    /// <summary>
+    /// Points the shape values of <paramref name="mesh"/> that replace an index-buffer entry in
+    /// [<paramref name="start"/>, +<paramref name="count"/>) at <paramref name="vertex"/>. A
+    /// submesh counts its entries from the start of its LOD's index buffer, a shape value from
+    /// the start of its mesh (as Penumbra's model import and export do).
+    /// </summary>
+    private void CollapseShapeValues(int lod, int mesh, uint start, uint count, ushort vertex)
+    {
+        if (start < Meshes[mesh].StartIndex) throw new InvalidDataException($"MDL submesh starts before its mesh {mesh}.");
+        start -= Meshes[mesh].StartIndex;
+        var values = ShapeValues.ToBuilder();
+        var changed = false;
+        foreach (var shape in Shapes)
+        {
+            for (var s = shape.MeshStarts[lod]; s < shape.MeshStarts[lod] + shape.MeshCounts[lod]; s++)
+            {
+                if (s >= ShapeMeshes.Length) throw new InvalidDataException("MDL shape references a missing shape mesh.");
+                var shapeMesh = ShapeMeshes[s];
+                if (shapeMesh.MeshIndexOffset != Meshes[mesh].StartIndex) continue;
+                if ((ulong)shapeMesh.ShapeValueOffset + shapeMesh.ShapeValueCount > (ulong)values.Count)
+                    throw new InvalidDataException("MDL shape mesh references missing shape values.");
+                for (var v = (int)shapeMesh.ShapeValueOffset; v < shapeMesh.ShapeValueOffset + shapeMesh.ShapeValueCount; v++)
+                {
+                    if (values[v].BaseIndexOffset < start || values[v].BaseIndexOffset >= start + count ||
+                        values[v].ReplacementVertexIndex == vertex)
+                        continue;
+                    values[v] = values[v] with { ReplacementVertexIndex = vertex };
+                    BinaryPrimitives.WriteUInt16LittleEndian(_bytes.AsSpan(ShapeValuesOffset + v * 4 + 2), vertex);
+                    changed = true;
+                }
+            }
+        }
+        if (changed) ShapeValues = values.ToImmutable();
     }
 
     internal Span<byte> MutableBytes => _bytes;

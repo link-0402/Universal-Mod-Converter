@@ -13,10 +13,13 @@ internal static class TextureFanOutTests
         ("Add paths: every target beside the source, in the same containers", AddPaths),
         ("New groups: a toggle per ID for Default, a copy of each option group", NewGroups),
         ("New groups: a combining group cannot be copied", NewGroupsRejectCombining),
+        ("A target keeps the paths the mod already has for it, in either layout", KeepsTheModsOwnPaths),
         ("Materials: each target gets its own copy pointing at its own textures", RetargetMaterials),
         ("Materials: shared as they are when not retargeted", ShareMaterials),
         ("As a new mod: planned as the whole mod with the paths added", AsNewMod),
         ("Tags count the textures a root's materials load", MaterialTextureTags),
+        ("An unreadable material is reported once, not once per target", UnreadableMaterialOnce),
+        ("A written plan lets go of the contents it carried", ReleasesContents),
     ];
 
     private static string[] Names(AssetContents contents) => contents.Tags().Select(t => t.Name()).ToArray();
@@ -119,6 +122,44 @@ internal static class TextureFanOutTests
         Assert.Equal(0, plan.Verify(mod.Path).Count);
     }
 
+    /// <summary>
+    /// A path the mod already has for a target race stays the mod's own, whichever layout and
+    /// wherever it lives: the added one would win over it (an option over Default, a new group
+    /// over the groups before it) and silently replace the mod's own texture.
+    /// </summary>
+    private static void KeepsTheModsOwnPaths()
+    {
+        using var mod = new TempDir();
+        const string auRaBase = "chara/human/c1401/obj/body/b0001/texture/c1401b0001_base.tex";
+        const string auRaNorm = "chara/human/c1401/obj/body/b0001/texture/c1401b0001_norm.tex";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Skin",
+             "DefaultData":{"Files":{"{{{SkinBase}}}":"skin/base.tex","{{{auRaBase}}}":"au/base.tex","{{{auRaNorm}}}":"au/norm.tex"} },
+             "Groups":[{"Name":"Body type","Type":"Single","Priority":3,"DefaultSettings":0,"Options":[
+               {"Name":"Bibo","Files":{"{{{SkinNorm}}}":"bibo/norm.tex"} } ] } ] }
+            """);
+        foreach (var file in new[] { "skin/base.tex", "au/base.tex", "au/norm.tex", "bibo/norm.tex" }) mod.File(file, [1]);
+
+        foreach (var layout in new[] { TextureFanOutLayout.AddPathsToOptions, TextureFanOutLayout.NewGroups })
+        {
+            var plan = new TextureFanOutPlanner(new FakeGame()).Plan(mod.Path, Request(Skin(201), layout, false, Skin(1401), Skin(1801)));
+            Assert.True(!plan.HasBlockers, $"{layout}: " + string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+
+            foreach (var container in plan.Result.Containers)
+            foreach (var (key, local) in container.FileEntries())
+                if (GamePath.Normalize(key) is auRaBase or auRaNorm)
+                    Assert.True(local.Replace('\\', '/').StartsWith("au/", StringComparison.Ordinal),
+                        $"{layout}: {container.Label} maps {key} to {local} instead of the mod's own file");
+            Assert.True(plan.Result.Containers.SelectMany(c => c.FileEntries())
+                    .Any(e => GamePath.Normalize(e.Key) == SkinBase.Replace("c0201", "c1801")),
+                $"{layout}: the other race still gets the paths");
+            Assert.True(plan.Result.Groups.All(g => !g.Name.Contains("Au Ra", StringComparison.Ordinal)),
+                $"{layout}: a race with nothing left to add gets no group");
+            Assert.True(plan.Diagnostics.Any(d => d.Code == "path_exists" && d.Message.Contains("2 of Au Ra Female's paths")),
+                $"{layout}: " + string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        }
+    }
+
     private static void NewGroups()
     {
         using var mod = new TempDir();
@@ -140,11 +181,13 @@ internal static class TextureFanOutTests
             Request(Face(1401, 1), TextureFanOutLayout.NewGroups, true, Face(1401, 3), Face(1401, 2), Face(801, 1)));
         Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
 
+        // Each race's copies outrank one another as the originals do: Makeup (5) over Extras (2),
+        // and every group over Default's toggle.
         var added = plan.Result.Groups.Skip(2).ToList();
         Assert.Equal(new[]
             {
-                "Miqo'te Female", "Makeup · Miqo'te Female", "Extras · Miqo'te Female",
-                "Au Ra Female", "Makeup · Au Ra Female", "Extras · Au Ra Female",
+                "Miqo'te Female", "Extras · Miqo'te Female", "Makeup · Miqo'te Female",
+                "Au Ra Female", "Extras · Au Ra Female", "Makeup · Au Ra Female",
             },
             added.Select(g => g.Name).ToArray());
         Assert.Equal(new[] { 6, 7, 8, 9, 10, 11 }, added.Select(g => Json.GetInt(g.Node["Priority"], 0)).ToArray());
@@ -157,7 +200,7 @@ internal static class TextureFanOutTests
         Assert.Equal("base.tex", Json.GetString(toggle.Containers[0].Files![FaceBase.Replace("f0001", "f0002")]));
 
         // An option group: copied with the options that hold the source's paths, and its default.
-        var makeup = added[4];
+        var makeup = added[5];
         Assert.Equal("Single", makeup.Type);
         Assert.Equal(new[] { "-", "Red", "Blue" }, makeup.Options.Select(o => Json.GetString(o["Name"])).ToArray());
         Assert.Equal(2, Json.GetInt(makeup.Node["DefaultSettings"], -1));
@@ -165,7 +208,7 @@ internal static class TextureFanOutTests
         Assert.Equal(2, makeup.Containers[1].Files!.Count); // Face 2 and Face 3 alike
         Assert.Equal(0, makeup.Containers[0].Files!.Count);
 
-        var extras = added[2];
+        var extras = added[1];
         Assert.Equal(new[] { "Scar" }, extras.Options.Select(o => Json.GetString(o["Name"])).ToArray());
         Assert.Equal(1, Json.GetInt(extras.Node["DefaultSettings"], 0));
         Assert.Equal(4, Json.GetInt(extras.Containers[0].Node["Priority"], 0));
@@ -282,6 +325,34 @@ internal static class TextureFanOutTests
             {"FileVersion":4,"Name":"Skin","DefaultData":{"Files":{"{{{SkinMtrl}}}":"m/skin.mtrl"} } }
             """);
         Assert.Equal(new[] { "Material" }, Names(CustomizationDetection.Affected(PenumbraMod.Load(mod.Path), mod.Path, Skin(201))));
+    }
+
+    private static void UnreadableMaterialOnce()
+    {
+        using var mod = SkinWithMaterial();
+        mod.File("m/skin.mtrl", [1, 2, 3]); // not a material
+        var plan = new TextureFanOutPlanner(new FakeGame()).Plan(mod.Path,
+            Request(Skin(201), TextureFanOutLayout.AddPathsToOptions, true, Skin(1401), Skin(1801)));
+        Assert.Equal(1, plan.Diagnostics.Count(d => d.Code == "material_unreadable"));
+        Assert.True(!plan.HasBlockers, "the material is shared unchanged instead");
+        Assert.Equal("m/skin.mtrl", Json.GetString(plan.Result.Default.Files![SkinMtrl.Replace("c0201", "c1801")]));
+    }
+
+    /// <summary>
+    /// An applied plan stays on screen as the record of what was done; the bytes it wrote do not
+    /// stay with it.
+    /// </summary>
+    private static void ReleasesContents()
+    {
+        using var mod = SkinWithMaterial();
+        var plan = new TextureFanOutPlanner(new FakeGame()).Plan(mod.Path,
+            Request(Skin(201), TextureFanOutLayout.AddPathsToOptions, true, Skin(1401)));
+        Assert.True(plan.Files.Any(f => f.Content != null), "the plan carries the material copy it writes");
+        var written = plan.Files.Select(f => (f.Operation, f.Source, f.Destination)).ToList();
+
+        plan.ReleaseContents();
+        Assert.True(plan.Files.All(f => f.Content == null), "nothing is kept once written");
+        Assert.Equal(written, plan.Files.Select(f => (f.Operation, f.Source, f.Destination)).ToList());
     }
 
     private static TempDir SkinWithMaterial()

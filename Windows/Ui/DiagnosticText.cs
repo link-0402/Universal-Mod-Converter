@@ -24,14 +24,17 @@ internal static class DiagnosticText
         ["invalid_pap"]            = "Animation file unreadable",
         ["missing_local_file"]     = "File missing from the mod",
         ["file_swap"]              = "File swap not converted",
+        ["facial_swap_only"]       = "Faces can only be swapped",
+        ["no_game_face"]           = "No game face there",
+        ["no_face_timeline"]       = "Face plays at the game's pace",
+        ["timeline_swap_failed"]   = "Timeline could not be swapped",
 
         // Animations: option groups
-        ["slot_options_in_group"]  = "Slots chosen in the existing group",
-        ["slot_options_combining"] = "Combining group cannot be split",
-        ["slot_options_too_many"]  = "Too many options for the group",
         ["duplicate_option"]       = "Two options share a name",
         ["empty_option"]           = "Empty option",
         ["group_name"]             = "Group name needed",
+        ["group_in_place"]         = "Option group cannot replace",
+        ["several_sources"]        = "Choose which version",
 
         // Animations: retargeting
         ["authored_race"]          = "Built for another race",
@@ -69,6 +72,19 @@ internal static class DiagnosticText
         ["tail_bones_on_ear"]      = "Tail bones on an ear",
         ["pbd_missing"]            = "Race data missing",
         ["pbd_invalid"]            = "Race data invalid",
+        ["accessory_skin_material"] = "Body materials on an accessory",
+        ["unused_material_kept"]   = "Unused material kept",
+
+        // Skin and face retextures
+        ["not_fan_out"]            = "No longer a retexture",
+        ["invalid_target"]         = "Invalid target",
+        ["no_targets"]             = "Nothing ticked",
+        ["path_exists"]            = "Already in the mod",
+        ["uncopyable_group"]       = "Group cannot be copied",
+        ["too_many_options"]       = "Too many options",
+        ["material_missing"]       = "Material file missing",
+        ["material_texture_missing"] = "Texture not found for a target",
+        ["material_unreadable"]    = "Material unreadable",
 
         // Adding to a mod
         ["additive_shared_path"]         = "Shared with the original",
@@ -81,11 +97,11 @@ internal static class DiagnosticText
 
         // Expressions
         ["no_expression"]                = "No expression chosen",
-        ["expression_additive"]          = "Expression needs a new or edited mod",
         ["expression_missing"]           = "Expression not found",
-        ["expression_unavailable"]       = "Expressions unavailable",
         ["expression_failed"]            = "Expression could not be attached",
         ["expression_note"]              = "Expression",
+        ["expression_from_mod"]          = "Face from another mod",
+        ["expression_race_missing"]      = "No face for a race",
 
         // Output safety
         ["destination_collision"]  = "Two files want the same path",

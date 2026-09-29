@@ -54,11 +54,35 @@ public sealed class ConversionHistoryService(Configuration configuration)
                   "so this conversion can no longer be undone."
                 : "The backup of the original is missing, so this conversion can no longer be undone.";
         // Reverting an older conversion of this mod would silently discard every later one.
-        var latest = configuration.History.FirstOrDefault(r =>
-            r.Mode.EditsSourceMod() && !r.IsReverted &&
-            string.Equals(r.SourceModDirectory, record.SourceModDirectory, StringComparison.OrdinalIgnoreCase));
+        var latest = configuration.History.FirstOrDefault(r => IsLiveInPlace(r, record.SourceModDirectory));
         return latest == record ? null : "A later in-place conversion of this mod must be reverted first.";
     }
+
+    /// <summary>
+    /// Whether <paramref name="record"/> can be reverted now, or once the later in-place
+    /// conversions of the same mod have been. Its backup then still holds the way back to the
+    /// original, however many conversions were stacked on top of it.
+    /// </summary>
+    public bool CanStillRevert(ConversionRecord record)
+    {
+        if (RevertBlockReason(record) == null) return true;
+        if (record.IsReverted || !record.Mode.EditsSourceMod() || !HasBackup(record) ||
+            !Directory.Exists(record.PublishedPath))
+            return false;
+
+        // History is newest first: every later conversion of this mod must be revertable too.
+        return configuration.History
+            .TakeWhile(r => r != record)
+            .Where(r => IsLiveInPlace(r, record.SourceModDirectory))
+            .All(HasBackup);
+    }
+
+    private static bool IsLiveInPlace(ConversionRecord record, string sourceModDirectory)
+        => record.Mode.EditsSourceMod() && !record.IsReverted &&
+           string.Equals(record.SourceModDirectory, sourceModDirectory, StringComparison.OrdinalIgnoreCase);
+
+    private static bool HasBackup(ConversionRecord record)
+        => !string.IsNullOrEmpty(record.RecoveryPath) && Directory.Exists(record.RecoveryPath);
 
     /// <summary>
     /// Performs the file moves for a revert. Safe to call off the framework thread; the caller
@@ -75,7 +99,7 @@ public sealed class ConversionHistoryService(Configuration configuration)
 
         var name     = Path.GetFileName(published);
         var parked   = Path.Combine(ModConverterService.BackupRoot(parent, configuration.BackupDirectory),
-            $"{name}-reverted-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}");
+            BackupRetention.FolderName($"{name}-reverted", DateTime.UtcNow, Guid.NewGuid().ToString("N")));
         var moved    = false;
         try
         {

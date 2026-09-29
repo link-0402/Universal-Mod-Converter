@@ -9,7 +9,107 @@ internal static class ModMergerTests
     [
         ("Merging modpacks: the top pack wins every overlap", TopPackWins),
         ("Merging modpacks: a group of each pack keeps its own IDs", DuplicateIdsAreReplaced),
+        ("Merging modpacks: a renamed file never stands in for one of the same new name", RenamedFileKeepsItsSource),
+        ("Merging modpacks: merged groups keep IDs every condition can find, and the top pack's options win", MergedGroupIds),
     ];
+
+    /// <summary>
+    /// A merged group keeps the lower pack's IDs, which its conditions refer to, and a condition
+    /// of the top pack that named its own copy is pointed at the merged one: every reference must
+    /// still resolve, or Penumbra refuses the mod. Options the top pack adds to a multi-select
+    /// group win where both packs' are on, and start on when they did in their own pack.
+    /// </summary>
+    private static void MergedGroupIds()
+    {
+        using var baseMod = new TempDir();
+        using var overlay = new TempDir();
+        const string baseImc = "aaaaaaaa-0000-0000-0000-000000000001", baseImcOption = "aaaaaaaa-0000-0000-0000-000000000002";
+        const string topImc = "bbbbbbbb-0000-0000-0000-000000000001", topImcOption = "bbbbbbbb-0000-0000-0000-000000000002";
+        const string baseExtras = "aaaaaaaa-0000-0000-0000-000000000003", topExtras = "bbbbbbbb-0000-0000-0000-000000000003";
+        const string imc = """
+            "Identifier":{"PrimaryId":100,"SecondaryId":0,"Variant":1,"ObjectType":"Equipment","EquipSlot":"Body","BodySlot":"Unknown"}
+            """;
+
+        baseMod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Base","Groups":[
+              {"Type":"Imc","Id":"{{{baseImc}}}","Name":"Parts",{{{imc}}},
+               "DefaultEntry":{"MaterialId":1,"DecalId":0,"VfxId":0,"MaterialAnimationId":0,"AttributeMask":0,"SoundId":0},
+               "Options":[{"Id":"{{{baseImcOption}}}","Name":"Hood","AttributeMask":1}]},
+              {"Type":"Multi","Id":"{{{baseExtras}}}","Name":"Extras","DefaultSettings":1,"Options":[
+                {"Name":"Glow","Files":{"{{{Texture}}}":"t\\glow.tex"},
+                 "Condition":{"Group":"{{{baseImc}}}","Options":["{{{baseImcOption}}}"]} } ] } ] }
+            """);
+        baseMod.File("t/glow.tex", "glow"u8.ToArray());
+        overlay.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Top","Groups":[
+              {"Type":"Imc","Id":"{{{topImc}}}","Name":"Parts",{{{imc}}},
+               "DefaultEntry":{"MaterialId":2,"DecalId":0,"VfxId":0,"MaterialAnimationId":0,"AttributeMask":0,"SoundId":0},
+               "Options":[{"Id":"{{{topImcOption}}}","Name":"Hood","AttributeMask":1}]},
+              {"Type":"Multi","Id":"{{{topExtras}}}","Name":"Extras","DefaultSettings":2,"Options":[
+                {"Name":"Glow","Files":{} },
+                {"Name":"Shine","Files":{"{{{Texture}}}":"t\\shine.tex"},
+                 "Condition":{"Group":"{{{topImc}}}","Options":["{{{topImcOption}}}"],"Parent":"{{{topExtras}}}"} } ] } ] }
+            """);
+        overlay.File("t/shine.tex", "shine"u8.ToArray());
+
+        var result = ModMerger.Plan(baseMod.Path, overlay.Path, "Merged").Result;
+        var parts = result.Groups.Single(g => g.Name == "Parts");
+        Assert.Equal(baseImc, Json.GetString(parts.Node["Id"]));
+        Assert.Equal(baseImcOption, Json.GetString(parts.Options.First()["Id"]));
+        Assert.Equal(2, Json.GetInt(parts.Node["DefaultEntry"]?["MaterialId"], 0));
+
+        var ids = result.Groups.SelectMany(g => g.Options.Select(o => Json.GetString(o["Id"])).Append(Json.GetString(g.Node["Id"])))
+            .OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var extras = result.Groups.Single(g => g.Name == "Extras");
+        foreach (var option in extras.Options)
+            foreach (var reference in option["Condition"]?.AsObject().Select(p => p.Value)
+                         .SelectMany(v => v is JsonArray a ? a.Select(x => Json.GetString(x)) : [Json.GetString(v)]) ?? [])
+                Assert.True(reference != null && ids.Contains(reference), $"'{Json.GetString(option["Name"])}' refers to {reference}, which is gone");
+
+        var names = extras.Options.Select(o => Json.GetString(o["Name"])).ToArray();
+        Assert.Equal(new[] { "Glow", "Shine" }, names);
+        var priorities = extras.Options.Select(o => Json.GetInt(o["Priority"], 0)).ToArray();
+        Assert.True(priorities[1] > priorities[0],
+            "the top pack's option wins where both are on");
+        Assert.True(Json.TryGetULong(extras.Node["DefaultSettings"], out var defaults) && defaults == 0b11,
+            $"Glow stays on and Shine starts on as it did in its own pack: {extras.Node["DefaultSettings"]}");
+    }
+
+    /// <summary>
+    /// A file of the top pack that clashes with the base's is renamed, here to <c>a_2.tex</c>.
+    /// When the top pack has a file of that name as well, it must be compared with the renamed
+    /// file's own bytes, not with itself, or it is taken for a copy and never written.
+    /// </summary>
+    private static void RenamedFileKeepsItsSource()
+    {
+        using var baseMod = new TempDir();
+        using var overlay = new TempDir();
+        const string first = "chara/equipment/e0100/texture/v01_c0101e0100_top_d.tex";
+        const string second = "chara/equipment/e0100/texture/v01_c0101e0100_top_n.tex";
+
+        baseMod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Base","DefaultData":{"Files":{"{{{first}}}":"t\\a.tex"} } }
+            """);
+        baseMod.File("t/a.tex", "base a"u8.ToArray());
+        overlay.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Top","DefaultData":{"Files":{"{{{first}}}":"t\\a.tex"}},
+             "Groups":[{"Name":"Normals","Type":"Single","Options":[{"Name":"On","Files":{"{{{second}}}":"t\\a_2.tex"}}]}]}
+            """);
+        overlay.File("t/a.tex", "top a"u8.ToArray());
+        overlay.File("t/a_2.tex", "top a_2"u8.ToArray());
+
+        var plan = ModMerger.Plan(baseMod.Path, overlay.Path, "Merged");
+        var firstLocal = Json.GetString(plan.Result.Default.Files![first])!;
+        var secondLocal = Json.GetString(plan.Result.Groups.Single(g => g.Name == "Normals").Containers[0].Files![second])!;
+        Assert.True(!string.Equals(firstLocal, secondLocal, StringComparison.OrdinalIgnoreCase),
+            $"two different files share {firstLocal}");
+        Assert.Equal(0, plan.SharedFiles);
+
+        string CopiedFrom(string local) => plan.Copies
+            .Single(c => string.Equals(c.Destination, local, StringComparison.OrdinalIgnoreCase)).SourceLocal;
+        Assert.Equal("t\\a.tex", CopiedFrom(firstLocal));
+        Assert.Equal("t\\a_2.tex", CopiedFrom(secondLocal));
+    }
 
     private const string Model = "chara/equipment/e0100/model/c0101e0100_top.mdl";
     private const string Material = "chara/equipment/e0100/material/v0001/mt_c0101e0100_top_a.mtrl";

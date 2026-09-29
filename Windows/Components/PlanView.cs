@@ -108,8 +108,8 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
             Widgets.ColoredWrapped(Theme.Danger, task.ErrorMessage);
             ImGui.Spacing();
         }
-        Widgets.MutedWrapped("Preview the conversion to see every path, reference and metadata entry it changes. " +
-                             "Nothing is written until you apply it.");
+        Widgets.MutedWrapped("Add a conversion to the plan and it is previewed here: every path, reference and metadata " +
+                             "entry it changes. Nothing is written until you apply it.");
     }
 
     private void DrawHeader(ConversionTask task)
@@ -139,14 +139,18 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         }
 
         var kind = task.TargetCustomizationKind is { } targetKind && targetKind != task.Kind
-            ? $"{task.Kind} → {targetKind}"
-            : task.Kind.ToString();
+            ? $"{KindName(task.Kind)} → {KindName(targetKind)}"
+            : KindName(task.Kind);
         var race = task.SourceGenderRace.HasValue || task.TargetGenderRace.HasValue
             ? $"   {RaceNames.Describe(task.SourceGenderRace ?? 0)} → {RaceNames.Describe(task.TargetGenderRace ?? 0)}"
             : string.Empty;
         ImGui.TextColored(Theme.Accent, $"{kind}: {task.OldIdPadded} → {task.NewIdPadded}{race}");
         DrawBadges(task);
     }
+
+    /// <summary>What the rest of the window calls a kind: "Skin", not the enum's "Body".</summary>
+    private static string KindName(AssetKind kind)
+        => CustomizationKinds.TryGet(kind, out var descriptor) ? descriptor.DisplayName : kind.ToString();
 
     private void DrawBadges(ConversionTask task)
     {
@@ -156,7 +160,12 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         else if (session.PlanIsCurrent)
             Widgets.Badge("Up to date", Theme.Info);
         else
-            Widgets.Badge("Outdated: preview again", Theme.Warning);
+        {
+            // The preview follows the plan by itself; it only stays outdated while it cannot run.
+            var waiting = session.PreviewBlockReason;
+            Widgets.Badge(waiting == null ? "Updating…" : "Outdated", Theme.Warning);
+            Widgets.Tooltip(waiting);
+        }
 
         ImGui.SameLine();
         Widgets.Badge(OutputModeBadge(task.OutputMode), Theme.Muted);
@@ -316,20 +325,12 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         var changes = new List<GearPlanChange>();
         var files   = new List<PlannedFileOperation>();
         var gear    = false;
-        foreach (var entry in task.Entries.Where(e => !e.Rejected && e.Plan != null))
+        foreach (var entry in task.Entries.Where(e => !e.Rejected))
         {
-            switch (entry.Plan)
-            {
-                case GearConversionPlan plan:
-                    gear = true;
-                    changes.AddRange(plan.Changes.Select(c => c with { Scope = $"{entry.Description} · {c.Scope}" }));
-                    files.AddRange(plan.Files);
-                    break;
-                case AnimationConversionPlan animation:
-                    changes.AddRange(animation.Changes.Select(c => c with { Scope = $"{entry.Description} · {c.Scope}" }));
-                    files.AddRange(animation.Files);
-                    break;
-            }
+            if (entry.Plan is not ModFilePlan plan) continue;
+            gear |= plan is GearConversionPlan;
+            changes.AddRange(plan.Changes.Select(c => c with { Scope = $"{entry.Description} · {c.Scope}" }));
+            files.AddRange(plan.Files);
         }
 
         // Animation categories are a subset of the gear ones plus two of their own, so a mixed
@@ -370,8 +371,8 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
 
         return
         [
-            new Section("File renames", ["Type", "From", "To"], [Cell.Muted, Cell.From, Cell.To],
-                task.PlannedRenames.Select(r => new[] { r.IsDir ? "Folder" : "File", Rel(r.OldPath), Rel(r.NewPath) }).ToList()),
+            new Section("File renames", ["From", "To"], [Cell.From, Cell.To],
+                task.PlannedRenames.Select(r => new[] { Rel(r.OldPath), Rel(r.NewPath) }).ToList()),
             new Section("Metadata", ["File", "Kind", "Field", "From", "To"], [Cell.Accent, Cell.Muted, Cell.Muted, Cell.From, Cell.To],
                 task.PlannedJsonChanges.SelectMany(j => j.Changes.Select(c => new[]
                     { Rel(j.FilePath), ChangeTypeLabel(c.ChangeType), c.JsonPath, c.OldValue, c.NewValue })).ToList()),
@@ -396,10 +397,8 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
 
     private static string MdlSummary(PlannedMdlChange mdl)
     {
-        var summary = mdl.GeometryConverted
-            ? $"v{mdl.Version}  c{mdl.SourceGenderRace:D4} → c{mdl.TargetGenderRace:D4}  ·  {mdl.LodCount} LOD, " +
-              $"{mdl.MeshCount} meshes, {mdl.VertexCount} vertices, {mdl.ShapeVertexCount} shape vertices"
-            : $"v{mdl.Version}  string table rebuilt ({mdl.PathReplacements.Count} path replacements)";
+        var summary = $"v{mdl.Version}  c{mdl.SourceGenderRace:D4} → c{mdl.TargetGenderRace:D4}  ·  {mdl.LodCount} LOD, " +
+                      $"{mdl.MeshCount} meshes, {mdl.VertexCount} vertices, {mdl.ShapeVertexCount} shape vertices";
         var heuristic = mdl.BoneResolutions.Count(r => r.Strategy != BoneResolutionStrategy.Identity);
         return heuristic > 0 ? $"{summary}  ·  {heuristic} bone(s) inherited/heuristic" : summary;
     }

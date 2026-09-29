@@ -10,7 +10,32 @@ internal static class MeshPartTests
         ("Mesh groups list their parts", DescribeParts),
         ("Removing a part hides only its triangles and moves nothing", RemovePart),
         ("The preview hides removed groups and parts in place", HideRemoved),
+        ("A removed part stays hidden while a shape is on", ShapesStayHidden),
     ];
+
+    /// <summary>
+    /// A shape replaces index-buffer entries with vertices of its own. Aimed at a removed part,
+    /// it is pointed at the part's collapsed vertex, so the part cannot come back with the shape.
+    /// The test model's one shape value replaces the first entry of group 1, which its part 0 holds.
+    /// </summary>
+    private static void ShapesStayHidden()
+    {
+        var input = TestAssets.CreateMultiMeshMdl(["/mt_a.mtrl", "/mt_b.mtrl"], shapeMesh: 1, partsPerMesh: 2);
+        Assert.Equal((ushort)1, MdlFile.Read(input).ShapeValues.Single().ReplacementVertexIndex);
+
+        var other = MdlMeshGroups.Remove(input, new MeshRemoval([], 2, [new MeshPartRef(1, 1)]));
+        Assert.Equal((ushort)1, MdlFile.Read(other).ShapeValues.Single().ReplacementVertexIndex);
+
+        foreach (var output in new[]
+                 {
+                     MdlMeshGroups.Remove(input, new MeshRemoval([], 2, [new MeshPartRef(1, 0)])),
+                     MdlMeshGroups.Hide(input, new MeshRemoval([], 2, [new MeshPartRef(1, 0)])),
+                 })
+        {
+            Assert.Equal(input.Length, output.Length);
+            Assert.Equal(Indices(output)[6], MdlFile.Read(output).ShapeValues.Single().ReplacementVertexIndex);
+        }
+    }
 
     private static byte[] Model() => TestAssets.CreateMultiMeshMdl(["/mt_a.mtrl", "/mt_b.mtrl"], partsPerMesh: 2);
 

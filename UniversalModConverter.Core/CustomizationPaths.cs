@@ -78,19 +78,16 @@ public static class CustomizationTargets
 
 public static class CustomizationKinds
 {
-    private static readonly ImmutableArray<ushort> AllPlayable =
-        Enumerable.Range(1, 18).Select(index => (ushort)(index * 100 + 1)).ToImmutableArray();
-
     private static readonly ImmutableDictionary<AssetKind, CustomizationKindDescriptor> Descriptors =
         new[]
         {
-            new CustomizationKindDescriptor(AssetKind.Hair, "Hair", "hair", 'h', true, AllPlayable),
-            new CustomizationKindDescriptor(AssetKind.Face, "Face", "face", 'f', true, AllPlayable),
+            new CustomizationKindDescriptor(AssetKind.Hair, "Hair", "hair", 'h', true, GenderRaces.Playable),
+            new CustomizationKindDescriptor(AssetKind.Face, "Face", "face", 'f', true, GenderRaces.Playable),
             new CustomizationKindDescriptor(AssetKind.Tail, "Tail", "tail", 't', false,
                 [701, 801, 1301, 1401, 1501, 1601]),
             new CustomizationKindDescriptor(AssetKind.VieraEar, "Viera Ear", "zear", 'z', false,
                 [1701, 1801]),
-            new CustomizationKindDescriptor(AssetKind.Body, "Skin", "body", 'b', false, AllPlayable),
+            new CustomizationKindDescriptor(AssetKind.Body, "Skin", "body", 'b', false, GenderRaces.Playable),
         }.ToImmutableDictionary(descriptor => descriptor.Kind);
 
     public static IEnumerable<CustomizationKindDescriptor> All => Descriptors.Values;

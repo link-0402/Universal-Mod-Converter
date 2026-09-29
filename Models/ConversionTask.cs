@@ -26,14 +26,26 @@ public class ConversionTask
     /// <summary>Texture fan-outs only: the complete plan.</summary>
     public TextureFanOutPlan? TexturePlan { get; set; }
 
+    /// <summary>
+    /// The plan written as file operations: the run's, or the one conversion's. Null for hair,
+    /// face, tail and ear conversions, which patch the mod's files instead.
+    /// </summary>
+    public IModFilePlan? FilePlan => (IModFilePlan?)MergedPlan ?? GearPlan ?? AnimationPlan ?? (IModFilePlan?)TexturePlan;
+
+    /// <summary>Lets go of what the plan wrote once it is written; see <see cref="IModFilePlan.ReleaseContents"/>.</summary>
+    public void ReleaseContents()
+    {
+        FilePlan?.ReleaseContents();
+        for (var i = 0; i < PlannedGeneratedFiles.Count; i++)
+            PlannedGeneratedFiles[i] = PlannedGeneratedFiles[i] with { Data = [] };
+    }
+
     /// <summary>Target customization kind; null means the same kind as <see cref="Kind"/>.</summary>
     public AssetKind? TargetCustomizationKind { get; set; }
 
     public ushort? SourceGenderRace { get; set; }
 
     public ushort? TargetGenderRace { get; set; }
-
-    public string SourceRoot { get; set; } = string.Empty;
 
     public string SourceFingerprint { get; set; } = string.Empty;
 
@@ -62,9 +74,6 @@ public class ConversionTask
 
     /// <summary>Zero-padded target item ID string (e.g. "0200").</summary>
     public string NewIdPadded { get; set; } = string.Empty;
-
-    /// <summary>When true, slot-specific filename filtering is skipped.</summary>
-    public bool IgnoreSlot { get; set; } = false;
 
     /// <summary>
     /// For accessory cross-slot conversion: the output slot.
@@ -133,6 +142,17 @@ public class ConversionTask
     public bool IsQueue => Entries.Count > 0;
 
     /// <summary>
+    /// Every gear conversion the plan holds, with the description the run gives it: the one
+    /// conversion (with an empty description), or each accepted conversion of a run.
+    /// </summary>
+    public IEnumerable<(string Description, GearConversionPlan Plan)> GearConversions()
+    {
+        if (GearPlan is { } plan) yield return (string.Empty, plan);
+        foreach (var entry in Entries)
+            if (!entry.Rejected && entry.Plan is GearConversionPlan gear) yield return (entry.Description, gear);
+    }
+
+    /// <summary>
     /// A fresh task with the same inputs and nothing planned. A plan entry keeps its task as
     /// the record of what was chosen; each preview plans a copy, so the view never mistakes a
     /// re-planned task for the one it already drew.
@@ -152,7 +172,6 @@ public class ConversionTask
             Slot                    = Slot,
             OldIdPadded             = OldIdPadded,
             NewIdPadded             = NewIdPadded,
-            IgnoreSlot              = IgnoreSlot,
             TargetSlot              = TargetSlot,
             TargetVariant           = TargetVariant,
             SourceVariant           = SourceVariant,
@@ -167,13 +186,11 @@ public class ConversionTask
     public string? ErrorMessage { get; set; }
 }
 
-/// <summary>A single file or directory rename.</summary>
+/// <summary>A single file rename.</summary>
 public class PlannedRename
 {
     public string OldPath   { get; set; } = string.Empty;
     public string NewPath   { get; set; } = string.Empty;
-    public bool   IsDir     { get; set; } = false;
-    public bool   Selected  { get; set; } = true;
 }
 
 /// <summary>A collection of field-level changes inside a single JSON file.</summary>
@@ -181,7 +198,6 @@ public class PlannedJsonChange
 {
     public string FilePath   { get; set; } = string.Empty;
     public List<JsonFieldChange> Changes { get; } = new();
-    public bool Selected { get; set; } = true;
 }
 
 /// <summary>One field replacement within a JSON file.</summary>
@@ -191,7 +207,6 @@ public class JsonFieldChange
     public string OldValue  { get; set; } = string.Empty;
     public string NewValue  { get; set; } = string.Empty;
     public string ChangeType{ get; set; } = string.Empty; // "path_key", "path_value", "numeric_id"
-    public bool   Selected  { get; set; } = true;
 }
 
 /// <summary>A binary resource with planned path replacements; MDL/MTRL string tables are rebuilt.</summary>
@@ -199,10 +214,6 @@ public class PlannedBinaryPatch
 {
     public string FilePath   { get; set; } = string.Empty;
     public List<BinaryStringPatch> Patches { get; } = new();
-    public bool Selected { get; set; } = true;
-
-    /// <summary>True when patches were derived from complete resource-path strings.</summary>
-    public bool IsStructured { get; set; }
 }
 
 /// <summary>A game dependency captured during preview for deterministic publication.</summary>
@@ -222,11 +233,9 @@ public sealed class PlannedMdlChange
     public int MeshCount { get; set; }
     public int VertexCount { get; set; }
     public int ShapeVertexCount { get; set; }
-    public bool GeometryConverted { get; set; }
     public RacialDeformationPlan? DeformationPlan { get; set; }
     public List<BoneResolution> BoneResolutions { get; } = new();
     public List<BinaryStringPatch> PathReplacements { get; } = new();
-    public bool Selected { get; set; } = true;
 }
 
 /// <summary>One ASCII string replacement within a binary file.</summary>
@@ -234,7 +243,6 @@ public class BinaryStringPatch
 {
     public string OldString { get; set; } = string.Empty;
     public string NewString { get; set; } = string.Empty;
-    public bool   Selected  { get; set; } = true;
 }
 
 /// <summary>A remaining reference to the old item found after conversion.</summary>

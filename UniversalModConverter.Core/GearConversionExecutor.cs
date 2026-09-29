@@ -1,13 +1,5 @@
 namespace UniversalModConverter.Core;
 
-/// <summary>A plan that is written as file operations plus a complete mod definition.</summary>
-public interface IModFilePlan
-{
-    PenumbraMod Result { get; }
-    IReadOnlyList<PlannedFileOperation> Files { get; }
-    bool HasBlockers { get; }
-}
-
 /// <summary>Writes a <see cref="GearConversionPlan"/> (or any <see cref="IModFilePlan"/>) to disk.</summary>
 public static class GearConversionExecutor
 {
@@ -127,7 +119,7 @@ public static class GearConversionVerifier
 
         bool Exists(string path) => files.ContainsKey(path) || swaps.ContainsKey(path) || game.FileExists(path);
 
-        IEnumerable<byte[]> Contents(string path)
+        IEnumerable<byte[]> Contents(string path, int depth = 0)
         {
             if (files.TryGetValue(path, out var locals))
                 foreach (var local in locals)
@@ -136,8 +128,17 @@ public static class GearConversionVerifier
                     if (File.Exists(full)) yield return File.ReadAllBytes(full);
                     else issues.Add(new VerificationIssue(true, $"{local} (for {path}) does not exist."));
                 }
-            else if (swaps.TryGetValue(path, out var swapped) && game.ReadFile(swapped) is { } swappedBytes)
-                yield return swappedBytes;
+            else if (swaps.TryGetValue(path, out var swapped) && depth < 8)
+            {
+                // A swap loads what its target resolves to, the mod's own file before the game's.
+                var found = false;
+                foreach (var bytes in Contents(swapped, depth + 1))
+                {
+                    found = true;
+                    yield return bytes;
+                }
+                if (!found && game.ReadFile(path) is { } original) yield return original;
+            }
             else if (game.ReadFile(path) is { } vanilla)
                 yield return vanilla;
         }

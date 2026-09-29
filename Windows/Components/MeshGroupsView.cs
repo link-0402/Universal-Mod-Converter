@@ -16,9 +16,10 @@ using Dalamud.Interface.Utility.Raii;
 namespace UniversalModConverter.Windows.Components;
 
 /// <summary>
-/// The mesh groups of every model the output ships for the target item, with a Keep
+/// The mesh groups of every model the output ships for the target items, with a Keep
 /// checkbox per group. Models with the same layout (normally the race versions of one
-/// model) form a family and are edited together.
+/// model) form a family and are edited together. A run of several gear conversions lists
+/// each under its own heading, with the same rules a single conversion follows.
 /// </summary>
 internal sealed partial class MeshGroupsView(ConverterSession session, Plugin plugin)
 {
@@ -26,14 +27,17 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
 
     private sealed record Family(string Title, List<GearOutputModel> Models);
 
+    /// <summary>One gear conversion of the plan: its editable models as families, and those it cannot edit.</summary>
+    private sealed record Section(string Title, GearConversionRequest Conversion, List<Family> Families,
+        List<GearOutputModel> ReadOnly);
+
     [GeneratedRegex(@"c\d{4}", RegexOptions.CultureInvariant)]
     private static partial Regex RaceCodeRegex();
 
     private ConversionTask? _builtFor;
-    private List<Family> _families = new();
-    private List<GearOutputModel> _readOnly = new();
+    private List<Section> _sections = new();
 
-    /// <summary>Mesh groups whose parts are listed, by family and group index.</summary>
+    /// <summary>Mesh groups whose parts are listed, by family (counted over every section) and group index.</summary>
     private readonly HashSet<(int Family, int Group)> _expanded = [];
 
 
@@ -45,37 +49,64 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         var task = session.Task;
         if (!task.IsPlanned)
         {
-            Widgets.MutedWrapped("Preview the conversion to see the mesh groups of the converted models.");
+            Widgets.MutedWrapped("Add a gear or facewear conversion to the plan to see the mesh groups of the converted models.");
             return;
         }
-        if (task.GearPlan is not { } plan)
+        var conversions = task.GearConversions().ToList();
+        if (conversions.Count == 0)
         {
             Widgets.MutedWrapped("Mesh groups can be edited for gear and facewear conversions.");
             return;
         }
 
-        if (GearSlots.CrossSlotNote(plan.Request.Source.Slot, plan.Request.Target.Slot) is { } note)
-            DrawCrossSlotNotice(plan.Request.Source.Slot, plan.Request.Target.Slot, note);
+        // A single conversion says what changing slots does up front; a run says it under each conversion.
+        var single = conversions.Count == 1;
+        if (single && CrossSlotNote(conversions[0].Plan.Request) is { } note)
+            DrawCrossSlotNotice(conversions[0].Plan.Request.Source.Slot, conversions[0].Plan.Request.Target.Slot, note);
 
         if (task.OutputModels.Count == 0)
         {
-            Widgets.MutedWrapped("The output contains no model for the target item.");
+            Widgets.MutedWrapped(single
+                ? "The output contains no model for the target item."
+                : "The output contains no model for the target items.");
             return;
         }
 
-        EnsureFamilies(task);
+        EnsureSections(task, conversions);
         Widgets.MutedWrapped("Untick a mesh group to leave it out of the converted model, or open it with the arrow to " +
                              "keep or remove its parts one by one. Models with the same layout (usually the race versions " +
-                             "of one model) are edited together. The source mod is never changed.");
-        DrawPreviewControls(plan.Request.Source, task.OutputModels.Where(m => m.Editable).ToList());
+                             "of one model) are edited together. Only the converted models change.");
+        DrawPreviewControls();
         if (session.MeshEditBlockReason is { } reason)
             Widgets.ColoredWrapped(Theme.Warning, reason);
         ImGui.Spacing();
 
-        for (var i = 0; i < _families.Count; i++)
-            DrawFamily(i, _families[i]);
+        var family = 0;
+        for (var s = 0; s < _sections.Count; s++)
+        {
+            var section = _sections[s];
+            using var id = ImRaii.PushId(s);
+            if (!single)
+            {
+                ImGui.Spacing();
+                ImGui.TextColored(Theme.Accent, section.Title);
+                if (CrossSlotNote(section.Conversion) is { } sectionNote)
+                    DrawCrossSlotNotice(section.Conversion.Source.Slot, section.Conversion.Target.Slot, sectionNote);
+                if (section.Families.Count == 0 && section.ReadOnly.Count == 0)
+                    Widgets.MutedWrapped("This conversion ships no model for its target item.");
+            }
 
-        foreach (var model in _readOnly)
+            foreach (var entry in section.Families) DrawFamily(family++, entry);
+            DrawReadOnly(section.ReadOnly);
+        }
+    }
+
+    private static string? CrossSlotNote(GearConversionRequest conversion)
+        => GearSlots.CrossSlotNote(conversion.Source.Slot, conversion.Target.Slot);
+
+    private static void DrawReadOnly(List<GearOutputModel> models)
+    {
+        foreach (var model in models)
         {
             Widgets.Icon(FontAwesomeIcon.Lock, Theme.Muted);
             ImGui.SameLine();
@@ -287,18 +318,15 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
     }
 
     /// <summary>
-    /// The switch for the on-character preview and a button that puts the original item on the
-    /// character. The preview only runs while that item is worn: on anything else the redrawn
-    /// model would not be the one the rows describe.
+    /// The switch for the on-character preview and, for each conversion's original item, a
+    /// button that puts it on the character. The preview shows the models of the items that are
+    /// worn: on anything else the redrawn model would not be the one the rows describe.
     /// </summary>
-    private void DrawPreviewControls(GearItem source, IReadOnlyList<GearOutputModel> models)
+    private void DrawPreviewControls()
     {
         var config      = plugin.Configuration;
         var enabled     = config.MeshPreviewOnCharacter;
-        var unavailable = preview.UnavailableReason(models);
-        var item        = plugin.GameData.FindItem(source);
-        var name        = item?.Name ?? "the original item";
-        var worn        = plugin.WornGear.Wears(source);
+        var unavailable = preview.UnavailableReason(_sections.SelectMany(EditableModels).ToList());
 
         using (ImRaii.Disabled(unavailable != null))
         {
@@ -311,7 +339,49 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         Widgets.Tooltip(unavailable ?? "While this is on, your character shows the model without the mesh groups and parts " +
                         "you untick, and is redrawn each time you change one.");
 
-        ImGui.SameLine();
+        // A run converts several items; each gets its own button, on a line of its own.
+        var sources = _sections.Select(s => s.Conversion.Source).Distinct().ToList();
+        var worn = sources.ToDictionary(s => s, s => plugin.WornGear.Wears(s));
+        for (var i = 0; i < sources.Count; i++)
+        {
+            using var id = ImRaii.PushId(i);
+            if (i == 0) ImGui.SameLine();
+            DrawEquipButton(sources[i], worn[sources[i]]);
+        }
+
+        if (unavailable != null)
+        {
+            Widgets.MutedWrapped($"The preview is not available: {unavailable}");
+            return;
+        }
+        if (!enabled) return;
+
+        var shown = _sections.Where(s => worn[s.Conversion.Source] != false).ToList();
+        foreach (var source in sources.Where(s => worn[s] == false))
+        {
+            var name = plugin.GameData.FindItem(source)?.Name ?? "the original item";
+            var showing = plugin.WornGear.WornSet(source.Slot) is { } set and not 0
+                ? $" Your character currently shows model {(source.IsAccessory ? 'a' : 'e')}{set:D4} there, not " +
+                  $"{(source.IsAccessory ? 'a' : 'e')}{source.SetId:D4}."
+                : " Your character currently shows nothing there.";
+            Widgets.ColoredWrapped(Theme.Warning, shown.Count == 0
+                ? $"Wear {name} to use the preview. It stays off until you do.{showing}"
+                : $"Wear {name} to see its choices as well.{showing}");
+        }
+        if (shown.Count == 0) return;
+
+        preview.Request(shown.SelectMany(EditableModels).ToList(), session.Task.MeshRemovals);
+        Widgets.MutedWrapped("Your character shows the model without what you untick below, and is redrawn each time " +
+                             "you change a checkbox. Keep the source mod enabled.");
+    }
+
+    private static IEnumerable<GearOutputModel> EditableModels(Section section)
+        => section.Families.SelectMany(f => f.Models);
+
+    private void DrawEquipButton(GearItem source, bool? worn)
+    {
+        var item = plugin.GameData.FindItem(source);
+        var name = item?.Name ?? "the original item";
         var equipBlock = !plugin.Glamourer.IsAvailable ? "Equipping the item needs Glamourer."
             : item == null ? "No game item uses this model."
             : worn == true ? "You are already wearing it."
@@ -319,25 +389,6 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         if (Widgets.IconTextButton(FontAwesomeIcon.Tshirt, $"Equip {name}", equipBlock,
                 "Put the original item on your character with Glamourer. It stays until you change gear."))
             plugin.Glamourer.EquipOnPlayer(source.Slot, item!.RowId, plugin.WornGear.Stains(source.Slot));
-
-        if (unavailable != null)
-            Widgets.MutedWrapped($"The preview is not available: {unavailable}");
-        else if (!enabled)
-            return;
-        else if (worn == false)
-        {
-            var shown = plugin.WornGear.WornSet(source.Slot) is { } set and not 0
-                ? $" Your character currently shows model {(source.IsAccessory ? 'a' : 'e')}{set:D4} there, not " +
-                  $"{(source.IsAccessory ? 'a' : 'e')}{source.SetId:D4}."
-                : " Your character currently shows nothing there.";
-            Widgets.ColoredWrapped(Theme.Warning, $"Wear {name} to use the preview. It stays off until you do.{shown}");
-        }
-        else
-        {
-            preview.Request(models, session.Task.MeshRemovals);
-            Widgets.MutedWrapped("Your character shows the model without what you untick below, and is redrawn each time " +
-                                 "you change a checkbox. Keep the source mod enabled.");
-        }
     }
 
     private static void DrawFamilyDetails(Family family)
@@ -351,17 +402,23 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         Widgets.Tooltip(string.Join("\n", family.Models.SelectMany(m => m.GamePaths.Select(p => $"{p}  ←  {m.Local}"))));
     }
 
-    private void EnsureFamilies(ConversionTask task)
+    private void EnsureSections(ConversionTask task, List<(string Description, GearConversionPlan Plan)> conversions)
     {
         if (ReferenceEquals(task, _builtFor)) return;
         _builtFor = task;
         _expanded.Clear();
-        _readOnly = task.OutputModels.Where(m => !m.Editable).ToList();
-        _families = task.OutputModels
-            .Where(m => m.Editable)
-            .GroupBy(m => string.Join("|", m.Groups.Select(g => $"{RaceCodeRegex().Replace(g.Material, "c####")}:{g.Parts}")))
-            .Select(g => new Family(FamilyTitle(g.ToList()), g.OrderBy(m => m.GenderRace ?? 0).ToList()))
-            .ToList();
+        _sections = conversions.Select(conversion =>
+        {
+            // Families stay within a conversion: another item's models are not the race versions of these.
+            var models = task.OutputModels.Where(m => m.Conversion == conversion.Plan.Request).ToList();
+            var families = models
+                .Where(m => m.Editable)
+                .GroupBy(m => string.Join("|", m.Groups.Select(g => $"{RaceCodeRegex().Replace(g.Material, "c####")}:{g.Parts}")))
+                .Select(g => new Family(FamilyTitle(g.ToList()), g.OrderBy(m => m.GenderRace ?? 0).ToList()))
+                .ToList();
+            return new Section(conversion.Description, conversion.Plan.Request, families,
+                models.Where(m => !m.Editable).ToList());
+        }).ToList();
     }
 
     private static string FamilyTitle(List<GearOutputModel> models)

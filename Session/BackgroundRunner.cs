@@ -22,6 +22,9 @@ public sealed class BackgroundRunner
 
     public TimeSpan Elapsed => _elapsed.Elapsed;
 
+    /// <summary>How many operations have finished, so callers can tell when the disk may have changed.</summary>
+    public int Finished { get; private set; }
+
     /// <summary>
     /// Starts <paramref name="work"/> unless another operation is running. Exactly one of
     /// <paramref name="onDone"/> or <paramref name="onError"/> runs on the framework thread.
@@ -69,5 +72,6 @@ public sealed class BackgroundRunner
     {
         CurrentLabel = null;
         _elapsed.Stop();
+        Finished++;
     }
 }

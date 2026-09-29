@@ -82,33 +82,18 @@ public sealed record RetargetedPap(byte[] Bytes, ImmutableArray<string> Notes);
 /// <summary>A file the plan produces, used to verify the published mod.</summary>
 public sealed record AnimationOutput(string Scope, string GamePath, string Local, string Hash);
 
-public sealed class AnimationConversionPlan : IModFilePlan
+public sealed class AnimationConversionPlan : ModFilePlan
 {
-    internal AnimationConversionPlan(AnimationConversionRequest request, PenumbraMod result)
+    internal AnimationConversionPlan(AnimationConversionRequest request, PenumbraMod result) : base(result)
     {
         Request = request;
-        Result = result;
     }
 
     public AnimationConversionRequest Request { get; }
 
-    public PenumbraMod Result { get; }
-
-    public List<PlannedFileOperation> Files { get; } = [];
-
-    IReadOnlyList<PlannedFileOperation> IModFilePlan.Files => Files;
-
-    public List<GearPlanChange> Changes { get; } = [];
-
-    public List<PlanDiagnostic> Diagnostics { get; } = [];
+    public override ConversionOutputMode Mode => Request.Mode;
 
     public List<AnimationOutput> Outputs { get; } = [];
-
-    public HashSet<string> InputFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
-
-    public bool HasBlockers => Diagnostics.Any(d => d.IsBlocker);
-
-    public string Fingerprint() => ModFingerprint.ComputePlan(Files, Result);
 
     internal static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
 }
@@ -130,6 +115,12 @@ public sealed class AnimationConversionPlan : IModFilePlan
 public sealed class AnimationConversionPlanner(
     IGameFileProvider game, Func<ushort, ushort?> parentRace, IAnimationRetargeter? retargeter)
 {
+    /// <summary>
+    /// The option group an expression added to this mod goes into (numbered when the mod already
+    /// has one): "-" plays the animation without the face, the other option with it.
+    /// </summary>
+    public const string ExpressionGroupName = "Facial expression";
+
     private readonly IGameFileProvider _game = game;
     private readonly Func<ushort, ushort?> _parentRace = parentRace;
     private readonly IAnimationRetargeter? _retargeter = retargeter;
@@ -234,13 +225,15 @@ public sealed class AnimationConversionPlanner(
             }
             if (_plan.HasBlockers) return _plan;
 
-            // Additive mode keeps every source key, so nothing is orphaned to begin with.
+            // Additive mode keeps every source key, so nothing is orphaned to begin with. Each
+            // conversion of a run checks its own sources, once all of them have planned: a file
+            // another conversion still uses stays.
             if (_request.Mode.EditsSourceMod())
-                _context.AddFinalizerOnce("orphans", _ => DeleteOrphans(providers.Select(p => p.Local).Concat(_movedTimelines)));
+                _context.AddFinalizer(_ => DeleteOrphans(providers.Select(p => p.Local).Concat(_movedTimelines)));
             else
                 _context.AddFinalizerOnce("new-mod", mod =>
                 {
-                    ModGroupPruning.Prune(mod, group => _plan.Changes.Add(
+                    ModGroupPruning.Prune(mod, _mod, group => _plan.Changes.Add(
                         new GearPlanChange("Group", group.Name, "option group", "not included (no converted animation)")));
                     mod.Meta.Remove("DefaultPreferredItems");
                     mod.Meta["Identifier"] = Guid.NewGuid().ToString();
@@ -298,9 +291,9 @@ public sealed class AnimationConversionPlanner(
 
                 var container = Result.GetContainer(provider.Container.Address);
                 var files = container.GetOrCreateFiles();
-                if (FindKey(files, destination.GamePath) != null && !_sources.Contains(destination.Location))
+                if (GamePath.FindKey(files, destination.GamePath) != null && !_sources.Contains(destination.Location))
                     Warn("destination_replaced", $"{container.Label}: the mod's own {destination.GamePath} is replaced.");
-                if (FindKey(files, destination.GamePath) is { } stale) files.Remove(stale);
+                if (GamePath.FindKey(files, destination.GamePath) is { } stale) files.Remove(stale);
                 files[destination.GamePath] = GamePath.ToLocal(local);
                 _plan.Changes.Add(new GearPlanChange("Game path", container.Label, GamePath.Normalize(provider.Key), destination.GamePath));
             }
@@ -315,7 +308,7 @@ public sealed class AnimationConversionPlanner(
                     // A location that is also a destination was just rewritten; leave it.
                     if (variant.Locations.Values.Contains(provider.Path.Location)) continue;
                     var files = Result.GetContainer(provider.Container.Address).Files;
-                    if (files != null && FindKey(files, provider.Key) is { } key) files.Remove(key);
+                    if (files != null && GamePath.FindKey(files, provider.Key) is { } key) files.Remove(key);
                 }
         }
 
@@ -344,13 +337,52 @@ public sealed class AnimationConversionPlanner(
         {
             if (_request.Mode == ConversionOutputMode.InPlace)
             {
-                Block("group_in_place", $"'{_request.GroupName}' is a new option group added beside what the mod already has, " +
-                                        "so there is nothing to convert in place. Add it to this mod or create a new mod.");
+                Block("group_in_place", OutputModeRules.GroupInPlace(_request.GroupName));
                 return;
             }
 
-            // A slot option holds one file per game path. Where the mod fills a location with a
-            // different file in each of several containers, the chosen container's version is used.
+            var sources = OneSourcePerPath(providers);
+            if (_plan.HasBlockers) return;
+
+            var name = ModGroupBuilder.UniqueName(Result, _request.GroupName!);
+            var options = new JsonArray { ModGroupBuilder.Option(ModGroup.OffOptionName, string.Empty, new JsonObject()) };
+
+            var labels = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ModGroup.OffOptionName };
+            foreach (var variant in variants)
+            {
+                if (!labels.Add(variant.Label)) { Block("duplicate_option", $"Two options are named '{variant.Label}'."); return; }
+                _destinationLabel = variant.Label;
+                var files = new JsonObject();
+                foreach (var provider in sources)
+                {
+                    if (!variant.Locations.TryGetValue(provider.Path.Location, out var destinationLocation)) continue;
+                    var destination = FromLocation(provider.Path.Race, destinationLocation);
+                    if (destination == null || SwapContent(provider, destination) is not { } local) continue;
+                    if (GamePath.FindKey(files, destination.GamePath) != null)
+                    {
+                        Block("target_conflict", $"{variant.Label}: two files map to {destination.GamePath}.");
+                        continue;
+                    }
+                    files[destination.GamePath] = GamePath.ToLocal(local);
+                    _plan.Changes.Add(new GearPlanChange("Option", $"{name} / {variant.Label}",
+                        GamePath.Normalize(provider.Key), destination.GamePath));
+                }
+                if (files.Count == 0) Warn("empty_option", $"The option '{variant.Label}' has no animation for any race the mod provides.");
+                options.Add(ModGroupBuilder.Option(variant.Label, string.Empty, files));
+            }
+
+            var defaultVariant = Math.Clamp(_request.DefaultVariant, 0, Math.Max(0, variants.Length - 1));
+            AddSingleGroup(name, "Choose which slot this animation replaces. Created by Universal Mod Converter.",
+                defaultVariant + 1, options); // past the "-" option
+        }
+
+        /// <summary>
+        /// One provider per game path, for an option group, whose options hold one file per game
+        /// path. Where the mod fills a location with a different file in each of several
+        /// containers, the chosen container's version is used; without a choice the plan asks for one.
+        /// </summary>
+        private List<Provider> OneSourcePerPath(List<Provider> providers)
+        {
             var sources = new List<Provider>();
             foreach (var same in providers.GroupBy(p => p.Path.GamePath))
             {
@@ -365,60 +397,19 @@ public sealed class AnimationConversionPlanner(
                     continue;
                 }
                 Block("several_sources", $"{string.Join(", ", same.Select(p => $"'{p.Container.Label}'").Distinct())} each have " +
-                                         $"their own {same.Key}, and one option group can hold only one of them per slot. " +
-                                         "Choose which one it uses.");
+                                         $"their own {same.Key}, and one option group can hold only one of them. " +
+                                         "Choose which one it uses under \"Take it from\".");
             }
-            if (_plan.HasBlockers) return;
-
-            var options = new JsonArray { Option(ModGroup.OffOptionName, string.Empty, new JsonObject()) };
-
-            var labels = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ModGroup.OffOptionName };
-            foreach (var variant in variants)
-            {
-                if (!labels.Add(variant.Label)) { Block("duplicate_option", $"Two options are named '{variant.Label}'."); return; }
-                _destinationLabel = variant.Label;
-                var files = new JsonObject();
-                foreach (var provider in sources)
-                {
-                    if (!variant.Locations.TryGetValue(provider.Path.Location, out var destinationLocation)) continue;
-                    var destination = FromLocation(provider.Path.Race, destinationLocation);
-                    if (destination == null || SwapContent(provider, destination) is not { } local) continue;
-                    if (FindKey(files, destination.GamePath) != null)
-                    {
-                        Block("target_conflict", $"{variant.Label}: two files map to {destination.GamePath}.");
-                        continue;
-                    }
-                    files[destination.GamePath] = GamePath.ToLocal(local);
-                    _plan.Changes.Add(new GearPlanChange("Option", $"{_request.GroupName} / {variant.Label}",
-                        GamePath.Normalize(provider.Key), destination.GamePath));
-                }
-                if (files.Count == 0) Warn("empty_option", $"The option '{variant.Label}' has no animation for any race the mod provides.");
-                options.Add(Option(variant.Label, string.Empty, files));
-            }
-
-            var defaultVariant = Math.Clamp(_request.DefaultVariant, 0, Math.Max(0, variants.Length - 1));
-            var group = new JsonObject();
-            group["Id"] = Guid.NewGuid().ToString();
-            group["Name"] = _request.GroupName;
-            group["Description"] = "Choose which slot this animation replaces. Created by Universal Mod Converter.";
-            group["Priority"] = Result.Groups.Select(g => Json.GetInt(g.Node["Priority"], 0)).DefaultIfEmpty(0).Max() + 1;
-            group["Type"] = "Single";
-            group["DefaultSettings"] = defaultVariant + 1; // past the "-" option
-            group["Options"] = options;
-            Result.Groups.Add(new ModGroup(group, Result.Groups.Count));
-            _plan.Changes.Add(new GearPlanChange("Group", _request.GroupName!, "new single-select group",
-                $"{options.Count} option(s): {string.Join(", ", options.OfType<JsonObject>().Select(o => Json.GetString(o["Name"])))}"));
+            return sources;
         }
 
-        private static JsonObject Option(string name, string description, JsonObject files) => new()
-        {
-            ["Id"] = Guid.NewGuid().ToString(),
-            ["Name"] = name,
-            ["Description"] = description,
-            ["Files"] = files,
-            ["FileSwaps"] = new JsonObject(),
-            ["Manipulations"] = new JsonArray(),
-        };
+        /// <summary>
+        /// Adds a single-select group that outranks the mod's other groups, so its choice wins where
+        /// they overlap. <paramref name="options"/> starts with the empty "-" that switches it off.
+        /// </summary>
+        private void AddSingleGroup(string name, string description, int selected, JsonArray options)
+            => _plan.Changes.Add(ModGroupBuilder.Add(Result, name, description, ModGroupBuilder.TopPriority(Result) + 1,
+                "Single", selected, options));
 
         /// <summary>Writes the source PAP renamed for <paramref name="destination"/>; returns its local path.</summary>
         private string? SwapContent(Provider provider, PapPath destination)
@@ -459,13 +450,9 @@ public sealed class AnimationConversionPlanner(
         /// </summary>
         private string SwapLocal(Provider provider, PapPath destination)
         {
-            var local = GamePath.ToLocal(provider.Local);
-            var sourcePath = GamePath.ToLocal(provider.Path.GamePath);
-            if (local.EndsWith(sourcePath, StringComparison.OrdinalIgnoreCase) &&
-                (local.Length == sourcePath.Length || local[local.Length - sourcePath.Length - 1] == '\\'))
-                return local[..^sourcePath.Length] + GamePath.ToLocal(destination.GamePath);
+            if (Mirrored(provider.Local, provider.Path.GamePath, destination.GamePath) is { } mirrored) return mirrored;
 
-            var folder = Path.GetDirectoryName(local) ?? string.Empty;
+            var folder = Path.GetDirectoryName(GamePath.ToLocal(provider.Local)) ?? string.Empty;
             if (_races > 1 || destination.IsFacial) folder = Path.Combine(folder, $"c{destination.Race:D4}");
             // A race has a pack per face animation set, all named after the pose.
             if (destination.IsFacial) folder = Path.Combine(folder, destination.Set);
@@ -567,6 +554,21 @@ public sealed class AnimationConversionPlanner(
         }
 
         /// <summary>
+        /// <paramref name="local"/> moved along with its file: when it spells out the game path it
+        /// replaces, as whole folders (<c>mymod\chara\...</c>), that part becomes <paramref name="to"/>.
+        /// Null when it does not, and the caller picks a name of its own.
+        /// </summary>
+        private static string? Mirrored(string local, string from, string to)
+        {
+            local = GamePath.ToLocal(local);
+            var suffix = GamePath.ToLocal(from);
+            return local.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) &&
+                   (local.Length == suffix.Length || local[local.Length - suffix.Length - 1] == '\\')
+                ? local[..^suffix.Length] + GamePath.ToLocal(to)
+                : null;
+        }
+
+        /// <summary>
         /// The expression's own timeline (<c>chara/action/facial/pose/{pose}.tmb</c>), which names
         /// the face's pack and sets its pace, moves with the face: in every container that has
         /// one, so options such as speed choices keep working at the new pose.
@@ -608,23 +610,21 @@ public sealed class AnimationConversionPlanner(
                     }
 
                     var sourceLocal = GamePath.ToLocal(local);
-                    var gameLocal = GamePath.ToLocal(sourcePath);
-                    var wanted = sourceLocal.EndsWith(gameLocal, StringComparison.OrdinalIgnoreCase)
-                        ? sourceLocal[..^gameLocal.Length] + GamePath.ToLocal(destinationPath)
-                        : Path.Combine(Path.GetDirectoryName(sourceLocal) ?? string.Empty, toPose + ".tmb");
+                    var wanted = Mirrored(sourceLocal, sourcePath, destinationPath)
+                                 ?? Path.Combine(Path.GetDirectoryName(sourceLocal) ?? string.Empty, toPose + ".tmb");
                     var written = _locals.Reserve(wanted, null);
                     _plan.Files.Add(new PlannedFileOperation(LocalFileOperation.Write, Path.GetRelativePath(_root, full), written, content,
                         $"moved to {destinationPath}"));
                     _movedTimelines.Add(sourceLocal);
 
                     var files = Result.GetContainer(container.Address).GetOrCreateFiles();
-                    if (FindKey(files, destinationPath) is { } stale)
+                    if (GamePath.FindKey(files, destinationPath) is { } stale)
                     {
                         Warn("destination_replaced", $"{container.Label}: the mod's own {destinationPath} is replaced.");
                         files.Remove(stale);
                     }
                     files[destinationPath] = GamePath.ToLocal(written);
-                    if (!_request.KeepOriginal && FindKey(files, sourcePath) is { } old) files.Remove(old);
+                    if (!_request.KeepOriginal && GamePath.FindKey(files, sourcePath) is { } old) files.Remove(old);
                     _plan.Outputs.Add(new AnimationOutput(container.Label, destinationPath, written, AnimationConversionPlan.Hash(content)));
                     _plan.Changes.Add(new GearPlanChange("Game path", container.Label, sourcePath, destinationPath));
                 }
@@ -736,47 +736,94 @@ public sealed class AnimationConversionPlanner(
 
         /// <summary>
         /// Attaching a face on its own: every animation keeps its game path and its timeline gets
-        /// the face. The file is edited, so there is no second copy for the additive mode to keep
-        /// beside it.
+        /// the face. In place and in a new mod the file is edited; added to this mod, the edited
+        /// animations go into an option group beside the originals.
         /// </summary>
         private void PlanExpression(List<Provider> providers)
         {
             if (_request.Expression == null) { Block("no_expression", "Choose the expression to attach."); return; }
             if (_request.Mode.KeepsSource())
             {
-                Block("expression_additive",
-                    "Attaching an expression changes the animation itself, so there is no original left to keep " +
-                    "beside it. Convert in place or create a new mod instead.");
+                PlanExpressionGroup(providers, _request.Expression.Label);
                 return;
             }
 
+            // One output file per distinct result. Every container, race and location that plays a
+            // file with the same face shares its edited version; one that needs the file edited
+            // differently (another race's face pack, another animation in it) gets its own copy,
+            // since a file can only hold one of them.
+            var edited = new Dictionary<(string File, string Hash), string>();
+            var editedInPlace = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var provider in providers)
             {
-                if (_written.ContainsKey((provider.FullPath, provider.Path.GamePath))) continue;
                 if (Local(provider.FullPath) is not { } bytes) continue;
                 if (WithExpression(bytes, provider.Path) is not { } content) continue;
 
+                var hash = AnimationConversionPlan.Hash(content);
                 var relative = GamePath.ToLocal(provider.Local);
-                string local;
-                if (_request.Mode.EditsSourceMod())
+                if (!edited.TryGetValue((provider.FullPath, hash), out var local))
                 {
-                    // The same file, edited: the key keeps pointing at it.
-                    local = _locals.Reserve(relative, relative);
-                    _plan.Files.Add(new PlannedFileOperation(LocalFileOperation.Write, null, local, content,
-                        $"expression {_request.Expression.Label} attached"));
-                }
-                else
-                {
-                    local = Write(content, relative, provider, $"expression {_request.Expression.Label} attached");
-                    Result.GetContainer(provider.Container.Address).GetOrCreateFiles()[provider.Path.GamePath] = local;
+                    if (_request.Mode.EditsSourceMod() && editedInPlace.Add(provider.FullPath))
+                    {
+                        // The same file, edited: the key keeps pointing at it.
+                        local = _locals.Reserve(relative, relative);
+                        _plan.Files.Add(new PlannedFileOperation(LocalFileOperation.Write, null, local, content,
+                            $"expression {_request.Expression.Label} attached"));
+                    }
+                    else local = Write(content, relative, provider, $"expression {_request.Expression.Label} attached");
+                    edited[(provider.FullPath, hash)] = local;
                 }
 
+                // A new mod's containers start out empty, so each maps its key again; in place only
+                // a key whose file became a copy of its own changes.
+                var files = Result.GetContainer(provider.Container.Address).GetOrCreateFiles();
+                if (!_request.Mode.EditsSourceMod() ||
+                    !string.Equals(GamePath.NormalizeLocal(local), GamePath.NormalizeLocal(provider.Local), StringComparison.Ordinal))
+                    files[GamePath.FindKey(files, provider.Path.GamePath) ?? provider.Path.GamePath] = GamePath.ToLocal(local);
+
                 _written[(provider.FullPath, provider.Path.GamePath)] = local;
-                _plan.Outputs.Add(new AnimationOutput(provider.Container.Label, provider.Path.GamePath, local,
-                    AnimationConversionPlan.Hash(content)));
+                _plan.Outputs.Add(new AnimationOutput(provider.Container.Label, provider.Path.GamePath, local, hash));
                 _plan.Changes.Add(new GearPlanChange("Expression", provider.Container.Label,
                     GamePath.Normalize(provider.Key), _request.Expression.Label));
             }
+        }
+
+        /// <summary>
+        /// Attaching a face beside the original: a new single-select group whose option plays the
+        /// edited animations, after an empty "-" that plays the originals. The group outranks the
+        /// mod's other groups, so its choice wins over the containers the originals live in, which
+        /// stay as they are; it starts on the face, since that is what was asked for.
+        /// </summary>
+        private void PlanExpressionGroup(List<Provider> providers, string label)
+        {
+            var sources = OneSourcePerPath(providers);
+            if (_plan.HasBlockers) return;
+
+            var name = ModGroupBuilder.UniqueName(Result, ExpressionGroupName);
+            var scope = $"{name} / {label}";
+            var files = new JsonObject();
+            var edited = new Dictionary<(string File, string Hash), string>();
+            foreach (var provider in sources)
+            {
+                if (Local(provider.FullPath) is not { } bytes) continue;
+                if (WithExpression(bytes, provider.Path) is not { } content) continue;
+
+                var hash = AnimationConversionPlan.Hash(content);
+                if (!edited.TryGetValue((provider.FullPath, hash), out var local))
+                    edited[(provider.FullPath, hash)] = local =
+                        Write(content, GamePath.ToLocal(provider.Local), provider, $"expression {label} attached");
+                files[provider.Path.GamePath] = GamePath.ToLocal(local);
+                _plan.Outputs.Add(new AnimationOutput(scope, provider.Path.GamePath, local, hash));
+                _plan.Changes.Add(new GearPlanChange("Expression", scope, GamePath.Normalize(provider.Key), label));
+            }
+            if (files.Count == 0) return;
+
+            AddSingleGroup(name, "Plays the animation with the expression; \"-\" plays it without. Created by Universal Mod Converter.",
+                1, new JsonArray
+                {
+                    ModGroupBuilder.Option(ModGroup.OffOptionName, string.Empty, new JsonObject()),
+                    ModGroupBuilder.Option(label, string.Empty, files),
+                });
         }
 
         private readonly Dictionary<ushort, FacialAnimation?> _faces = new();
@@ -811,11 +858,21 @@ public sealed class AnimationConversionPlanner(
 
             if (face == null)
                 Block("expression_missing", $"The expression {expression.Label} could not be found for {RaceNames.Describe(race)}.");
-            else if (expression.Pose == null && _faces.Count == 0)
-                Note("expression_from_mod",
-                    $"{expression.Label} plays from the face animations of the mod it comes from" +
-                    (face.Pack == null ? string.Empty : $" (the face pack '{face.Pack}')") +
-                    ": keep that mod enabled, or the face falls back to the game's own of that name, if there is one.");
+            else if (expression.Pose == null)
+            {
+                if (_faces.Count == 0)
+                    Note("expression_from_mod",
+                        $"{expression.Label} plays from the face animations of the mod it comes from" +
+                        (face.Pack == null ? string.Empty : $" (the face pack '{face.Pack}')") +
+                        ": keep that mod enabled, or the face falls back to the game's own of that name, if there is one.");
+                // Played by name from the character's own pack, or its skeleton parent's.
+                var found = face;
+                if (ResolvingRace(race, r => expression.PackRaces.Contains(r) || GameExpressions.Has(r, found, Game),
+                        _owner._parentRace) == null)
+                    Warn("expression_race_missing",
+                        $"{expression.Label}: neither that mod nor the game has this face for {RaceNames.Describe(race)}, " +
+                        "so that race shows no face.");
+            }
             return _faces[race] = face;
         }
 
@@ -848,7 +905,7 @@ public sealed class AnimationConversionPlanner(
         {
             var container = Result.GetContainer(provider.Container.Address);
             var files = container.GetOrCreateFiles();
-            if (FindKey(files, destination.GamePath) is { } existing)
+            if (GamePath.FindKey(files, destination.GamePath) is { } existing)
             {
                 Warn("destination_replaced", $"{container.Label}: the mod's own {destination.GamePath} is replaced.");
                 files.Remove(existing);
@@ -932,9 +989,6 @@ public sealed class AnimationConversionPlanner(
             return null;
         }
 
-        private static string? FindKey(JsonObject files, string gamePath)
-            => files.Select(p => p.Key).FirstOrDefault(k => GamePath.Normalize(k) == gamePath);
-
         private byte[]? Local(string fullPath)
         {
             if (_localCache.TryGetValue(fullPath, out var cached)) return cached;
@@ -961,17 +1015,9 @@ public sealed class AnimationConversionPlanner(
 
         private void Note(string code, string message) => Warn(code, message);
 
-        private void Warn(string code, string message)
-        {
-            if (!_plan.Diagnostics.Any(d => d.Code == code && d.Message == message))
-                _plan.Diagnostics.Add(new PlanDiagnostic(code, message, false));
-        }
+        private void Warn(string code, string message) => _plan.Report(code, message, false);
 
-        private void Block(string code, string message)
-        {
-            if (!_plan.Diagnostics.Any(d => d.Code == code && d.Message == message))
-                _plan.Diagnostics.Add(new PlanDiagnostic(code, message, true));
-        }
+        private void Block(string code, string message) => _plan.Report(code, message, true);
     }
 }
 

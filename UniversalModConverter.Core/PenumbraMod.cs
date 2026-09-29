@@ -390,4 +390,16 @@ public static class GamePath
 
     /// <summary>Local paths are written the way Penumbra writes them on Windows.</summary>
     public static string ToLocal(string path) => path.Replace('/', '\\').TrimStart('\\');
+
+    /// <summary>
+    /// The key of a Files or FileSwaps object that names <paramref name="gamePath"/>, however
+    /// either is written; null when there is none.
+    /// </summary>
+    public static string? FindKey(JsonObject redirects, string gamePath)
+    {
+        var normalized = Normalize(gamePath);
+        foreach (var (key, _) in redirects)
+            if (Normalize(key) == normalized) return key;
+        return null;
+    }
 }

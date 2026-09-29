@@ -40,10 +40,25 @@ public sealed class MergeSession(Plugin plugin)
     public string FirstName => ModName(FirstDirectory);
     public string SecondName => ModName(SecondDirectory);
 
+    // The window asks for names and readiness every frame; the answers only change with the
+    // inputs or Penumbra's mod list, and working them out touches the disk.
+    private IReadOnlyList<ModEntry>? _namesFor;
+    private readonly Dictionary<string, string> _names = new(StringComparer.OrdinalIgnoreCase);
+    private (string First, string Second, DateTime At, string? Error) _checkedDirectories;
+    private static readonly TimeSpan RecheckAfter = TimeSpan.FromSeconds(1);
+
     public string ModName(string directory)
-        => directory.Length == 0 ? string.Empty
-            : Main.Mods.FirstOrDefault(m => ConverterSession.SamePath(m.Directory, directory))?.Name
-              ?? Path.GetFileName(directory.TrimEnd('\\', '/'));
+    {
+        if (directory.Length == 0) return string.Empty;
+        if (!ReferenceEquals(_namesFor, Main.Mods))
+        {
+            _names.Clear();
+            _namesFor = Main.Mods;
+        }
+        if (_names.TryGetValue(directory, out var name)) return name;
+        return _names[directory] = Main.Mods.FirstOrDefault(m => ConverterSession.SamePath(m.Directory, directory))?.Name
+                                   ?? Path.GetFileName(directory.TrimEnd('\\', '/'));
+    }
 
     // ── Inputs ───────────────────────────────────────────────────────────────
 
@@ -111,7 +126,7 @@ public sealed class MergeSession(Plugin plugin)
         get
         {
             if (string.IsNullOrWhiteSpace(Name)) return null;
-            var root = Main.PenumbraAvailable ? plugin.PenumbraIpc.GetModDirectory() : null;
+            var root = Main.PenumbraAvailable ? Main.PenumbraModDirectory : null;
             if (string.IsNullOrWhiteSpace(root) && FirstDirectory.Length > 0)
                 root = Path.GetDirectoryName(FirstDirectory.TrimEnd('\\', '/'));
             return string.IsNullOrWhiteSpace(root) ? null : Path.Combine(root, ModConverterService.SanitizeFolderName(Name));
@@ -126,8 +141,7 @@ public sealed class MergeSession(Plugin plugin)
         {
             if (FirstDirectory.Length == 0 || SecondDirectory.Length == 0) return "Choose the two modpacks to merge.";
             if (ConverterSession.SamePath(FirstDirectory, SecondDirectory)) return "Choose two different modpacks.";
-            foreach (var directory in new[] { FirstDirectory, SecondDirectory })
-                if (!PenumbraMod.IsModDirectory(directory, out var error)) return error;
+            if (DirectoryError() is { } error) return error;
             if (Winner == null) return "Choose which modpack wins when both change the same file.";
             return null;
         }
@@ -143,10 +157,32 @@ public sealed class MergeSession(Plugin plugin)
             if (PlanError != null) return PlanError;
             if (string.IsNullOrWhiteSpace(Name)) return "Enter a name for the merged mod.";
             if (OutputPath is not { } path) return "Cannot determine where to create the merged mod.";
-            if (Directory.Exists(path) || File.Exists(path)) return $"A folder named '{Path.GetFileName(path)}' already exists.";
+            if (PathExists(path)) return $"A folder named '{Path.GetFileName(path)}' already exists.";
             return null;
         }
     }
+
+    /// <summary>Why one of the two folders is not a mod, or null; checked at most once a second.</summary>
+    private string? DirectoryError()
+    {
+        var now = DateTime.UtcNow;
+        if (_checkedDirectories.First == FirstDirectory && _checkedDirectories.Second == SecondDirectory &&
+            now - _checkedDirectories.At < RecheckAfter)
+            return _checkedDirectories.Error;
+
+        string? error = null;
+        foreach (var directory in new[] { FirstDirectory, SecondDirectory })
+            if (!PenumbraMod.IsModDirectory(directory, out var reason))
+            {
+                error = reason;
+                break;
+            }
+        _checkedDirectories = (FirstDirectory, SecondDirectory, now, error);
+        return error;
+    }
+
+    /// <summary>Whether a folder or file exists at <paramref name="path"/>; see <see cref="ConverterSession.PathExists"/>.</summary>
+    public bool PathExists(string path) => Main.PathExists(path);
 
     // ── Planning and creating ────────────────────────────────────────────────
 

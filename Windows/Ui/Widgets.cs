@@ -106,10 +106,16 @@ internal static class Widgets
         return clicked && enabled;
     }
 
+    /// <summary>The space <see cref="Badge"/> leaves around its text.</summary>
+    public static Vector2 BadgePadding => new Vector2(5f, 1f) * Theme.Scale;
+
+    /// <summary>How wide <see cref="Badge"/> draws <paramref name="text"/>.</summary>
+    public static float BadgeWidth(string text) => ImGui.CalcTextSize(text).X + BadgePadding.X * 2;
+
     /// <summary>A small rounded label, e.g. a slot or status tag.</summary>
     public static void Badge(string text, Vector4 color)
     {
-        var padding = new Vector2(5f, 1f) * Theme.Scale;
+        var padding = BadgePadding;
         var size    = ImGui.CalcTextSize(text) + padding * 2;
         var pos     = ImGui.GetCursorScreenPos();
         var draw    = ImGui.GetWindowDrawList();

@@ -19,6 +19,13 @@ public sealed partial class ConverterSession
 
     public IReadOnlyList<QueuedConversion> Queue => _queue;
 
+    /// <summary>
+    /// The queued conversions the next run converts: the ticked ones. Whatever belongs to the run
+    /// as a whole (its output mode, the option group it adds, its default name) follows these
+    /// alone, or an unticked entry would change how the ticked ones are written.
+    /// </summary>
+    private IEnumerable<QueuedConversion> RunEntries => _queue.Where(e => e.Enabled);
+
     /// <summary>Why the current selection cannot be queued, or null.</summary>
     public string? EnqueueBlockReason
     {
@@ -26,18 +33,48 @@ public sealed partial class ConverterSession
         {
             if (SelectionBlockReason is { } reason) return reason;
             if (Source is not { } source) return "Select a source item first.";
-            // Hair, face, tail and ear conversions patch files on disk instead of producing a file
-            // plan, so they cannot be merged with anything: they run as the plan's only entry.
+            // Hair, face, tail, ear and skin conversions (retextures included) run on their own:
+            // most patch files on disk instead of producing a file plan, so they cannot be merged.
             if (_queue.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind)) is { } lone)
                 return $"The plan holds a {CustomizationKinds.Get(lone.Kind).DisplayName.ToLowerInvariant()} conversion, " +
                        "which has to run on its own. Convert it first, or remove it.";
             if (source.IsCustomization && _queue.Count > 0)
                 return $"{CustomizationKinds.Get(source.Kind).DisplayName} conversions have to run on their own. " +
                        "Clear the plan first.";
-            if (_queue.Any(e => e.Description == Describe(source)))
+            // Choosing the version here would add the same expression a second time, overlapping the first.
+            if (source.Animation is { } animation && AnimationOperation == AnimationOperation.Expression &&
+                _queue.Any(e => NeedsSourceChoice(e) && e.Task.AnimationRequest!.SourceLocations.SequenceEqual(animation.Locations)))
+                return "This expression is already in the plan without a version chosen; choose it there, under \"Take it from\".";
+            var description = Describe(source);
+            if (_queue.Any(e => e.Description == description))
                 return "This conversion is already in the plan.";
             return null;
         }
+    }
+
+    /// <summary>
+    /// Whether a queued "Only add an expression" still needs the version its option group uses:
+    /// it is added to this mod, several options have their own version of the animation, and none
+    /// was chosen when it was added to the plan (it was then going into a new mod or in place).
+    /// </summary>
+    public bool NeedsSourceChoice(QueuedConversion entry)
+        => entry.SourceChoices.Length > 1 && EffectiveOutputMode == ConversionOutputMode.AddToMod &&
+           entry.Task.AnimationRequest is { Operation: AnimationOperation.Expression, SourceContainer: null };
+
+    /// <summary>Chooses the version a queued expression's option group uses; see <see cref="NeedsSourceChoice"/>.</summary>
+    public void ChooseQueueEntrySource(Guid id, AnimationProvider provider)
+    {
+        if (_queue.FirstOrDefault(e => e.Id == id) is not { } entry || !NeedsSourceChoice(entry) ||
+            !entry.SourceChoices.Contains(provider) || entry.Task.AnimationRequest is not { } request)
+            return;
+        var suffix = VersionSuffix(provider.Label);
+        entry.Task.AnimationRequest = request with
+        {
+            SourceContainer = provider.Address,
+            Description     = request.Description + suffix,
+        };
+        entry.Description += suffix;
+        MarkPlanDirty();
     }
 
     /// <summary>Locks the current selection in and leaves the cards free for the next one.</summary>
@@ -50,14 +87,16 @@ public sealed partial class ConverterSession
         _queue.Add(new QueuedConversion
         {
             Kind          = task.Kind,
-            CanFanOut     = source.CanFanOut,
             Description   = Describe(source),
             Source        = SideOf(source),
             Target        = TargetSide(source),
             Task          = task,
+            // The output mode may still change to one that puts the expression into an option group.
+            SourceChoices = source.Animation is { HasVariants: true } animation &&
+                            AnimationOperation == AnimationOperation.Expression
+                ? animation.Providers
+                : [],
         });
-        if (OutputMode == ConversionOutputMode.AddToMod && AddToModBlockReason != null)
-            SetOutputMode(ConversionOutputMode.NewMod);
         MarkPlanDirty();
     }
 
@@ -96,6 +135,7 @@ public sealed partial class ConverterSession
     private static ConversionSide SideOf(DetectedItem source) => new()
     {
         Icon   = source.Icon,
+        Kind   = source.Kind,
         Name   = source.ItemName,
         Detail = source.Animation is { } animation
             ? animation.Races.Length == 1 ? RaceLabel(animation.Races[0]) : $"{animation.Races.Length} races"
@@ -110,6 +150,7 @@ public sealed partial class ConverterSession
         if (source.Animation is { } animation)
             return new ConversionSide
             {
+                Kind   = AssetKind.Animation,
                 Name   = AnimationNameLabel(animation),
                 Detail = AnimationOperation switch
                 {
@@ -120,14 +161,26 @@ public sealed partial class ConverterSession
             };
         if (source.IsCustomization)
             return source.CanFanOut
-                ? new ConversionSide { Name = CustomizationKinds.Get(TargetCustomizationKind).DisplayName, Detail = DescribeTextureTargets() }
+                ? new ConversionSide
+                {
+                    Kind   = TargetCustomizationKind,
+                    Name   = CustomizationKinds.Get(TargetCustomizationKind).DisplayName,
+                    Detail = DescribeTextureTargets(),
+                }
                 : new ConversionSide
                 {
+                    Kind   = TargetCustomizationKind,
                     Name   = $"{CustomizationKinds.Get(TargetCustomizationKind).DisplayName} {TargetCustomizationId:D4}",
                     Detail = RaceLabel(TargetRace),
                 };
         return TargetItem is { } item
-            ? new ConversionSide { Icon = item.Icon, Name = item.Name, Detail = $"{(item.IsAccessory ? 'a' : 'e')}{item.ModelIdDisplay}" }
-            : new ConversionSide { Name = "?" };
+            ? new ConversionSide
+            {
+                Icon   = item.Icon,
+                Kind   = source.Kind,
+                Name   = item.Name,
+                Detail = $"{(item.IsAccessory ? 'a' : 'e')}{item.ModelIdDisplay}",
+            }
+            : new ConversionSide { Kind = source.Kind, Name = "?" };
     }
 }

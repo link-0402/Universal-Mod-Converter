@@ -40,7 +40,15 @@ public sealed record FaceTiming(int Duration, int Unknown1, int Flags, float Sta
 /// looked up for each race in that race's own face animations.
 /// </param>
 /// <param name="Face">A facial animation another mod provides or plays.</param>
-public sealed record ExpressionDonor(string Label, string? Pose = null, FacialAnimation? Face = null);
+public sealed record ExpressionDonor(string Label, string? Pose = null, FacialAnimation? Face = null)
+{
+    /// <summary>
+    /// With <see cref="Face"/>: the races the other mod ships the face's pack for. The face is
+    /// played by name from the character's own pack, so a race outside these shows it only when
+    /// the game has a face of that name in the pack itself.
+    /// </summary>
+    public IReadOnlyCollection<ushort> PackRaces { get; init; } = [];
+}
 
 /// <summary>
 /// The expressions the game's emote list offers under Expressions (/Smile, /Sad, /Wink…). Each
@@ -79,6 +87,18 @@ public static class GameExpressions
     }
 
     private static string NonresidentPack(ushort race, string pose) => $"chara/human/c{race:D4}/animation/f0002/nonresident/{pose}.pap";
+
+    /// <summary>
+    /// Whether the game has <paramref name="face"/> for <paramref name="race"/> itself: in the pack
+    /// the face names, or in the resident one for a face that names none.
+    /// </summary>
+    public static bool Has(ushort race, FacialAnimation face, Func<string, byte[]?> read)
+    {
+        var path = face.Pack is { } pack ? NonresidentPack(race, pack) : ResidentPack(race, "f0002");
+        if (read(path) is not { } bytes) return false;
+        try { return new PapFile(bytes).FaceEntries.Any(e => e.Entry.Name == face.Entry); }
+        catch (InvalidDataException) { return false; }
+    }
 
     /// <summary>
     /// How <paramref name="race"/> plays <paramref name="pose"/>: from the pose's own pack or the

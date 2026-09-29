@@ -13,10 +13,10 @@ namespace UniversalModConverter.Core;
 public sealed class PapFile
 {
     /// <summary>
-    /// One animation of the pack. <see cref="Face"/> is a flag the game sets on facial
+    /// One animation of the pack. The entry's face flag is not read: the game sets it on facial
     /// animations and on some body animations alike, so it does not tell them apart.
     /// </summary>
-    public sealed record Entry(string Name, short Type, short Binding, int Face)
+    public sealed record Entry(string Name, short Type, short Binding)
     {
         /// <summary>
         /// Facial animations (<c>cfxf_</c> expressions, <c>cfxb_</c> blinks, <c>cfxl_</c> lips)
@@ -40,6 +40,11 @@ public sealed class PapFile
 
     private readonly byte[] _bytes;
 
+    /// <summary>
+    /// Reads <paramref name="data"/> in place rather than copying it: packs run to megabytes and
+    /// are read several times per conversion. Nothing here writes to the array, since every edit
+    /// returns a new one, and the caller must not change it afterwards either.
+    /// </summary>
     public PapFile(byte[] data)
     {
         if (data.Length < HeaderSize || data.Length > MaxFileSize || !data.AsSpan(0, 4).SequenceEqual("pap "u8))
@@ -65,11 +70,11 @@ public sealed class PapFile
             var binding = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(start + 34));
             if (binding < 0) throw new InvalidDataException("A PAP binding index is negative.");
             entries.Add(new Entry(Encoding.UTF8.GetString(name[..end]),
-                BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(start + 32)), binding, ReadInt(data, start + 36)));
+                BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(start + 32)), binding));
         }
 
         Entries = entries.MoveToImmutable();
-        _bytes = data.ToArray();
+        _bytes = data;
     }
 
     public int HavokOffset { get; }
@@ -133,7 +138,7 @@ public sealed class PapFile
         var result = new byte[checked(TimelineOffset + (int)footer.Length)];
         if (result.Length > MaxFileSize) throw new InvalidDataException("The rebuilt PAP exceeds the size limit.");
         _bytes.AsSpan(0, TimelineOffset).CopyTo(result);
-        footer.ToArray().CopyTo(result, TimelineOffset);
+        footer.GetBuffer().AsSpan(0, (int)footer.Length).CopyTo(result.AsSpan(TimelineOffset));
         _ = PapTimeline.ReadStrings(result); // every timeline, and nothing after them
         return result;
     }
@@ -357,15 +362,8 @@ public static class PapTimeline
             var magic = Encoding.ASCII.GetString(bytes, cursor, 4);
             var size = PapFile.ReadInt(bytes, cursor + 4);
             if (size < 8 || size > end - cursor) throw new InvalidDataException($"Invalid {magic} timeline entry size.");
-            // Offset of the string displacement within the entry, from VFXEditor's TMB layouts.
-            var field = magic switch
-            {
-                "C002" => 24,
-                "C009" => 20,
-                "C010" => 32,
-                "C012" or "C063" or "C173" => 20,
-                _ => -1,
-            };
+            // The same layouts TmbTimeline edits with, so a check reads every string an edit may touch.
+            var field = TmbTimeline.StringField(magic);
             if (field >= 0 && field <= size - 4)
             {
                 var displacement = PapFile.ReadInt(bytes, cursor + field);
@@ -373,20 +371,12 @@ public static class PapTimeline
                 {
                     var position = (long)cursor + 8 + displacement;
                     if (position < start || position >= end) throw new InvalidDataException($"Invalid {magic} string offset.");
-                    var value = ReadString(bytes, (int)position, end);
+                    var value = TmbTimeline.ReadString(bytes, (int)position, end);
                     if (value.Length > 0) strings.Add(new TimelineString(magic, (int)position, value, cursor + field, cursor + 8));
                 }
             }
             cursor += size;
         }
         return length;
-    }
-
-    private static string ReadString(byte[] bytes, int start, int end)
-    {
-        var span = bytes.AsSpan(start, Math.Min(512, end - start));
-        var zero = span.IndexOf((byte)0);
-        if (zero < 0) throw new InvalidDataException("Unterminated animation timeline string.");
-        return Encoding.UTF8.GetString(span[..zero]);
     }
 }
