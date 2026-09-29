@@ -101,9 +101,10 @@ public static partial class ResourceReferences
 
         if (!TryLocateMaterialOffsets(data, table, out var materialPosition, out var materialCount))
             throw new InvalidDataException("The MDL layout cannot be followed for a length-changing material rename.");
+        // Edge geometry (a LOD's size at +28, offset at +32; +36 is its polygon count) is not moved.
         var lodStart = LodTableStart(data, table);
         for (var l = 0; l < 3; l++)
-            if (BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(lodStart + l * LodSize + 36)) != 0)
+            if (BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(lodStart + l * LodSize + 28)) != 0)
                 throw new InvalidDataException("MDL files with edge geometry only support same-length material renames.");
 
         // Append each new name once, then pad so every later structure keeps its alignment.

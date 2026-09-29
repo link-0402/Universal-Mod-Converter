@@ -71,7 +71,7 @@ public sealed class BackupMaintenanceService(
         foreach (var folder in Roots(penumbraRoot).SelectMany(Backups))
         {
             folders++;
-            bytes += SizeOf(folder);
+            bytes += SizeOf(folder.Path);
         }
 
         return new Usage(bytes, folders);
@@ -84,9 +84,10 @@ public sealed class BackupMaintenanceService(
     public SweepResult Sweep(string? penumbraRoot)
     {
         // A backup the user could still revert to outlives every limit: losing it would lose
-        // the only untouched copy of their mod.
+        // the only untouched copy of their mod. That includes one waiting behind later in-place
+        // conversions of the same mod, which have to be reverted first.
         var protectedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var record in configuration.History.Where(r => history.RevertBlockReason(r) == null))
+        foreach (var record in configuration.History.Where(history.CanStillRevert))
             if (!string.IsNullOrEmpty(record.RecoveryPath))
                 protectedPaths.Add(Path.GetFullPath(record.RecoveryPath).TrimEnd('\\', '/'));
 
@@ -94,8 +95,7 @@ public sealed class BackupMaintenanceService(
         long bytes = 0;
         foreach (var root in Roots(penumbraRoot))
         {
-            var folders = Backups(root).Select(folder => new BackupFolder(folder, WrittenUtc(folder)));
-            foreach (var folder in BackupRetention.Expired(folders, protectedPaths,
+            foreach (var folder in BackupRetention.Expired(Backups(root), protectedPaths,
                          configuration.BackupRetentionDays, configuration.BackupRetentionCount, DateTime.UtcNow))
             {
                 var size = SizeOf(folder);
@@ -174,8 +174,17 @@ public sealed class BackupMaintenanceService(
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private static IEnumerable<string> Backups(string root)
-        => SafeEnumerateDirectories(root, "*").Select(folder => folder.TrimEnd('\\', '/'));
+    /// <summary>
+    /// The backups in <paramref name="root"/>: only folders named the way this plugin names them,
+    /// each dated by its name. A custom backup directory may be shared with anything else, so
+    /// every other folder in it is left alone.
+    /// </summary>
+    private static IEnumerable<BackupFolder> Backups(string root)
+    {
+        foreach (var folder in SafeEnumerateDirectories(root, "*").Select(folder => folder.TrimEnd('\\', '/')))
+            if (BackupRetention.TakenUtc(Path.GetFileName(folder)) is { } taken)
+                yield return new BackupFolder(folder, taken);
+    }
 
     private static bool Matches(string? path, List<string> deleted)
         => !string.IsNullOrEmpty(path) &&
@@ -183,13 +192,6 @@ public sealed class BackupMaintenanceService(
 
     private static string? Parent(string? path)
         => string.IsNullOrWhiteSpace(path) ? null : Path.GetDirectoryName(Path.GetFullPath(path).TrimEnd('\\', '/'));
-
-    /// <summary>When the backup was taken. The folder timestamp is what a move preserves.</summary>
-    private static DateTime WrittenUtc(string folder)
-    {
-        try { return Directory.GetLastWriteTimeUtc(folder); }
-        catch (Exception) { return DateTime.MinValue; }
-    }
 
     private static long SizeOf(string folder)
     {

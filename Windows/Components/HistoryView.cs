@@ -1,5 +1,3 @@
-using System;
-using System.Collections.Generic;
 using System.IO;
 using UniversalModConverter.Core;
 using UniversalModConverter.Session;
@@ -13,13 +11,6 @@ namespace UniversalModConverter.Windows.Components;
 /// <summary>Past conversions with a Revert action.</summary>
 internal sealed class HistoryView(ConverterSession session, ActionPanels actions)
 {
-    private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(1);
-
-    // Revert eligibility touches the filesystem; don't re-check it every frame.
-    private readonly Dictionary<Guid, (string? RevertReason, bool FolderExists)> _status = new();
-    private DateTime _statusTime = DateTime.MinValue;
-    private bool _statusBusy;
-
     public void Draw()
     {
         var records = session.History.Records;
@@ -27,18 +18,6 @@ internal sealed class HistoryView(ConverterSession session, ActionPanels actions
         {
             Widgets.MutedWrapped("Conversions you apply appear here, and can be reverted from here.");
             return;
-        }
-
-        if (DateTime.UtcNow - _statusTime > RefreshInterval || _statusBusy != session.IsBusy || _status.Count != records.Count)
-        {
-            _status.Clear();
-            foreach (var record in records)
-            {
-                var folder = record.IsReverted ? record.RevertedOutputPath : record.PublishedPath;
-                _status[record.Id] = (session.RevertBlockReason(record), folder != null && Directory.Exists(folder));
-            }
-            _statusTime = DateTime.UtcNow;
-            _statusBusy = session.IsBusy;
         }
 
         using var table = ImRaii.Table("##History", 4,
@@ -75,7 +54,8 @@ internal sealed class HistoryView(ConverterSession session, ActionPanels actions
             }
 
             ImGui.TableNextColumn();
-            var (reason, folderExists) = _status.TryGetValue(record.Id, out var status) ? status : (null, false);
+            // Both touch the disk, so the session remembers them for a moment.
+            var reason = session.DisplayedRevertBlockReason(record);
             if (record.IsReverted)
                 Widgets.Badge("Reverted", Theme.Muted);
             else if (reason == null || session.IsBusy)
@@ -90,7 +70,7 @@ internal sealed class HistoryView(ConverterSession session, ActionPanels actions
 
             ImGui.TableNextColumn();
             var folder = record.IsReverted ? record.RevertedOutputPath : record.PublishedPath;
-            var folderReason = folderExists ? null : "The folder no longer exists.";
+            var folderReason = folder != null && session.PathExists(folder) ? null : "The folder no longer exists.";
             if (Widgets.IconButton("##Open", FontAwesomeIcon.FolderOpen,
                     record.IsReverted ? "Open the folder the reverted output was moved to" : "Open the converted mod's folder",
                     folderReason))

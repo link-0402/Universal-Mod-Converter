@@ -107,24 +107,33 @@ public sealed class Plugin : IDalamudPlugin
     /// overlapping calls are dropped rather than queued.
     /// </summary>
     /// <param name="includeOrphans">
-    /// Also clean up staging folders and recovery journals a crash left beside the mods. Only
-    /// safe when no conversion of ours is in flight, so this is a startup-only concern.
+    /// Also recover what a crash left beside the mods: restore a mod an interrupted conversion
+    /// moved away, and clean up staging folders and recovery journals. Only safe when no
+    /// conversion of ours is in flight, so this is a startup-only concern. Recovery is not a
+    /// matter of how long backups are kept, so it runs even when automatic cleanup is off.
     /// </param>
-    internal void RunBackupMaintenance(bool includeOrphans = false)
+    /// <param name="manual">Asked for by the user ("Clean up now"): runs even when automatic cleanup is off.</param>
+    /// <param name="done">
+    /// On the framework thread afterwards, with the result, or null when the sweep failed (or,
+    /// with automatic cleanup off, when only the recovery ran).
+    /// </param>
+    /// <returns>False when a sweep is already running, or there is nothing to do: automatic cleanup is off and no recovery was asked for.</returns>
+    internal bool RunBackupMaintenance(bool includeOrphans = false, bool manual = false,
+        Action<BackupMaintenanceService.SweepResult?>? done = null)
     {
-        if (!Configuration.PruneBackupsAutomatically) return;
-        if (Interlocked.Exchange(ref _maintenanceRunning, 1) == 1) return;
+        var prune = manual || Configuration.PruneBackupsAutomatically;
+        if (!prune && !includeOrphans) return false;
+        if (Interlocked.Exchange(ref _maintenanceRunning, 1) == 1) return false;
 
         // Penumbra IPC is a framework-thread concern, so the root is read here, not in the task.
         var root = PenumbraIpc.IsAvailable ? PenumbraIpc.GetModDirectory() : null;
         Task.Run(() =>
         {
+            BackupMaintenanceService.SweepResult? result = null;
             try
             {
                 if (includeOrphans && !string.IsNullOrWhiteSpace(root)) BackupMaintenance.SweepOrphans(root!);
-                var result = BackupMaintenance.Sweep(root);
-                if (result.PrunedRecords.Count > 0)
-                    Session.Runner.Post(() => History.MarkBackupsPruned(result.PrunedRecords));
+                if (prune) result = BackupMaintenance.Sweep(root);
             }
             catch (Exception ex)
             {
@@ -134,7 +143,13 @@ public sealed class Plugin : IDalamudPlugin
             {
                 Volatile.Write(ref _maintenanceRunning, 0);
             }
+            Session.Runner.Post(() =>
+            {
+                if (result is { PrunedRecords.Count: > 0 }) History.MarkBackupsPruned(result.PrunedRecords);
+                done?.Invoke(result);
+            });
         });
+        return true;
     }
 
     public void Dispose()

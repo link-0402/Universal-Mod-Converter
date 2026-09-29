@@ -28,32 +28,19 @@ public sealed record PlannedFileOperation(
 /// <summary>A human-readable line of the preview.</summary>
 public sealed record GearPlanChange(string Category, string Scope, string From, string To);
 
-public sealed class GearConversionPlan : IModFilePlan
+public sealed class GearConversionPlan : ModFilePlan
 {
-    internal GearConversionPlan(GearConversionRequest request, PenumbraMod result)
+    internal GearConversionPlan(GearConversionRequest request, PenumbraMod result) : base(result)
     {
         Request = request;
-        Result = result;
     }
 
     public GearConversionRequest Request { get; }
 
-    /// <summary>The complete definition of the output mod (in place: the edited mod).</summary>
-    public PenumbraMod Result { get; }
-
-    public List<PlannedFileOperation> Files { get; } = [];
-
-    IReadOnlyList<PlannedFileOperation> IModFilePlan.Files => Files;
-
-    public List<GearPlanChange> Changes { get; } = [];
-
-    public List<PlanDiagnostic> Diagnostics { get; } = [];
+    public override ConversionOutputMode Mode => Request.Mode;
 
     /// <summary>Source game path → target game path for every converted resource.</summary>
     public Dictionary<string, string> GamePathMap { get; } = new(StringComparer.OrdinalIgnoreCase);
-
-    /// <summary>Absolute paths of every source file the plan was derived from.</summary>
-    public HashSet<string> InputFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// The mod file each converted model came from, by the container holding it and the model's
@@ -62,15 +49,6 @@ public sealed class GearConversionPlan : IModFilePlan
     /// on a character wearing the source item.
     /// </summary>
     public Dictionary<(ContainerAddress Container, string TargetPath), string> ModelSources { get; } = [];
-
-    public bool HasBlockers => Diagnostics.Any(d => d.IsBlocker);
-
-    /// <summary>
-    /// Deterministic hash of the planned output, used to prove Apply matches Preview. Covers the
-    /// whole result definition, so in a run of several conversions every entry hashes the same
-    /// shared definition; fingerprint the merged plan instead.
-    /// </summary>
-    public string Fingerprint() => ModFingerprint.ComputePlan(Files, Result);
 }
 
 /// <summary>
@@ -152,6 +130,9 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
 
         private ushort _sourceVariant;
         private ImcEntry _sourceEntry;
+
+        /// <summary>Material folders options switch the source variant to, besides the default one.</summary>
+        private readonly SortedSet<int> _optionMaterialIds = [];
         private readonly SortedDictionary<ushort, ImcEntry> _targetImc = new();
 
         public Session(IGameFileProvider game, ModPlanContext context, GearConversionRequest request)
@@ -321,6 +302,15 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
 
             if (_sourceEntry.MaterialId == 0) _sourceEntry = _sourceEntry with { MaterialId = 1 };
 
+            // Options may point the source variant at material folders of their own. Their IMC
+            // entries are retargeted along with it, so the target needs those folders too.
+            foreach (var container in _mod.Containers.Where(c => !c.Address.IsDefault))
+            foreach (var manipulation in container.Manipulations?.OfType<JsonObject>() ?? [])
+                if (GearManipulations.IsImcFor(manipulation, _src, _sourceVariant) &&
+                    ImcEntry.FromJson(manipulation["Manipulation"]?["Entry"]) is { MaterialId: > 0 } optionEntry &&
+                    optionEntry.MaterialId != _sourceEntry.MaterialId)
+                    _optionMaterialIds.Add(optionEntry.MaterialId);
+
             foreach (var (variant, entry) in ReadImc(_tgt)) _targetImc[variant] = entry;
             if (_targetImc.Count == 0)
                 Warn("target_imc_missing", $"No IMC data could be read for {Describe(_tgt)}; only variant {TargetVariant} is redirected.");
@@ -437,16 +427,24 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                 return;
             }
 
-            var modelRoot = modelPath[..modelPath.IndexOf("/model/", StringComparison.Ordinal)];
-            if (!string.Equals(modelRoot, _srcRoot, StringComparison.Ordinal)) return;
+            // A short material name is looked up beside the model; a model outside a model folder
+            // (a swap to a background part, say) has no item folder to look in.
+            var at = modelPath.IndexOf("/model/", StringComparison.Ordinal);
+            if (at < 0 || !string.Equals(modelPath[..at], _srcRoot, StringComparison.Ordinal)) return;
             var name = GamePath.Normalize(material);
             var folders = new SortedSet<int> { _sourceEntry.MaterialId };
+            folders.UnionWith(_optionMaterialIds);
             if (_materialFolders.TryGetValue(name, out var supplied)) folders.UnionWith(supplied);
 
             foreach (var folder in folders)
             {
                 var path = $"{_srcRoot}/material/v{folder:D4}/{name}";
-                if (folder == _sourceEntry.MaterialId && !ProvidedIn(path, _mod.Default) && !_generated.ContainsKey(path))
+                // The default folder must work whatever the options say; one an option switches to
+                // only needs the game's copy when no container of the mod supplies it.
+                var needed = folder == _sourceEntry.MaterialId
+                    ? !ProvidedIn(path, _mod.Default)
+                    : _optionMaterialIds.Contains(folder) && !_files.ContainsKey(path) && !_swaps.ContainsKey(path);
+                if (needed && !_generated.ContainsKey(path))
                 {
                     if (Game(path) is { } vanilla) Generate(path, vanilla);
                     else if (!_files.ContainsKey(path) && !_swaps.ContainsKey(path))
@@ -559,7 +557,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                     foreach (var (from, to) in replacements)
                         _plan.Changes.Add(new GearPlanChange("Reference", origin, from, to));
                     if (_tgt.IsAccessory && path.EndsWith(".mdl", StringComparison.Ordinal))
-                        output = ForAccessory(origin, output);
+                        output = ForAccessory(origin, path, output);
                     if (!ReferenceEquals(output, bytes)) result[id] = output;
                 }
                 catch (Exception ex)
@@ -578,11 +576,22 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         /// session, which leaves the parts in place so the Mesh groups tab lines up with the
         /// source model.
         /// </summary>
-        private byte[] ForAccessory(string origin, byte[] data)
+        private byte[] ForAccessory(string origin, string path, byte[] data)
         {
             MdlFile model;
             try { model = MdlFile.Read(data); }
             catch (InvalidDataException) { return data; }
+            catch (UnsupportedMdlVersionException)
+            {
+                // An old model cannot be taken apart, but what it lists can still be read.
+                var listed = ResourceReferences.Read(path, data).Where(ResourceReferences.IsSkinMaterial).Distinct().ToList();
+                if (listed.Count > 0)
+                    Warn("accessory_skin_material",
+                        $"{origin} has parts with body materials ({string.Join(", ", listed)}), which an accessory cannot " +
+                        "load, so the game would not show the model. As an MDL version 5 model it cannot be edited here: " +
+                        "re-export it with a current tool, then leave those parts out in the Mesh groups tab.");
+                return data;
+            }
 
             var skin = model.Meshes.Select(m => m.MaterialIndex < model.Materials.Length ? model.Materials[m.MaterialIndex] : null)
                 .OfType<string>().Where(ResourceReferences.IsSkinMaterial).Distinct().ToList();
@@ -590,8 +599,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                 Warn("accessory_skin_material",
                     $"{origin} has parts with body materials ({string.Join(", ", skin)}): skin, bibo, pubes or piercings. " +
                     "An accessory cannot load these, and the game would not show the model at all, so those mesh groups " +
-                    "are switched off in the Mesh groups tab. (In a run of several conversions there is no Mesh groups " +
-                    "tab: convert this one on its own to have them left out.)");
+                    "are switched off in the Mesh groups tab.");
 
             var unused = model.RemoveUnusedMaterials();
             if (unused.Count == 0) return data;
@@ -674,7 +682,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
 
                     var newLocal = InPlaceLocal(provider, usage, rewritten, locals, localTargets);
                     var files = container.GetOrCreateFiles();
-                    if (FindKey(files, target) is { } existing && !_map.ContainsKey(GamePath.Normalize(existing)))
+                    if (GamePath.FindKey(files, target) is { } existing && !_map.ContainsKey(GamePath.Normalize(existing)))
                     {
                         Block("target_conflict", $"{original.Label} already redirects {target}.");
                         continue;
@@ -694,7 +702,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                     var path = GamePath.Normalize(key);
                     if (!_map.TryGetValue(path, out var target) || target == path) continue;
                     var swaps = container.GetOrCreateFileSwaps();
-                    if (FindKey(swaps, target) is { } existing && !_map.ContainsKey(GamePath.Normalize(existing)))
+                    if (GamePath.FindKey(swaps, target) is { } existing && !_map.ContainsKey(GamePath.Normalize(existing)))
                     {
                         Block("target_conflict", $"{original.Label} already swaps {target}.");
                         continue;
@@ -709,7 +717,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             AddGeneratedFiles(result.Default, rewritten, locals);
             RetargetManipulations(result, keepUnrelated: true, keepSource: KeepsSource);
             InjectDefaults(result);
-            RetargetImcGroups(result, dropUnrelated: false);
+            RetargetImcGroups(result);
 
             // Game files the target needs but the mod does not ship land in the default container,
             // so they apply even when the option holding the converted item is switched off.
@@ -821,7 +829,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                     var newKey = converted ? target! : path;
                     var newLocal = NewModLocal(provider, rename: converted, useRewritten: owned);
                     var files = container.GetOrCreateFiles();
-                    if (FindKey(files, newKey) is { } clash &&
+                    if (GamePath.FindKey(files, newKey) is { } clash &&
                         !string.Equals(GamePath.NormalizeLocal(Json.GetString(files[clash]) ?? string.Empty),
                             GamePath.NormalizeLocal(newLocal), StringComparison.Ordinal))
                     {
@@ -848,7 +856,8 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             AddGeneratedFiles(result.Default, rewritten, locals);
             RetargetManipulations(result, keepUnrelated: false);
             InjectDefaults(result);
-            RetargetImcGroups(result, dropUnrelated: true);
+            // IMC groups about other items are dropped once the whole run has planned.
+            RetargetImcGroups(result);
             _context.AddFinalizerOnce("new-mod", mod =>
             {
                 PruneGroups(mod);
@@ -862,13 +871,18 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                 var content = useRewritten ? rewritten.GetValueOrDefault(provider.FullPath) : null;
                 var slot = (provider.FullPath, content != null);
                 if (assigned.TryGetValue(slot, out var known)) return known;
+                _plan.InputFiles.Add(provider.FullPath);
+                var unchanged = !rename && content == null;
+                if (unchanged && _context.UnchangedCopy(provider.FullPath) is { } shared)
+                    return assigned[slot] = shared;
+
                 var relative = Path.GetRelativePath(_root, provider.FullPath);
                 var destination = locals.Reserve(rename || content != null ? RewriteLocal(relative) : relative, null);
-                _plan.InputFiles.Add(provider.FullPath);
                 _plan.Files.Add(content != null
                     ? new PlannedFileOperation(LocalFileOperation.Write, relative, destination, content, "references retargeted")
                     : new PlannedFileOperation(LocalFileOperation.Copy, relative, destination, null,
                         rename ? "converted resource" : "shared dependency"));
+                if (unchanged) _context.NoteUnchangedCopy(provider.FullPath, destination);
                 assigned[slot] = destination;
                 return destination;
             }
@@ -880,7 +894,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             {
                 var target = _map[source];
                 var files = defaults.GetOrCreateFiles();
-                if (FindKey(files, target) != null)
+                if (GamePath.FindKey(files, target) != null)
                 {
                     if (!EditsSourceMod) continue;
                     Block("target_conflict", $"The default option already redirects {target}.");
@@ -917,9 +931,6 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             return null;
         }
 
-        private static string? FindKey(JsonObject obj, string key)
-            => obj.Select(p => p.Key).FirstOrDefault(k => string.Equals(GamePath.Normalize(k), key, StringComparison.Ordinal));
-
         // ── Metadata ────────────────────────────────────────────────────────
 
         /// <param name="keepSource">
@@ -930,8 +941,16 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         {
             foreach (var original in _mod.Containers)
             {
-                if (original.Manipulations is not { } manipulations) continue;
+                // In a run of several conversions the result already holds what the earlier ones
+                // made of the metadata, which must survive this one. In place, that list is this
+                // conversion's input (for a single conversion it is the source's own). A new mod
+                // retargets the source's entries and adds them to whatever the result holds.
+                var container = result.GetContainer(original.Address);
+                if ((keepUnrelated ? container.Manipulations : original.Manipulations) is not { } manipulations) continue;
                 var output = new JsonArray();
+                if (!keepUnrelated && container.Manipulations is { } earlier)
+                    foreach (var node in earlier)
+                        output.Add(node?.DeepClone());
                 var retargeted = new List<JsonObject>();
                 foreach (var node in manipulations)
                 {
@@ -972,7 +991,6 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                 foreach (var item in retargeted)
                     if (seen.Add(GearManipulations.Identity(item))) merged.Add(item);
 
-                var container = result.GetContainer(original.Address);
                 if (merged.Count > 0) container.Node["Manipulations"] = merged;
                 else container.Node.Remove("Manipulations");
             }
@@ -1094,7 +1112,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             foreach (var manipulation in added) manipulations.Add(manipulation);
         }
 
-        private void RetargetImcGroups(PenumbraMod result, bool dropUnrelated)
+        private void RetargetImcGroups(PenumbraMod result)
         {
             var added = new List<ModGroup>();
             for (var i = result.Groups.Count - 1; i >= 0; i--)
@@ -1123,7 +1141,6 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                             "attributes are toggled separately.");
                     }
                 }
-                else if (dropUnrelated) group.Node["__umc_drop"] = true;
             }
 
             result.Groups.AddRange(added);
@@ -1150,7 +1167,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         }
 
         private void PruneGroups(PenumbraMod result)
-            => ModGroupPruning.Prune(result, group => _plan.Changes.Add(
+            => ModGroupPruning.Prune(result, _mod, group => _plan.Changes.Add(
                 new GearPlanChange("Group", group.Name, "option group", "not included (no converted content)")));
 
         // ── Helpers ─────────────────────────────────────────────────────────
@@ -1181,17 +1198,9 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             return bytes;
         }
 
-        private void Warn(string code, string message)
-        {
-            if (!_plan.Diagnostics.Any(d => d.Code == code && d.Message == message))
-                _plan.Diagnostics.Add(new PlanDiagnostic(code, message, false));
-        }
+        private void Warn(string code, string message) => _plan.Report(code, message, false);
 
-        private void Block(string code, string message)
-        {
-            if (!_plan.Diagnostics.Any(d => d.Code == code && d.Message == message))
-                _plan.Diagnostics.Add(new PlanDiagnostic(code, message, true));
-        }
+        private void Block(string code, string message) => _plan.Report(code, message, true);
 
         private static string Describe(GearItem item) => $"{item.Slot} {item.PathEndpoint.Token} (variant {item.Variant})";
     }

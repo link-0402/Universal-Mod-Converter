@@ -18,7 +18,9 @@ internal static class GearConversionTests
         ("In place: shared resources are kept, exclusive ones move", InPlaceSameSlot),
         ("Add to mod: the original keeps working beside the converted item", AddToModKeepsSource),
         ("Two conversions merge into one mod", MergeTwoConversions),
+        ("A run answers for every file it read and lets go of what it wrote", MergedPlanInputsAndContents),
         ("A conversion that overlaps another is rejected and rolled back", MergeRejectsOverlap),
+        ("A run keeps every conversion's metadata, IMC group and shared files", RunKeepsEveryConversion),
         ("Accessory to equipment conversion", AccessoryToEquipment),
         ("Races with a model get an EQDP entry on a target without one", EqdpForRaceModels),
         ("Item the mod does not change is rejected", EmptyPlanWithoutModContent),
@@ -27,7 +29,131 @@ internal static class GearConversionTests
         ("Customization detection skips roots that only hold borrowed textures", CustomizationBorrowedTextures),
         ("Skin textures are a root of their own and fan out to other races", SkinTextureRoots),
         ("Cross-slot new mod: output models list and mesh-group removal", CrossSlotMeshRemoval),
+        ("A run leaves body parts out the way each of its conversions would alone", RunMeshDefaults),
+        ("Mesh groups list only the models the conversion made", MeshGroupsListOnlyConvertedModels),
+        ("A version 5 model still converts to an accessory", AccessoryFromV5Model),
+        ("A longer material name checks the LOD's edge geometry, not its polygon count", EdgeGeometryGuard),
+        ("An option's own material folder comes along for the target", OptionMaterialFolders),
+        ("Verification follows a swap to the mod's own file", VerifyFollowsSwaps),
     ];
+
+    /// <summary>
+    /// The Mesh groups tab edits what the conversion wrote. Another item the mod has under the
+    /// target's set (its top, beside the gloves the body converts into) is not part of that.
+    /// </summary>
+    private static void MeshGroupsListOnlyConvertedModels()
+    {
+        using var mod = new TempDir();
+        const string top = "chara/equipment/e0100/model/c0201e0100_top.mdl";
+        const string topMtrl = "chara/equipment/e0100/material/v0001/mt_c0201e0100_top_a.mtrl";
+        const string topTex = "chara/equipment/e0100/texture/v01_c0201e0100_top_d.tex";
+        const string theirs = "chara/equipment/e0300/model/c0201e0300_top.mdl";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Identifier":"{{{G1}}}","Name":"Two sets","DefaultData":{"Files":{
+              "{{{top}}}":"m\\top.mdl","{{{topMtrl}}}":"m\\a.mtrl","{{{topTex}}}":"m\\d.tex","{{{theirs}}}":"m\\other.mdl"} } }
+            """);
+        mod.File("m/top.mdl", TestAssets.CreateMultiMeshMdl(["/mt_c0201e0100_top_a.mtrl", "/mt_c0201b0001_a.mtrl"]));
+        mod.File("m/a.mtrl", Mtrl(topTex));
+        mod.File("m/d.tex", [1]);
+        mod.File("m/other.mdl", TestAssets.CreateMultiMeshMdl(["/mt_c0201e0300_top_a.mtrl", "/mt_c0201b0001_a.mtrl"]));
+
+        var plan = new GearConversionPlanner(StandardGame()).Plan(mod.Path, new GearConversionRequest(
+            new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Hands, 300, 1), ConversionOutputMode.InPlace));
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { "chara/equipment/e0300/model/c0201e0300_glv.mdl" },
+            GearOutputModels.Collect(plan, mod.Path).SelectMany(m => m.GamePaths).ToArray());
+    }
+
+    /// <summary>
+    /// A version 5 model cannot be taken apart, but it can still become an accessory: its
+    /// references are rewritten as usual, and a body material it lists is reported.
+    /// </summary>
+    private static void AccessoryFromV5Model()
+    {
+        using var mod = new TempDir();
+        mod.Json("meta.json", """
+            {"FileVersion":4,"Name":"Old","DefaultData":{"Files":{"chara/equipment/e0100/model/c0201e0100_top.mdl":"top.mdl"} } }
+            """);
+        var model = TestAssets.CreateMultiMeshMdl(["/mt_c0201e0100_top_a.mtrl", "/mt_c0201b0001_a.mtrl"]);
+        BinaryPrimitives.WriteUInt32LittleEndian(model, MdlFile.Version5);
+        mod.File("top.mdl", model);
+
+        var plan = new GearConversionPlanner(StandardGame()).Plan(mod.Path, new GearConversionRequest(
+            new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Neck, 20, 1), ConversionOutputMode.NewMod));
+        Assert.True(plan.Diagnostics.All(d => d.Code != "rewrite_failed"), string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "accessory_skin_material" && d.Message.Contains("version 5")),
+            string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+    }
+
+    /// <summary>A LOD's edge geometry sits at +28; +36 is its polygon count, which a longer name does not affect.</summary>
+    private static void EdgeGeometryGuard()
+    {
+        var model = TestAssets.CreateMdl(material: "/mt_c0201e0100_top_a.mtrl");
+        var lod = MdlFile.Read(model).Lods[0];
+        var buffers = new byte[8];
+        BinaryPrimitives.WriteUInt32LittleEndian(buffers, lod.VertexDataOffset);
+        BinaryPrimitives.WriteUInt32LittleEndian(buffers.AsSpan(4), lod.IndexDataOffset);
+        var lodStart = model.AsSpan(0x44).IndexOf(buffers) + 0x44 - 52;
+        Assert.True(lodStart > 0x44, "the LOD table is found by its buffer offsets");
+        var longer = new Dictionary<string, string> { ["/mt_c0201e0100_top_a.mtrl"] = "/mt_c0201e0300_top_glv_a.mtrl" };
+
+        BinaryPrimitives.WriteUInt32LittleEndian(model.AsSpan(lodStart + 36), 1234);
+        Assert.Equal("/mt_c0201e0300_top_glv_a.mtrl",
+            ResourceReferences.ReadMdlMaterials(ResourceReferences.RewriteMdlStrings(model, longer)).Single());
+        BinaryPrimitives.WriteUInt32LittleEndian(model.AsSpan(lodStart + 28), 16);
+        Assert.Throws<InvalidDataException>(() => ResourceReferences.RewriteMdlStrings(model, longer));
+    }
+
+    /// <summary>
+    /// An option that switches the source variant to another material folder is retargeted with
+    /// it, so the target needs that folder as well: the game's materials are copied for it.
+    /// </summary>
+    private static void OptionMaterialFolders()
+    {
+        using var mod = new TempDir();
+        const string root = "chara/equipment/e0100";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Colours",
+             "DefaultData":{"Files":{
+               "{{{root}}}/model/c0201e0100_top.mdl":"top.mdl",
+               "{{{root}}}/material/v0001/mt_c0201e0100_top_a.mtrl":"top.mtrl"} },
+             "Groups":[{"Name":"Colour","Type":"Single","Options":[
+               {"Name":"Default"},
+               {"Name":"Dark","Manipulations":[{"Type":"Imc","Manipulation":{
+                 "Entry":{"MaterialId":2,"DecalId":0,"VfxId":0,"MaterialAnimationId":0,"AttributeMask":1023,"SoundId":0},
+                 "PrimaryId":100,"SecondaryId":0,"Variant":1,"ObjectType":"Equipment","EquipSlot":"Body","BodySlot":"Unknown"}}]}]}]}
+            """);
+        mod.File("top.mdl", TestAssets.CreateMdl(material: "/mt_c0201e0100_top_a.mtrl"));
+        mod.File("top.mtrl", Mtrl($"{root}/texture/v01_c0201e0100_top_d.tex"));
+        var game = StandardGame();
+        game.Files[$"{root}/texture/v01_c0201e0100_top_d.tex"] = [4];
+        game.Files[$"{root}/material/v0002/mt_c0201e0100_top_a.mtrl"] = Mtrl($"{root}/texture/v02_c0201e0100_top_d.tex");
+        game.Files[$"{root}/texture/v02_c0201e0100_top_d.tex"] = [5];
+
+        var plan = new GearConversionPlanner(game).Plan(mod.Path, new GearConversionRequest(
+            new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Body, 300, 1), ConversionOutputMode.NewMod));
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        var keys = plan.Result.Containers.SelectMany(c => c.FileEntries()).Select(e => GamePath.Normalize(e.Key)).ToHashSet();
+        Assert.True(keys.Contains("chara/equipment/e0300/material/v0002/mt_c0201e0300_top_a.mtrl"),
+            $"the Dark option's folder is there for the target: {string.Join(", ", keys)}");
+    }
+
+    /// <summary>A swapped material is checked the way the game loads it: the mod's own file at the swap's target.</summary>
+    private static void VerifyFollowsSwaps()
+    {
+        using var mod = new TempDir();
+        mod.Json("meta.json", """
+            {"FileVersion":4,"Name":"Swapped","DefaultData":{
+              "Files":{"chara/equipment/e0300/model/c0201e0300_top.mdl":"top.mdl","chara/common/umc/swap_a.mtrl":"swap.mtrl"},
+              "FileSwaps":{"chara/equipment/e0300/material/v0001/mt_c0201e0300_top_a.mtrl":"chara/common/umc/swap_a.mtrl"} } }
+            """);
+        mod.File("top.mdl", TestAssets.CreateMdl(material: "/mt_c0201e0300_top_a.mtrl"));
+        mod.File("swap.mtrl", Mtrl("chara/common/umc/nowhere_d.tex"));
+
+        var issues = GearConversionVerifier.Verify(mod.Path, new GearItem(GearSlot.Body, 300, 1), null, new FakeGame());
+        Assert.True(issues.Any(i => i.IsError && i.Message.Contains("chara/common/umc/nowhere_d.tex")),
+            string.Join("; ", issues.Select(i => i.Message)));
+    }
 
     private static void CrossSlotMeshRemoval()
     {
@@ -75,6 +201,72 @@ internal static class GearConversionTests
         Assert.True(issues.Count == 0, string.Join("; ", issues.Select(i => i.Message)));
         // The source mod is untouched.
         Assert.Equal(2, MdlFile.Read(File.ReadAllBytes(Path.Combine(mod.Path, "m", "top.mdl"))).Meshes.Length);
+    }
+
+    /// <summary>
+    /// A model that changes slots starts without the old slot's body parts, and one that becomes
+    /// an accessory can never keep a body material. A run ships the models of all its conversions,
+    /// and each must follow its own conversion exactly as it would planned on its own.
+    /// </summary>
+    private static void RunMeshDefaults()
+    {
+        using var mod = new TempDir();
+        const string topTex = "chara/equipment/e0100/texture/v01_c0201e0100_top_d.tex";
+        const string dwnTex = "chara/equipment/e0200/texture/v01_c0201e0200_dwn_d.tex";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Identifier":"{{{G1}}}","Name":"Two",
+             "DefaultData":{"Files":{
+               "chara/equipment/e0100/model/c0201e0100_top.mdl":"top.mdl",
+               "chara/equipment/e0100/material/v0001/mt_c0201e0100_top_a.mtrl":"top.mtrl",
+               "{{{topTex}}}":"top.tex",
+               "chara/equipment/e0200/model/c0201e0200_dwn.mdl":"dwn.mdl",
+               "chara/equipment/e0200/material/v0001/mt_c0201e0200_dwn_a.mtrl":"dwn.mtrl",
+               "{{{dwnTex}}}":"dwn.tex"} } }
+            """);
+        mod.File("top.mdl", TestAssets.CreateMultiMeshMdl(["/mt_c0201e0100_top_a.mtrl", "/mt_c0201b0001_a.mtrl"]));
+        mod.File("top.mtrl", Mtrl(topTex));
+        mod.File("top.tex", [1]);
+        mod.File("dwn.mdl", TestAssets.CreateMultiMeshMdl(["/mt_c0201e0200_dwn_a.mtrl", "/mt_c0201b0001_a.mtrl"]));
+        mod.File("dwn.mtrl", Mtrl(dwnTex));
+        mod.File("dwn.tex", [2]);
+
+        var game = StandardGame();
+        GearConversionRequest[] requests =
+        [
+            new(new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Hands, 300, 1), ConversionOutputMode.NewMod),
+            new(new GearItem(GearSlot.Legs, 200, 1), new GearItem(GearSlot.Neck, 20, 1), ConversionOutputMode.NewMod),
+        ];
+
+        var alone = requests.Select(request =>
+        {
+            var plan = new GearConversionPlanner(game).Plan(mod.Path, request);
+            Assert.True(!plan.HasBlockers, $"{request.Source}: " + string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+            return GearOutputModels.Collect(plan, mod.Path).Single();
+        }).ToList();
+
+        var context = new ModPlanContext(mod.Path, ConversionOutputMode.NewMod, shared: true);
+        var merger  = new ModPlanMerger(context);
+        var entries = requests.Select(request => merger.Add(request.Source.ToString(), [request.Source.Root, request.Target.Root],
+            ctx => new GearConversionPlanner(game).Plan(ctx, request))).ToList();
+        context.RunFinalizers();
+        var merged = merger.Build();
+        Assert.True(!merged.HasBlockers, string.Join("; ", merged.Diagnostics.Concat(entries.SelectMany(e => e.Diagnostics))
+            .Select(d => d.Message)));
+        var together = entries.Select(e => GearOutputModels.Collect((GearConversionPlan)e.Plan!, mod.Path).Single()).ToList();
+
+        static string Rules(GearOutputModel model)
+            => string.Join(",", model.Groups.Select(g => $"{(model.IsForcedOff(g.Index) ? "forced" : model.StartsOff(g.Index) ? "off" : "on")}"));
+
+        for (var i = 0; i < requests.Length; i++)
+        {
+            Assert.Equal(requests[i], together[i].Conversion);
+            Assert.Equal(Rules(alone[i]), Rules(together[i]));
+        }
+
+        // The body becoming gloves: its skin part starts off, and may be ticked back on.
+        Assert.Equal("on,off", Rules(together[0]));
+        // The legs becoming a necklace: an accessory cannot load a body material at all.
+        Assert.Equal("on,forced", Rules(together[1]));
     }
 
     private static void CustomizationBorrowedTextures()
@@ -229,6 +421,20 @@ internal static class GearConversionTests
         // Nonsense limits are clamped rather than deleting everything.
         Assert.Equal(new[] { "b" },
             BackupRetention.Expired([At("a", 0), At("b", 0)], new HashSet<string>(), keepDays: 0, keepCount: 0, now).ToArray());
+
+        // A backup is dated by its name: it is the mod folder moved aside, which keeps the
+        // folder's own timestamp however old the mod is.
+        var taken = new DateTime(2026, 9, 25, 13, 55, 57, DateTimeKind.Utc);
+        var name = BackupRetention.FolderName("My Mod", taken, "db2702d3aa55");
+        Assert.Equal("My Mod-20260925-135557-db2702d3", name);
+        Assert.Equal(taken, BackupRetention.TakenUtc(name));
+        Assert.Equal(DateTimeKind.Utc, BackupRetention.TakenUtc(name)!.Value.Kind);
+        Assert.Equal(taken, BackupRetention.TakenUtc(BackupRetention.FolderName("My Mod-reverted", taken, "0123456789")));
+
+        // Anything else in a shared backup directory is not ours to delete.
+        foreach (var other in new[] { "My Mod", "Backups 2026", "-20260925-135557-db2702d3", "Mod-20261399-135557-db2702d3",
+                                      "Mod-20260925-135557-DB2702D3", "Mod-20260925-135557-db2702d3-copy" })
+            Assert.True(BackupRetention.TakenUtc(other) == null, $"'{other}' is not a backup name");
     }
 
     /// <summary>Penumbra migrated every mod to FileVersion 4 on the 1.7 release, so the
@@ -545,6 +751,109 @@ internal static class GearConversionTests
             .ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
         Assert.True(files.ContainsKey("chara/equipment/e0300/model/c0201e0300_top.mdl"), "the first conversion survived");
         Assert.True(files.ContainsKey("chara/equipment/e0400/model/c0201e0400_glv.mdl"), "the second conversion survived");
+    }
+
+    /// <summary>
+    /// A run's plan answers for every file its conversions read, so a change to any of them after
+    /// the preview is caught, and once written it lets go of what every conversion wrote.
+    /// </summary>
+    private static void MergedPlanInputsAndContents()
+    {
+        using var mod = TwoItemMod();
+        var game = StandardGame();
+        var context = new ModPlanContext(mod.Path, ConversionOutputMode.InPlace, shared: true);
+        var merger  = new ModPlanMerger(context);
+        var entries = new[]
+        {
+            merger.Add("body", ["chara/equipment/e0100"], ctx => new GearConversionPlanner(game).Plan(ctx, Swap(GearSlot.Body, 100, 300))),
+            merger.Add("hands", ["chara/equipment/e0200"], ctx => new GearConversionPlanner(game).Plan(ctx, Swap(GearSlot.Hands, 200, 400))),
+        };
+        context.RunFinalizers();
+        var merged = merger.Build();
+        Assert.True(!merged.HasBlockers, string.Join("; ", merged.Diagnostics.Select(d => d.Message)));
+
+        foreach (var entry in entries)
+        {
+            Assert.True(entry.Plan!.InputFiles.Count > 0, $"'{entry.Description}' read files of the mod");
+            Assert.True(entry.Plan.InputFiles.All(merged.InputFiles.Contains), $"the run answers for what '{entry.Description}' read");
+        }
+
+        Assert.True(merged.Files.Any(f => f.Content != null), "the run carries the models it rewrites");
+        merged.ReleaseContents();
+        Assert.True(merged.Files.All(f => f.Content == null), "the run keeps no contents once written");
+        Assert.True(entries.All(e => e.Plan!.Files.All(f => f.Content == null)), "nor does any of its conversions");
+    }
+
+    /// <summary>
+    /// Each conversion of a run builds on what the earlier ones left in the shared definition.
+    /// The second one must not rebuild the metadata from the untouched original (which dropped
+    /// the first one's entries), mistake an IMC group the first retargeted for a change of its
+    /// own, or copy a file both need a second time under another name.
+    /// </summary>
+    private static void RunKeepsEveryConversion()
+    {
+        const string shared = "chara/common/texture/umc_shared_n.tex";
+        var game = StandardGame();
+        game.Files["chara/equipment/e0200/e0200.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+        game.Files["chara/equipment/e0400/e0400.imc"] = Imc(2, 5, (v, _) => new ImcEntry((byte)(v + 1), 0, 0x001, 7, 0, 0));
+        game.Files["chara/xls/charadb/equipmentdeformerparameter/c0101.eqdp"] = Eqdp((100, 0b1100), (200, 0b11_0000));
+        game.Files["chara/xls/charadb/equipmentdeformerparameter/c0201.eqdp"] = Eqdp((100, 0b1100), (200, 0b11_0000));
+
+        foreach (var mode in new[] { ConversionOutputMode.NewMod, ConversionOutputMode.InPlace, ConversionOutputMode.AddToMod })
+        {
+            using var mod = new TempDir();
+            mod.Json("meta.json", $$$"""
+                {"FileVersion":4,"Identifier":"{{{G1}}}","Name":"Two",
+                 "DefaultData":{"Files":{
+                   "chara/equipment/e0100/model/c0201e0100_top.mdl":"top.mdl",
+                   "chara/equipment/e0100/material/v0001/mt_c0201e0100_top_a.mtrl":"top.mtrl",
+                   "chara/equipment/e0200/model/c0201e0200_glv.mdl":"glv.mdl",
+                   "chara/equipment/e0200/material/v0001/mt_c0201e0200_glv_a.mtrl":"glv.mtrl",
+                   "{{{shared}}}":"shared\\n.tex"},
+                  "Manipulations":[{"Type":"Eqp","Manipulation":{"Entry":123,"SetId":100,"Slot":"Body"}},
+                                   {"Type":"Eqp","Manipulation":{"Entry":456,"SetId":200,"Slot":"Hands"}}]},
+                 "Groups":[{"Type":"Imc","Id":"{{{G2}}}","Name":"Parts",
+                   "Identifier":{"PrimaryId":100,"SecondaryId":0,"Variant":1,"ObjectType":"Equipment","EquipSlot":"Body","BodySlot":"Unknown"},
+                   "DefaultEntry":{"MaterialId":1,"DecalId":0,"VfxId":0,"MaterialAnimationId":0,"AttributeMask":0,"SoundId":0},
+                   "Options":[{"Id":"{{{O1}}}","Name":"Hood","AttributeMask":1}]}]}
+                """);
+            mod.File("top.mdl", TestAssets.CreateMdl(material: "/mt_c0201e0100_top_a.mtrl"));
+            mod.File("top.mtrl", Mtrl("chara/equipment/e0100/texture/v01_c0201e0100_top_d.tex", shared));
+            mod.File("glv.mdl", TestAssets.CreateMdl(material: "/mt_c0201e0200_glv_a.mtrl"));
+            mod.File("glv.mtrl", Mtrl("chara/equipment/e0200/texture/v01_c0201e0200_glv_d.tex", shared));
+            mod.File("shared/n.tex", [7, 7, 7]);
+
+            var context = new ModPlanContext(mod.Path, mode, shared: true);
+            var merger  = new ModPlanMerger(context);
+            foreach (var (name, root, slot, from, to) in new[]
+                     {
+                         ("body", "chara/equipment/e0100", GearSlot.Body, (ushort)100, (ushort)300),
+                         ("hands", "chara/equipment/e0200", GearSlot.Hands, (ushort)200, (ushort)400),
+                     })
+            {
+                var request = new GearConversionRequest(new GearItem(slot, from, 1), new GearItem(slot, to, 1), mode);
+                var entry = merger.Add(name, [root], ctx => new GearConversionPlanner(game).Plan(ctx, request));
+                Assert.True(!entry.Rejected, $"{mode}, {name}: " + string.Join("; ", entry.Diagnostics.Select(d => d.Message)));
+            }
+
+            context.RunFinalizers();
+            var merged = merger.Build();
+            Assert.True(!merged.HasBlockers, $"{mode}: " + string.Join("; ", merged.Diagnostics.Select(d => d.Message)));
+
+            var metadata = (merged.Result.Default.Manipulations?.OfType<JsonObject>() ?? [])
+                .Select(GearManipulations.Describe).ToList();
+            var listed = string.Join(", ", metadata);
+            Assert.True(metadata.Any(m => m.Contains("Id=300")), $"{mode}: the body's metadata survives the second conversion: {listed}");
+            Assert.True(metadata.Any(m => m.Contains("Id=400")), $"{mode}: the hands' metadata is there: {listed}");
+            if (mode == ConversionOutputMode.InPlace)
+                Assert.True(!metadata.Any(m => m.StartsWith("Eqp[Slot=Body, SetId=100]", StringComparison.Ordinal)),
+                    $"in place, the body's own entry moved away and stays gone: {listed}");
+
+            Assert.True(merged.Result.Groups.Any(g => g.IsImc && Json.GetInt(g.Node["Identifier"]?["PrimaryId"], 0) == 300),
+                $"{mode}: the IMC group follows the body");
+            if (mode.IsNewMod())
+                Assert.Equal(1, merged.Files.Count(f => f.Source?.Replace('\\', '/') == "shared/n.tex"));
+        }
     }
 
     /// <summary>

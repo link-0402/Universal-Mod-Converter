@@ -5,13 +5,21 @@ namespace UniversalModConverter.Core;
 public static class ModGroupPruning
 {
     /// <summary>
-    /// Removes groups that ended up without data. Groups referenced by the conditions or
-    /// parent links of kept groups stay, because Penumbra refuses mods with dangling GUIDs.
+    /// Removes groups that ended up without data. An IMC group holds no files but changes an
+    /// item's metadata, so it stays only when a conversion retargeted it: one still exactly as
+    /// it is in <paramref name="source"/> is about an item the new mod does not carry. Deciding
+    /// that here, once every conversion of a run has planned, leaves the groups untouched while
+    /// they plan, so no conversion appears to change a group it has no part in. Groups
+    /// referenced by the conditions or parent links of kept groups stay, because Penumbra
+    /// refuses mods with dangling GUIDs.
     /// </summary>
-    public static void Prune(PenumbraMod result, Action<ModGroup>? dropped = null)
+    public static void Prune(PenumbraMod result, PenumbraMod source, Action<ModGroup>? dropped = null)
     {
-        var keep = result.Groups.Where(g => !g.Node.ContainsKey("__umc_drop") &&
-                                            (g.IsImc || g.Containers.Any(c => !c.IsEmpty))).ToHashSet();
+        var untouched = source.Groups.Where(g => g.IsImc).Select(g => PenumbraMod.Serialize(g.Node))
+            .ToHashSet(StringComparer.Ordinal);
+        var keep = result.Groups.Where(g => g.IsImc
+            ? !untouched.Contains(PenumbraMod.Serialize(g.Node))
+            : g.Containers.Any(c => !c.IsEmpty)).ToHashSet();
         var changed = true;
         while (changed)
         {
@@ -31,7 +39,6 @@ public static class ModGroupPruning
         foreach (var group in result.Groups.Where(g => !keep.Contains(g)))
             dropped?.Invoke(group);
         result.Groups.RemoveAll(g => !keep.Contains(g));
-        foreach (var group in result.Groups) group.Node.Remove("__umc_drop");
     }
 
     private static void CollectReferences(JsonNode? node, HashSet<Guid> output, bool topLevel)

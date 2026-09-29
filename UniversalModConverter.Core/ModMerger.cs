@@ -92,8 +92,12 @@ public static class ModMerger
         private readonly List<string> _notes = [];
         private readonly List<string> _missing = [];
 
-        /// <summary>Destination local paths taken so far, by normalized path.</summary>
-        private readonly Dictionary<string, (string Directory, string Local)> _taken = new(StringComparer.Ordinal);
+        /// <summary>
+        /// Destination local paths taken so far, by normalized path: which pack's file fills each
+        /// (<c>Directory</c> and <c>Source</c>, its place in that pack) and the place it gets in the
+        /// merged mod (<c>Local</c>). The two differ for a renamed file.
+        /// </summary>
+        private readonly Dictionary<string, (string Directory, string Source, string Local)> _taken = new(StringComparer.Ordinal);
 
         /// <summary>Where each of the top pack's files ends up in the merged mod.</summary>
         private readonly Dictionary<string, string> _overlayLocals = new(StringComparer.Ordinal);
@@ -150,10 +154,10 @@ public static class ModMerger
                 if (!File.Exists(Path.Combine(baseDir, GamePath.ToLocal(local))))
                 {
                     _missing.Add($"{BaseName}: {local}");
-                    _taken[key] = (baseDir, local);
+                    _taken[key] = (baseDir, local, local);
                     continue;
                 }
-                _taken[key] = (baseDir, local);
+                _taken[key] = (baseDir, local, local);
                 _copies.Add(new MergeCopy(baseDir, GamePath.ToLocal(local), GamePath.ToLocal(local)));
             }
         }
@@ -177,7 +181,7 @@ public static class ModMerger
 
             if (_taken.TryGetValue(key, out var existing))
             {
-                if (SameContent(Path.Combine(existing.Directory, GamePath.ToLocal(existing.Local)), source))
+                if (SameContent(Path.Combine(existing.Directory, GamePath.ToLocal(existing.Source)), source))
                 {
                     _shared++;
                     return _overlayLocals[key] = existing.Local;
@@ -185,12 +189,14 @@ public static class ModMerger
 
                 var renamed = Unique(GamePath.ToLocal(local));
                 _renamed++;
-                _taken[GamePath.NormalizeLocal(renamed)] = (overlayDir, renamed);
+                // The bytes still come from the file's own place in the top pack: a file of that
+                // pack that really has the new name must be compared with these, not with itself.
+                _taken[GamePath.NormalizeLocal(renamed)] = (overlayDir, local, renamed);
                 _copies.Add(new MergeCopy(overlayDir, GamePath.ToLocal(local), renamed));
                 return _overlayLocals[key] = renamed;
             }
 
-            _taken[key] = (overlayDir, local);
+            _taken[key] = (overlayDir, local, local);
             _copies.Add(new MergeCopy(overlayDir, GamePath.ToLocal(local), GamePath.ToLocal(local)));
             return _overlayLocals[key] = local;
         }
@@ -420,9 +426,20 @@ public static class ModMerger
                 return false;
             }
 
+            // In a multi-select group several options are on at once, so the top pack's added ones
+            // go above the lower pack's to win where both are on, and the ones it starts with on
+            // start on here too.
+            var isMulti = group.Type.Equals("Multi", StringComparison.OrdinalIgnoreCase);
+            Json.TryGetULong(target.Node["DefaultSettings"], out var defaults);
+            Json.TryGetULong(group.Node["DefaultSettings"], out var incomingDefaults);
+            var mergedDefaults = defaults;
+            var above = options.Select(o => Json.GetInt(o["Priority"], 0)).DefaultIfEmpty(0).Max() + 1;
+            var lowest = incoming.Select(o => Json.GetInt(o["Priority"], 0)).DefaultIfEmpty(0).Min();
+
             if (target.Node["Options"] is not JsonArray array) target.Node["Options"] = array = [];
-            foreach (var option in incoming)
+            for (var i = 0; i < incoming.Count; i++)
             {
+                var option = incoming[i];
                 if (FindOption(options, option) is { } existing)
                 {
                     var index = options.IndexOf(existing);
@@ -433,10 +450,17 @@ public static class ModMerger
 
                 var clone = Remapped(option);
                 FreshId(clone);
+                if (isMulti)
+                {
+                    clone["Priority"] = above + Json.GetInt(option["Priority"], 0) - lowest;
+                    if (i < 64 && (incomingDefaults >> i & 1) != 0) mergedDefaults |= 1UL << array.Count;
+                }
                 array.Add(clone);
                 _appended.Add(clone);
             }
 
+            if (mergedDefaults != defaults) target.Node["DefaultSettings"] = mergedDefaults;
+            MapId(group.Node, target.Node);
             Rebuild(target);
             _notes.Add($"Merged the '{group.Name}' options of both modpacks.");
             return true;
@@ -447,10 +471,21 @@ public static class ModMerger
             if (!JsonNode.DeepEquals(target.Node["Identifier"], group.Node["Identifier"])) return false;
             if (JsonNode.DeepEquals(target.Node, group.Node)) return true;
 
+            // The top pack's attributes win, under the lower pack's IDs: those are what the lower
+            // pack's conditions refer to, and references to the top pack's are mapped onto them.
             var clone = (JsonObject)group.Node.DeepClone();
+            if (Json.GetString(target.Node["Id"]) is { } id) clone["Id"] = id;
+            var cloneOptions = (clone["Options"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
+            var targetOptions = target.Options.ToList();
+            for (var i = 0; i < cloneOptions.Count; i++)
+            {
+                if (i < targetOptions.Count && Json.GetString(targetOptions[i]["Id"]) is { } optionId) cloneOptions[i]["Id"] = optionId;
+                else FreshId(cloneOptions[i]);
+            }
             _result.Groups[target.Index] = new ModGroup(clone, target.Index);
+            _appended.Add(clone);
             MapId(group.Node, target.Node);
-            foreach (var (option, existing) in group.Options.Zip(target.Options)) MapId(option, existing);
+            foreach (var (option, existing) in group.Options.Zip(targetOptions)) MapId(option, existing);
             _conflicts.Add(new MergeConflict($"IMC attributes of '{group.Name}'", group.Name, OverlayName));
             return true;
         }
@@ -469,6 +504,7 @@ public static class ModMerger
 
             for (var i = 0; i < group.Containers.Count; i++)
                 MergeContainer(target.Containers[i], Remapped(group.Containers[i].Node));
+            MapId(group.Node, target.Node);
             foreach (var (option, existing) in group.Options.Zip(target.Options)) MapId(option, existing);
             _notes.Add($"Merged the '{group.Name}' combinations of both modpacks.");
             return true;

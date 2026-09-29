@@ -3,38 +3,36 @@ namespace UniversalModConverter.Core;
 /// <summary>Finds the hair, face, tail, Viera-ear and skin roots a mod changes.</summary>
 public static class CustomizationDetection
 {
+    /// <inheritdoc cref="FindRoots(ModIndex)"/>
+    public static IReadOnlyList<CustomizationPathEndpoint> FindRoots(PenumbraMod mod, string modDirectory)
+        => FindRoots(new ModIndex(mod, modDirectory));
+
     /// <summary>
     /// Returns every customization root the mod redirects game paths under. A root whose
     /// only mod content is textures that the mod's materials of another root load (a face 2
     /// material using a replaced face 1 mask, for example) is a dependency of that root,
     /// not a part of its own, and is left out.
     /// </summary>
-    public static IReadOnlyList<CustomizationPathEndpoint> FindRoots(PenumbraMod mod, string modDirectory)
+    public static IReadOnlyList<CustomizationPathEndpoint> FindRoots(ModIndex index)
     {
         var keys = new Dictionary<CustomizationPathEndpoint, HashSet<string>>();
-        var materials = new List<(string Key, string FullPath)>();
-        foreach (var container in mod.Containers)
+        foreach (var redirect in index.Redirects)
+        foreach (var endpoint in CustomizationPaths.FindEndpoints(redirect.GamePath))
         {
-            foreach (var (gamePath, local) in container.FileEntries().Select(e => (e.Key, (string?)e.Local))
-                         .Concat(container.SwapEntries().Select(e => (e.Key, (string?)null))))
-            {
-                var normalized = GamePath.Normalize(gamePath);
-                foreach (var endpoint in CustomizationPaths.FindEndpoints(normalized))
-                {
-                    if (!CustomizationKinds.Get(endpoint.Kind).SupportsRace(endpoint.GenderRace)) continue;
-                    if (!keys.TryGetValue(endpoint, out var set)) keys[endpoint] = set = new(StringComparer.Ordinal);
-                    set.Add(normalized);
-                }
-                if (local != null && normalized.EndsWith(".mtrl", StringComparison.Ordinal))
-                    materials.Add((normalized, Path.Combine(modDirectory, GamePath.ToLocal(local))));
-            }
+            if (!CustomizationKinds.Get(endpoint.Kind).SupportsRace(endpoint.GenderRace)) continue;
+            if (!keys.TryGetValue(endpoint, out var set)) keys[endpoint] = set = new(StringComparer.Ordinal);
+            set.Add(redirect.GamePath);
         }
 
-        return keys.Where(root => !IsBorrowedTextureRoot(root.Key, root.Value, materials))
+        return keys.Where(root => !IsBorrowedTextureRoot(index, root.Key, root.Value))
             .Select(root => root.Key)
             .OrderBy(root => root.Kind).ThenBy(root => root.GenderRace).ThenBy(root => root.ModelId)
             .ToList();
     }
+
+    /// <inheritdoc cref="CanFanOut(ModIndex, CustomizationPathEndpoint)"/>
+    public static bool CanFanOut(PenumbraMod mod, CustomizationPathEndpoint endpoint)
+        => CanFanOut(Contents(mod, endpoint), endpoint);
 
     /// <summary>
     /// True when the same files can simply be offered under other races or IDs: the mod replaces
@@ -43,54 +41,54 @@ public static class CustomizationDetection
     /// which a fan-out can follow (see <see cref="TextureFanOutPlanner"/>). Anything with a model
     /// has to be converted properly instead.
     /// </summary>
-    public static bool CanFanOut(PenumbraMod mod, CustomizationPathEndpoint endpoint)
+    public static bool CanFanOut(ModIndex index, CustomizationPathEndpoint endpoint)
+        => CanFanOut(Contents(index, endpoint), endpoint);
+
+    private static bool CanFanOut(AssetContents contents, CustomizationPathEndpoint endpoint)
     {
         var allowed = endpoint.Kind is AssetKind.Face or AssetKind.Body
             ? AssetContents.Texture | AssetContents.Material
             : AssetContents.Texture;
-        var contents = Contents(mod, endpoint);
         return contents != AssetContents.None && (contents & ~allowed) == AssetContents.None;
     }
 
+    /// <inheritdoc cref="Affected(ModIndex, CustomizationPathEndpoint)"/>
+    public static AssetContents Affected(PenumbraMod mod, string modDirectory, CustomizationPathEndpoint endpoint)
+        => Affected(new ModIndex(mod, modDirectory), endpoint);
+
     /// <summary>
     /// What converting this root touches, for the user: the kinds of files the mod redirects under
-    /// it, plus textures its materials load that the mod also replaces (see <see cref="ModContents.Of"/>).
+    /// it, plus textures its materials load that the mod also replaces (see <see cref="ModContents.Of(ModIndex, Func{string, bool})"/>).
     /// </summary>
-    public static AssetContents Affected(PenumbraMod mod, string modDirectory, CustomizationPathEndpoint endpoint)
-        => ModContents.Of(mod, modDirectory, path => CustomizationPaths.Contains(path, endpoint));
+    public static AssetContents Affected(ModIndex index, CustomizationPathEndpoint endpoint)
+        => ModContents.Of(index, path => CustomizationPaths.Contains(path, endpoint));
 
     /// <summary>What kinds of files the mod redirects under this root, and nothing else.</summary>
     public static AssetContents Contents(PenumbraMod mod, CustomizationPathEndpoint endpoint)
+        => Contents(ModIndex.RedirectsOf(mod), endpoint);
+
+    /// <inheritdoc cref="Contents(PenumbraMod, CustomizationPathEndpoint)"/>
+    public static AssetContents Contents(ModIndex index, CustomizationPathEndpoint endpoint)
+        => Contents(index.Redirects, endpoint);
+
+    private static AssetContents Contents(IEnumerable<ModIndex.Redirect> redirects, CustomizationPathEndpoint endpoint)
     {
         var contents = AssetContents.None;
-        foreach (var container in mod.Containers)
-        foreach (var (gamePath, _) in container.FileEntries().Concat(container.SwapEntries()))
-        {
-            var normalized = GamePath.Normalize(gamePath);
-            if (CustomizationPaths.Contains(normalized, endpoint)) contents |= AssetContentsExtensions.Of(normalized);
-        }
-
+        foreach (var redirect in redirects)
+            if (CustomizationPaths.Contains(redirect.GamePath, endpoint))
+                contents |= AssetContentsExtensions.Of(redirect.GamePath);
         return contents;
     }
 
-    private static bool IsBorrowedTextureRoot(CustomizationPathEndpoint endpoint, HashSet<string> keys,
-        List<(string Key, string FullPath)> materials)
+    private static bool IsBorrowedTextureRoot(ModIndex index, CustomizationPathEndpoint endpoint, HashSet<string> keys)
     {
         if (keys.Any(k => !k.EndsWith(".tex", StringComparison.Ordinal))) return false;
         var borrowed = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var (key, fullPath) in materials)
+        foreach (var redirect in index.Redirects)
         {
-            if (CustomizationPaths.Contains(key, endpoint)) continue;
-            try
-            {
-                if (!File.Exists(fullPath)) continue;
-                foreach (var texture in MtrlFile.ReadTexturePaths(File.ReadAllBytes(fullPath)))
-                    borrowed.Add(GamePath.Normalize(texture));
-            }
-            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
-            {
-                // An unreadable material cannot borrow anything.
-            }
+            if (redirect.Local == null || !redirect.GamePath.EndsWith(".mtrl", StringComparison.Ordinal) ||
+                CustomizationPaths.Contains(redirect.GamePath, endpoint)) continue;
+            borrowed.UnionWith(index.MaterialTextures(redirect.Local));
         }
         return keys.All(borrowed.Contains);
     }

@@ -166,7 +166,7 @@ public sealed class MergeWindow : Window, IDisposable
 
         if (_merge.OutputPath is { } path)
         {
-            var exists = Directory.Exists(path) || File.Exists(path);
+            var exists = _merge.PathExists(path);
             var color = exists ? Theme.Danger : Theme.Muted;
             Widgets.Icon(exists ? FontAwesomeIcon.ExclamationCircle : FontAwesomeIcon.FolderPlus, color);
             ImGui.SameLine();
@@ -249,7 +249,7 @@ public sealed class MergeWindow : Window, IDisposable
             _merge.Result = null;
 
         ImGui.TextWrapped(result.Message);
-        if (result.Path is { } path && Directory.Exists(path))
+        if (result.Path is { } path && _merge.PathExists(path))
         {
             if (Widgets.IconTextButton(FontAwesomeIcon.FolderOpen, "Open folder"))
                 ConverterSession.OpenFolder(path);

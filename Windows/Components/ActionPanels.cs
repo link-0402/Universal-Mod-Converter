@@ -32,9 +32,10 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
 
         var mode  = session.EffectiveOutputMode;
         var group = session.AnimationGroupOutput is { } name ? name.Length > 0 ? $"'{name}'" : "the option group" : null;
+        // Each option's tooltip sits on the option itself, so it also says why a disabled one is off.
         if (ImGui.RadioButton("Create a new mod", mode.IsNewMod()))
             session.SetOutputMode(ConversionOutputMode.NewMod);
-        Widgets.Tooltip("Safest: the source mod is never modified.");
+        Widgets.Tooltip("Safest: the result goes into a separate new mod, and this mod is never modified.");
 
         var additiveBlock = session.AddToModBlockReason;
         using (ImRaii.Disabled(additiveBlock != null))
@@ -42,9 +43,10 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
             if (ImGui.RadioButton("Add to this mod", mode == ConversionOutputMode.AddToMod))
                 session.SetOutputMode(ConversionOutputMode.AddToMod);
         }
+        Widgets.Tooltip(additiveBlock ?? "The original keeps working, and the converted result is added beside it in this " +
+                                         "mod. The mod as it is now is kept as a backup.");
         ImGui.SameLine();
-        Widgets.Badge("Keeps the original", Theme.Info);
-        if (additiveBlock != null) Widgets.Tooltip(additiveBlock);
+        Widgets.Badge("Keeps the original", additiveBlock == null ? Theme.Info : Theme.Muted);
 
         var inPlaceBlock = session.InPlaceBlockReason;
         using (ImRaii.Disabled(inPlaceBlock != null))
@@ -52,39 +54,99 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
             if (ImGui.RadioButton("Convert in place", mode == ConversionOutputMode.InPlace))
                 session.SetOutputMode(ConversionOutputMode.InPlace);
         }
+        Widgets.Tooltip(inPlaceBlock ?? "The converted result replaces the original inside this mod. The mod as it is now " +
+                                        "is kept as a backup, so this can be reverted.");
         ImGui.SameLine();
-        Widgets.Badge("Advanced", Theme.Warning);
-        if (inPlaceBlock != null) Widgets.Tooltip(inPlaceBlock);
+        Widgets.Badge("Advanced", inPlaceBlock == null ? Theme.Warning : Theme.Muted);
 
         if (group != null)
         {
             // A slot group is the same wherever it goes; only where it goes differs.
             Widgets.MutedWrapped(mode.IsNewMod()
-                ? $"Creates a new mod holding {group}: a variant of the animation for each chosen slot, and \"-\" " +
-                  "to switch it off. This mod is not modified."
-                : $"Adds {group} to this mod: a variant of the animation for each chosen slot, and \"-\" to switch " +
-                  "it off. Everything already in the mod stays as it is. The mod as it is now is kept as a backup.");
+                ? $"Creates a new mod holding only {group}: an option per chosen slot that plays the animation there, " +
+                  "and \"-\" for none. This mod is not modified; while it stays enabled, the animation also keeps " +
+                  "playing in its own slot."
+                : $"Adds {group} to this mod: an option per chosen slot that also plays the animation there, and \"-\" " +
+                  "for none. Everything already in the mod stays as it is, so the animation keeps playing in its own " +
+                  "slot whichever option is picked. The mod as it is now is kept as a backup.");
             if (mode.IsNewMod()) DrawNewModName();
             return;
         }
 
         if (mode == ConversionOutputMode.AddToMod)
         {
-            Widgets.MutedWrapped("The original item keeps working. The converted paths are added to the same " +
-                                 "options, so the toggles this mod already has control both. The mod as it is " +
-                                 "now is kept as a backup.");
+            Widgets.MutedWrapped(AddToModDescription());
             return;
         }
 
         if (!mode.IsNewMod())
         {
-            Widgets.MutedWrapped("Edits this mod directly. The original is kept as a backup, so the " +
-                                 "conversion can be reverted from the result or the History tab until " +
-                                 "that backup expires.");
+            Widgets.MutedWrapped(InPlaceDescription());
             return;
         }
 
+        Widgets.MutedWrapped(NewModDescription());
         DrawNewModName();
+    }
+
+    // What each output mode does depends on what the plan converts. A run can mix gear and
+    // animations, so each kind it holds says its own sentence.
+
+    private string NewModDescription()
+    {
+        var contents = session.OutputContents;
+        if (contents.HasFlag(PlanContents.Customization))
+            return $"Creates a copy of this whole mod with the {session.OutputCustomizationName ?? "customization"} " +
+                   "converted; everything else in the mod comes along. This mod is not modified.";
+
+        var text = "Creates a new mod holding only what the plan converts, in the options it is in; everything else " +
+                   "in this mod is left out. This mod is not modified.";
+        if (contents.HasFlag(PlanContents.AnimationSwap))
+            text += " While it stays enabled, the animation also keeps playing where it was.";
+        if (contents.HasFlag(PlanContents.AnimationExpression))
+            text += " Both mods then replace the same animation, so disable this one (or give the new one the higher " +
+                    "priority) to see the expression.";
+        return text;
+    }
+
+    private string AddToModDescription()
+    {
+        var contents = session.OutputContents;
+        var parts = new List<string>();
+        if (contents.HasFlag(PlanContents.Gear))
+            parts.Add("The original item keeps working: the converted one is added beside it, in the same options, so " +
+                      "the toggles this mod already has control both.");
+        if (contents.HasFlag(PlanContents.AnimationSwap))
+            parts.Add("The animation keeps playing where it is and also plays at its destination, switched by the " +
+                      "same options.");
+        if (contents.HasFlag(PlanContents.AnimationRetarget))
+            parts.Add("The source race keeps its animation, and the other races' versions are added in the same options.");
+        if (session.AddsExpressionGroup)
+            parts.Add($"Adds an option group, '{AnimationConversionPlanner.ExpressionGroupName}', that plays the " +
+                      "animation with the expression; its first option, \"-\", plays it without. The animation itself " +
+                      "stays as it is.");
+        parts.Add("The mod as it is now is kept as a backup.");
+        return string.Join(" ", parts);
+    }
+
+    private string InPlaceDescription()
+    {
+        var contents = session.OutputContents;
+        var parts = new List<string>();
+        if (contents.HasFlag(PlanContents.Gear))
+            parts.Add("The item moves to the target: this mod stops changing the original item, apart from files other " +
+                      "items still use.");
+        if (contents.HasFlag(PlanContents.Customization) && session.OutputCustomizationName is { } kind)
+            parts.Add($"The {kind} is converted inside this mod, which then no longer changes the original {kind}.");
+        if (contents.HasFlag(PlanContents.AnimationSwap))
+            parts.Add("The animation moves to its destination and stops playing where it was, unless you keep it there too.");
+        if (contents.HasFlag(PlanContents.AnimationRetarget))
+            parts.Add("Retargeting only adds: the source race keeps its animation, the same as with Add to this mod.");
+        if (contents.HasFlag(PlanContents.AnimationExpression))
+            parts.Add("The expression is attached to the animation itself, which then always plays with it.");
+        parts.Add("The original is kept as a backup, so the conversion can be reverted from the result or the History " +
+                  "tab until that backup expires.");
+        return string.Join(" ", parts);
     }
 
     /// <summary>The new mod's name and where its folder goes.</summary>
@@ -108,7 +170,7 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
             // The folder existing is a problem only until we are the ones who created it.
             var published = session.Task.IsApplied &&
                             string.Equals(session.Task.PublishedPath, path, StringComparison.OrdinalIgnoreCase);
-            var conflict = !published && (Directory.Exists(path) || File.Exists(path));
+            var conflict = !published && session.PathExists(path);
             var color = conflict ? Theme.Danger : published ? Theme.Success : Theme.Muted;
             Widgets.Icon(conflict ? FontAwesomeIcon.ExclamationCircle
                 : published ? FontAwesomeIcon.CheckCircle : FontAwesomeIcon.FolderPlus, color);
@@ -143,7 +205,7 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
                         "Default holds, and a copy of every group whose options hold the source's paths, so " +
                         "each race can be switched on, or pick its variant, separately.");
 
-        var where = asNewMod ? "the new mod" : "this mod";
+        var where = asNewMod ? "a copy of this whole mod" : "this mod";
         Widgets.MutedWrapped((layout == TextureFanOutLayout.NewGroups
                                  ? $"Every ticked race gets new groups in {where}. "
                                  : $"The paths are added to {where} beside the source's. ") +
@@ -204,6 +266,12 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
                     $"'{session.ModName}' gets the new option group{(group.Length > 0 ? $" '{group}'" : string.Empty)}; " +
                     "everything already in it stays as it is. The mod as it is now is kept as a backup and can be " +
                     "restored with Revert until that backup expires.",
+                    "Add"),
+            ConversionOutputMode.AddToMod when session.AddsExpressionGroup
+                => ("Add the expression to this mod?",
+                    $"'{session.ModName}' gets the option group '{AnimationConversionPlanner.ExpressionGroupName}', which " +
+                    "plays the animation with the expression; its \"-\" option plays it without. The mod as it is now " +
+                    "is kept as a backup and can be restored with Revert until that backup expires.",
                     "Add"),
             ConversionOutputMode.AddToMod => ("Add the converted item to this mod?",
                 $"'{session.ModName}' will be modified, but the original item keeps working. The mod as it is " +
@@ -293,7 +361,7 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
 
         ImGui.TextWrapped(result.Message);
 
-        if (result.Path is { } path && Directory.Exists(path))
+        if (result.Path is { } path && session.PathExists(path))
         {
             if (Widgets.IconTextButton(FontAwesomeIcon.FolderOpen, "Open folder"))
                 ConverterSession.OpenFolder(path);
@@ -313,7 +381,7 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
 
         if (result.RecordId is { } recordId && session.History.Find(recordId) is { } record)
         {
-            var reason = session.RevertBlockReason(record);
+            var reason = session.DisplayedRevertBlockReason(record);
             if (reason == null || !record.IsReverted)
                 if (Widgets.IconTextButton(FontAwesomeIcon.Undo, "Revert", reason, RevertTooltip(record)))
                     RequestRevert(record);

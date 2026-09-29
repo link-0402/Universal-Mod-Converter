@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using UniversalModConverter.Core;
 using Dalamud.Plugin.Services;
 
@@ -15,8 +17,9 @@ namespace UniversalModConverter.Services;
 /// the tab, takes it away again.
 ///
 /// The source model is used, not the converted one: the character wears the source item, and
-/// converting never reorders meshes or parts, so the indices of both agree. Everything here
-/// runs on the framework thread.
+/// converting never reorders meshes or parts, so the indices of both agree. The models are
+/// rebuilt in the background, one build at a time; everything else, Penumbra included, runs on
+/// the framework thread.
 /// </summary>
 public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog log) : IDisposable
 {
@@ -41,6 +44,22 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
     private string? _shownKey;
     private bool _active;
     private List<string> _files = [];
+
+    /// <summary>The choice being built in the background, or null.</summary>
+    private string? _buildingKey;
+
+    /// <summary>A finished build, handed from the background to <see cref="Tick"/>.</summary>
+    private Build? _built;
+
+    private volatile bool _disposed;
+
+    /// <summary>
+    /// Source models by file, so ticking one checkbox after another does not read them again.
+    /// Let go when the preview ends.
+    /// </summary>
+    private readonly Dictionary<string, (DateTime Written, byte[] Bytes)> _sources = new(StringComparer.OrdinalIgnoreCase);
+
+    private sealed record Build(string Key, List<string> Files, Dictionary<string, string> Paths);
 
     /// <summary>Why the preview cannot show these models, or null.</summary>
     public string? UnavailableReason(IReadOnlyList<GearOutputModel> models)
@@ -71,7 +90,7 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
         _lastRequest = now;
     }
 
-    /// <summary>Called every framework tick: draws a settled change, restores once requests stop.</summary>
+    /// <summary>Called every framework tick: shows a finished build, starts one for a settled change, restores once requests stop.</summary>
     public void Tick()
     {
         var now = DateTime.UtcNow;
@@ -81,42 +100,72 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
             _requestedKey = null;
         }
 
+        if (Interlocked.Exchange(ref _built, null) is { } built)
+        {
+            _buildingKey = null;
+            // Only the latest choice is shown; a build the user has moved on from is thrown away.
+            if (_requested != null && built.Key == _requestedKey) Show(built);
+            else Delete(built.Files);
+        }
+
         if (_requested is not { } request)
         {
             if (_shownKey != null) Restore();
             return;
         }
-        if (_requestedKey == _shownKey || now - _requestedSince < SettleDelay) return;
-        Show(request.Models, request.Removals);
+        if (_buildingKey != null || _requestedKey == _shownKey || now - _requestedSince < SettleDelay) return;
+        StartBuild(_requestedKey!, request.Models, request.Removals);
     }
 
-    private void Show(IReadOnlyList<GearOutputModel> models, Dictionary<string, MeshRemoval> removals)
+    private void StartBuild(string key, IReadOnlyList<GearOutputModel> models, Dictionary<string, MeshRemoval> removals)
     {
-        _shownKey = _requestedKey;
-        var previous = _files;
-        _files = [];
-
-        var paths = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var model in models)
+        _buildingKey = key;
+        Task.Run(() =>
         {
-            if (model.SourceFile == null || model.SourceGamePaths.IsDefaultOrEmpty ||
-                !removals.TryGetValue(model.Local, out var removal)) continue;
-            try
+            var files = new List<string>();
+            var paths = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var model in models)
             {
-                var bytes = MdlMeshGroups.Hide(File.ReadAllBytes(model.SourceFile), removal);
-                Directory.CreateDirectory(_folder);
-                var file = Path.Combine(_folder, $"{Guid.NewGuid():N}.mdl");
-                File.WriteAllBytes(file, bytes);
-                _files.Add(file);
-                foreach (var path in model.SourceGamePaths) paths[path] = file;
+                if (_disposed) break;
+                if (model.SourceFile == null || model.SourceGamePaths.IsDefaultOrEmpty ||
+                    !removals.TryGetValue(model.Local, out var removal)) continue;
+                try
+                {
+                    var bytes = MdlMeshGroups.Hide(Source(model.SourceFile), removal);
+                    Directory.CreateDirectory(_folder);
+                    var file = Path.Combine(_folder, $"{Guid.NewGuid():N}.mdl");
+                    File.WriteAllBytes(file, bytes);
+                    files.Add(file);
+                    foreach (var path in model.SourceGamePaths) paths[path] = file;
+                }
+                catch (Exception ex)
+                {
+                    log.Warning(ex, "[UMC] Could not build the mesh preview for {0}", model.SourceFile);
+                }
             }
-            catch (Exception ex)
-            {
-                log.Warning(ex, "[UMC] Could not build the mesh preview for {0}", model.SourceFile);
-            }
-        }
+            if (_disposed) Delete(files);
+            else Volatile.Write(ref _built, new Build(key, files, paths));
+        });
+    }
 
-        if (paths.Count > 0 && penumbra.AddTemporaryModAll(Tag, paths, Priority))
+    /// <summary>The source model's bytes; <see cref="MdlMeshGroups.Hide"/> copies them, so they can be shared.</summary>
+    private byte[] Source(string file)
+    {
+        var written = File.GetLastWriteTimeUtc(file);
+        lock (_sources)
+            if (_sources.TryGetValue(file, out var known) && known.Written == written) return known.Bytes;
+        var bytes = File.ReadAllBytes(file);
+        lock (_sources) _sources[file] = (written, bytes);
+        return bytes;
+    }
+
+    private void Show(Build build)
+    {
+        _shownKey = build.Key;
+        var previous = _files;
+        _files = build.Files;
+
+        if (build.Paths.Count > 0 && penumbra.AddTemporaryModAll(Tag, build.Paths, Priority))
         {
             _active = true;
             penumbra.RedrawObject(0);
@@ -142,9 +191,10 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
         }
         Delete(_files);
         _files = [];
+        lock (_sources) _sources.Clear();
     }
 
-    private void Delete(List<string> files)
+    private static void Delete(List<string> files)
     {
         foreach (var file in files)
             try { File.Delete(file); }
@@ -154,6 +204,7 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
 
     public void Dispose()
     {
+        _disposed = true;
         if (_shownKey != null) Restore();
         try
         {

@@ -22,6 +22,9 @@ internal sealed class ConversionCards(ConverterSession session)
     private string _targetFilter = string.Empty;
     private string _sourceFilter = string.Empty;
 
+    /// <summary>The mod <see cref="_sourceFilter"/> was typed for; another mod starts unfiltered.</summary>
+    private string _sourceFilterMod = string.Empty;
+
     public void Draw()
     {
         var scale  = Theme.Scale;
@@ -85,7 +88,7 @@ internal sealed class ConversionCards(ConverterSession session)
                 Widgets.Muted("Scanning the mod…");
             }
             else
-                Widgets.MutedWrapped("No gear, facewear, hair, face, tail, Viera-ear or animation was found in this mod.");
+                Widgets.MutedWrapped("No gear, facewear, hair, face, tail, Viera-ear, skin or animation was found in this mod.");
             return;
         }
 
@@ -115,13 +118,21 @@ internal sealed class ConversionCards(ConverterSession session)
         var items = session.DetectedItems;
         Widgets.Muted($"{items.Count} convertible roots in this mod:");
 
-        if (items.Count > 6)
+        if (_sourceFilterMod != session.ModDirectory)
+        {
+            _sourceFilterMod = session.ModDirectory;
+            _sourceFilter = string.Empty;
+        }
+
+        // The filter only applies while its box is there to see and clear.
+        var filterable = items.Count > 6;
+        if (filterable)
         {
             ImGui.SetNextItemWidth(-1);
             ImGui.InputTextWithHint("##SourceFilter", "Filter by name, type or ID…", ref _sourceFilter, 128);
         }
 
-        var filter = _sourceFilter;
+        var filter = filterable ? _sourceFilter : string.Empty;
         var filtered = items
             .Select((item, index) => (Item: item, Index: index))
             .Where(e => filter.Length == 0 ||
@@ -164,7 +175,7 @@ internal sealed class ConversionCards(ConverterSession session)
             if (item.Contents.Tags().Any())
             {
                 ImGui.SameLine(ImGui.GetContentRegionMax().X - idWidth - ImGui.GetStyle().ItemSpacing.X - ContentsTagsWidth(item));
-                ImGui.SetCursorPosY(textY - BadgePadding.Y);
+                ImGui.SetCursorPosY(textY - Widgets.BadgePadding.Y);
                 DrawContentsTags(item);
             }
             ImGui.SameLine(ImGui.GetContentRegionMax().X - idWidth);
@@ -173,16 +184,11 @@ internal sealed class ConversionCards(ConverterSession session)
         });
     }
 
-    /// <summary>Matches the padding <see cref="Widgets.Badge"/> draws with.</summary>
-    private static Vector2 BadgePadding => new Vector2(5f, 1f) * Theme.Scale;
-
-    private static float BadgeWidth(string text) => ImGui.CalcTextSize(text).X + BadgePadding.X * 2;
-
     /// <summary>The width <see cref="DrawContentsTags"/> takes, tags and the gaps between them.</summary>
     private static float ContentsTagsWidth(DetectedItem item)
     {
         var tags = item.Contents.Tags().ToList();
-        return tags.Sum(t => BadgeWidth(t.Name())) + Math.Max(0, tags.Count - 1) * ImGui.GetStyle().ItemSpacing.X;
+        return tags.Sum(t => Widgets.BadgeWidth(t.Name())) + Math.Max(0, tags.Count - 1) * ImGui.GetStyle().ItemSpacing.X;
     }
 
     /// <summary>
@@ -240,16 +246,7 @@ internal sealed class ConversionCards(ConverterSession session)
 
         using (ImRaii.PushColor(ImGuiCol.Text, Theme.Muted))
         using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            var glyph = item.Kind switch
-            {
-                AssetKind.Hair      => FontAwesomeIcon.Cut,
-                AssetKind.Face      => FontAwesomeIcon.UserCircle,
-                AssetKind.Animation => FontAwesomeIcon.Running,
-                _                   => FontAwesomeIcon.Paw,
-            };
-            ImGui.Button(glyph.ToIconString() + "##kind", new Vector2(size));
-        }
+            ImGui.Button(ConversionRow.Glyph(item.Kind).ToIconString() + "##kind", new Vector2(size));
     }
 
     private static void DrawItemSummary(DetectedItem source)

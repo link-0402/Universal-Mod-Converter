@@ -34,21 +34,27 @@ public sealed class MergedModPlan : IModFilePlan
         Result = context.Result;
         Entries = entries;
         Diagnostics = diagnostics;
-        Files = entries.Where(e => !e.Rejected && e.Plan != null).SelectMany(e => e.Plan!.Files).ToList();
-        InputFiles = new HashSet<string>(context.InputFiles, StringComparer.OrdinalIgnoreCase);
+        var accepted = entries.Where(e => !e.Rejected && e.Plan != null).Select(e => e.Plan!).ToList();
+        _files = accepted.SelectMany(p => p.Files).ToList();
+        InputFiles = new HashSet<string>(context.InputFiles.Concat(accepted.SelectMany(p => p.InputFiles)),
+            StringComparer.OrdinalIgnoreCase);
     }
+
+    private readonly List<PlannedFileOperation> _files;
 
     public ConversionOutputMode Mode { get; }
 
     public PenumbraMod Result { get; }
 
-    public IReadOnlyList<PlannedFileOperation> Files { get; }
+    public IReadOnlyList<PlannedFileOperation> Files => _files;
 
     public IReadOnlyList<MergedPlanEntry> Entries { get; }
 
+    /// <summary>What the run as a whole found; each entry keeps its own findings as well.</summary>
     public IReadOnlyList<PlanDiagnostic> Diagnostics { get; }
 
-    public HashSet<string> InputFiles { get; }
+    /// <summary>What the shared context and every accepted conversion read.</summary>
+    public IReadOnlySet<string> InputFiles { get; }
 
     /// <summary>A rejected entry blocks the whole run: half a queue is not what was asked for.</summary>
     public bool HasBlockers => Diagnostics.Any(d => d.IsBlocker) || Entries.Any(e => e.Rejected);
@@ -59,6 +65,12 @@ public sealed class MergedModPlan : IModFilePlan
     /// </summary>
     public string Fingerprint()
         => ModFingerprint.ComputePlan(Files, Result, string.Join("\u001f", Entries.Select(e => e.Description)));
+
+    public void ReleaseContents()
+    {
+        foreach (var entry in Entries) entry.Plan?.ReleaseContents();
+        ModFilePlan.ReleaseContents(_files);
+    }
 }
 
 /// <summary>
@@ -90,7 +102,7 @@ public sealed class ModPlanMerger(ModPlanContext context)
         try
         {
             planned = plan(Context);
-            diagnostics = [.. Diagnostics(planned)];
+            diagnostics = [.. planned.Diagnostics];
         }
         catch (Exception ex)
         {
@@ -129,13 +141,6 @@ public sealed class ModPlanMerger(ModPlanContext context)
         _entries.Add(entry);
         return entry;
     }
-
-    private static IEnumerable<PlanDiagnostic> Diagnostics(IModFilePlan plan) => plan switch
-    {
-        GearConversionPlan gear           => gear.Diagnostics,
-        AnimationConversionPlan animation => animation.Diagnostics,
-        _                                 => [],
-    };
 
     // ── Conflicts ────────────────────────────────────────────────────────────
 

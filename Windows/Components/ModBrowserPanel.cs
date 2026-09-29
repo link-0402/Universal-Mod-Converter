@@ -48,6 +48,7 @@ internal sealed class ModBrowserPanel(ConverterSession session)
                     Widgets.Muted(session.Mods.Count == 0 ? "Penumbra reported no mods." : "No mods match the filter.");
 
                 var busy = session.IsBusy;
+                var clears = PlanClearedNote();
                 Widgets.Clipped(mods.Count, ImGui.GetTextLineHeightWithSpacing(), i =>
                 {
                     var mod = mods[i];
@@ -56,7 +57,7 @@ internal sealed class ModBrowserPanel(ConverterSession session)
                     if (ImGui.Selectable(mod.Name, selected) && !selected && !busy)
                         session.SelectMod(mod.Directory);
                     var tip = string.Equals(mod.Folder, mod.Name, StringComparison.Ordinal) ? null : mod.Folder;
-                    if (busy && !selected) tip = tip == null ? BusyNote : $"{tip}\n{BusyNote}";
+                    if (!selected && (busy ? BusyNote : clears) is { } note) tip = tip == null ? note : $"{tip}\n{note}";
                     Widgets.Tooltip(tip);
                     if (selected && ImGui.IsWindowAppearing()) ImGui.SetScrollHereY();
                 });
@@ -87,9 +88,19 @@ internal sealed class ModBrowserPanel(ConverterSession session)
         ImGui.SameLine();
         var reason = session.IsBusy ? "Wait for the current operation to finish."
             : string.IsNullOrWhiteSpace(_manualPath) ? "Enter a folder path first." : null;
-        if ((Widgets.IconButton("##LoadPath", FontAwesomeIcon.FolderOpen, "Load this folder", reason) || submitted) && reason == null)
+        var tooltip = PlanClearedNote() is { } note ? $"Load this folder\n{note}" : "Load this folder";
+        if ((Widgets.IconButton("##LoadPath", FontAwesomeIcon.FolderOpen, tooltip, reason) || submitted) && reason == null)
             session.SelectMod(_manualPath);
     }
+
+    /// <summary>A plan belongs to its mod, so choosing another one starts afresh; null when nothing is planned.</summary>
+    private string? PlanClearedNote()
+        => session.Queue.Count switch
+        {
+            0 => null,
+            1 => "Choosing another mod clears the conversion plan (1 conversion).",
+            var count => $"Choosing another mod clears the conversion plan ({count} conversions).",
+        };
 
     private List<ModEntry> FilteredMods()
     {

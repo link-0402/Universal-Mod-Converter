@@ -120,6 +120,9 @@ public sealed class ModConverterService
 
             if (CustomizationKinds.IsCustomization(task.Kind))
             {
+                // The window never offers this; refusing it here too keeps a stray request from
+                // quietly converting the original away.
+                if (task.OutputMode.KeepsSource()) throw new InvalidDataException(OutputModeRules.ReplacesOriginal(task.Kind));
                 _customizationPlanner.Plan(task);
                 ConversionPlanValidator.Finalize(task);
                 return;
@@ -128,18 +131,10 @@ public sealed class ModConverterService
             var request = BuildGearRequest(task);
             var plan = new GearConversionPlanner(_gameFiles).Plan(task.ModDirectory, request);
             task.GearPlan = plan;
-            task.SourceRoot = request.Source.Root;
             task.Diagnostics.AddRange(plan.Diagnostics);
-            if (GearSlots.CrossSlotNote(request.Source.Slot, request.Target.Slot) is { } note)
-                task.Diagnostics.Add(new PlanDiagnostic("cross_slot_geometry",
-                    note + " Untick anything else in the Mesh groups tab.", false));
+            if (CrossSlotDiagnostic(request) is { } note) task.Diagnostics.Add(note);
             task.OutputModels.AddRange(GearOutputModels.Collect(plan, task.ModDirectory));
-            task.SourceFingerprint = GearSourceFingerprint(task) ?? string.Empty;
-            task.PlanFingerprint = plan.Fingerprint();
-            task.IsPlanned = true;
-            task.ErrorMessage = task.HasBlockers
-                ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
-                : null;
+            Finish(task, plan);
             _log.Information("[UMC] Planned {0} -> {1} ({2}): {3} path(s), {4} file operation(s), {5} diagnostic(s).",
                 request.Source, request.Target, request.Mode, plan.GamePathMap.Count, plan.Files.Count, plan.Diagnostics.Count);
         }
@@ -170,7 +165,7 @@ public sealed class ModConverterService
                 // Customization conversions patch their files on disk rather than producing a
                 // file plan, so they cannot share a definition with the others yet.
                 entry.Diagnostics.Add(new PlanDiagnostic("queue_unsupported_kind",
-                    $"{entry.Description}: hair, face, tail and Viera-ear conversions cannot be converted " +
+                    $"{entry.Description}: hair, face, tail, Viera-ear and skin conversions cannot be converted " +
                     "together with others yet. Convert this one on its own.", true));
                 entry.Rejected = true;
                 continue;
@@ -178,17 +173,25 @@ public sealed class ModConverterService
 
             entry.Task.OutputMode = task.OutputMode;
             entry.Task.ModDirectory = task.ModDirectory;
-            var merged = entry.Kind == AssetKind.Animation
-                ? merger.Add(entry.Description, AnimationRoots(entry),
+            MergedPlanEntry merged;
+            GearConversionRequest? gear = null;
+            if (entry.Kind == AssetKind.Animation)
+                merged = merger.Add(entry.Description, AnimationRoots(entry),
                     ctx => new AnimationConversionPlanner(_gameFiles, ParentRace, _retargeter)
                         .Plan(ctx, ForMode(entry.Task.AnimationRequest
                                   ?? throw new InvalidOperationException("Choose what to do with the animation."),
-                              task.OutputMode)))
-                : merger.Add(entry.Description, GearRoots(entry),
-                    ctx => new GearConversionPlanner(_gameFiles).Plan(ctx, BuildGearRequest(entry.Task)));
+                              task.OutputMode)));
+            else
+            {
+                var request = gear = BuildGearRequest(entry.Task);
+                merged = merger.Add(entry.Description, GearRoots(request),
+                    ctx => new GearConversionPlanner(_gameFiles).Plan(ctx, request));
+            }
             entry.Plan = merged.Plan;
             entry.Rejected = merged.Rejected;
             entry.Diagnostics.AddRange(merged.Diagnostics);
+            // The Mesh groups tab treats a run's conversions like single ones, so they say the same.
+            if (gear != null && !merged.Rejected && CrossSlotDiagnostic(gear) is { } note) entry.Diagnostics.Add(note);
         }
 
         context.RunFinalizers();
@@ -206,12 +209,7 @@ public sealed class ModConverterService
             if (entry.Plan is GearConversionPlan gear)
                 task.OutputModels.AddRange(GearOutputModels.Collect(gear, task.ModDirectory));
 
-        task.SourceFingerprint = MergedSourceFingerprint(task) ?? string.Empty;
-        task.PlanFingerprint = plan.Fingerprint();
-        task.IsPlanned = true;
-        task.ErrorMessage = task.HasBlockers
-            ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
-            : null;
+        Finish(task, plan);
         _log.Information("[UMC] Planned a run of {0} conversion(s) ({1}): {2} file operation(s), {3} diagnostic(s).",
             plan.Entries.Count(e => !e.Rejected), task.OutputMode, plan.Files.Count, task.Diagnostics.Count);
     }
@@ -221,18 +219,26 @@ public sealed class ModConverterService
     /// such as e0728 holds every slot of a set, so the slot is part of the claim; body and
     /// hands of the same set are different items and may be converted together.
     /// </summary>
-    private static IEnumerable<string> GearRoots(QueuedConversion entry)
-    {
-        var request = BuildGearRequest(entry.Task);
-        return [$"{request.Source.Root} ({request.Source.Slot})", $"{request.Target.Root} ({request.Target.Slot})"];
-    }
+    private static IEnumerable<string> GearRoots(GearConversionRequest request)
+        => [$"{request.Source.Root} ({request.Source.Slot})", $"{request.Target.Root} ({request.Target.Slot})"];
+
+    /// <summary>What a gear conversion to another slot does and does not change, or null when it keeps its slot.</summary>
+    private static PlanDiagnostic? CrossSlotDiagnostic(GearConversionRequest request)
+        => GearSlots.CrossSlotNote(request.Source.Slot, request.Target.Slot) is { } note
+            ? new PlanDiagnostic("cross_slot_geometry", note + " Untick anything else in the Mesh groups tab.", false)
+            : null;
 
     /// <summary>
-    /// The request for the output mode chosen at preview time. A plan entry is made before the
-    /// mode may change, so the mode is applied here; adding to the mod always keeps the source.
+    /// The request for the output mode chosen at preview time; a plan entry is made before the
+    /// mode may change. Adding to the mod always keeps the source slot, keeping it when converting
+    /// in place is the user's choice, and a new mod holds the moved animation alone.
     /// </summary>
     private static AnimationConversionRequest ForMode(AnimationConversionRequest request, ConversionOutputMode mode)
-        => request with { Mode = mode, KeepOriginal = request.KeepOriginal || mode.KeepsSource() };
+        => request with
+        {
+            Mode = mode,
+            KeepOriginal = mode.KeepsSource() || mode == ConversionOutputMode.InPlace && request.KeepOriginal,
+        };
 
     /// <summary>What a queued animation conversion claims: the animations it reads and writes.</summary>
     private static IEnumerable<string> AnimationRoots(QueuedConversion entry)
@@ -243,27 +249,35 @@ public sealed class ModConverterService
             .Distinct(StringComparer.OrdinalIgnoreCase);
     }
 
-    private static string? MergedSourceFingerprint(ConversionTask task)
+    /// <summary>Records a finished file plan on the task: its fingerprints, and whether it can run.</summary>
+    private static void Finish(ConversionTask task, IModFilePlan plan)
     {
+        task.SourceFingerprint = SourceFingerprint(task) ?? string.Empty;
+        task.PlanFingerprint = plan.Fingerprint();
+        task.IsPlanned = true;
+        task.ErrorMessage = task.HasBlockers
+            ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
+            : null;
+    }
+
+    /// <summary>
+    /// A hash of every file the plan was made from, the mod's definition included, so that a
+    /// change to any of them after the preview is caught before writing. Null once one of them
+    /// no longer exists.
+    /// </summary>
+    private static string? SourceFingerprint(ConversionTask task)
+    {
+        if (task.FilePlan is not { } plan) return ConversionPlanValidator.RecomputeSourceFingerprint(task);
         try
         {
-            var inputs = task.MergedPlan!.InputFiles
-                .Concat(task.Entries.Where(e => !e.Rejected).SelectMany(PlanInputs))
-                .Concat(PenumbraMod.DefinitionFiles(task.ModDirectory).Where(File.Exists));
-            return ModFingerprint.Compute(task.ModDirectory, inputs);
+            return ModFingerprint.Compute(task.ModDirectory,
+                plan.InputFiles.Concat(PenumbraMod.DefinitionFiles(task.ModDirectory).Where(File.Exists)));
         }
         catch (Exception)
         {
             return null; // A planned input no longer exists.
         }
     }
-
-    private static IEnumerable<string> PlanInputs(QueuedConversion entry) => entry.Plan switch
-    {
-        GearConversionPlan gear           => gear.InputFiles,
-        AnimationConversionPlan animation => animation.InputFiles,
-        _                                 => [],
-    };
 
     private void PlanAnimation(ConversionTask task)
     {
@@ -273,12 +287,7 @@ public sealed class ModConverterService
             .Plan(task.ModDirectory, request);
         task.AnimationPlan = plan;
         task.Diagnostics.AddRange(plan.Diagnostics);
-        task.SourceFingerprint = AnimationSourceFingerprint(task) ?? string.Empty;
-        task.PlanFingerprint = plan.Fingerprint();
-        task.IsPlanned = true;
-        task.ErrorMessage = task.HasBlockers
-            ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
-            : null;
+        Finish(task, plan);
         _log.Information("[UMC] Planned animation {0} ({1}): {2} file operation(s), {3} diagnostic(s).",
             request.Description, request.Mode, plan.Files.Count, plan.Diagnostics.Count);
     }
@@ -292,28 +301,10 @@ public sealed class ModConverterService
                 : target => _gameData.DescribeCustomization(target.Kind, target.GenderRace, target.ModelId))
             .Plan(task.ModDirectory, request);
         task.TexturePlan = plan;
-        task.SourceRoot = CustomizationKinds.Get(request.Source.Kind).Root(request.Source.GenderRace, request.Source.ModelId);
         task.Diagnostics.AddRange(plan.Diagnostics);
-        task.SourceFingerprint = TextureSourceFingerprint(task) ?? string.Empty;
-        task.PlanFingerprint = plan.Fingerprint();
-        task.IsPlanned = true;
-        task.ErrorMessage = task.HasBlockers
-            ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
-            : null;
+        Finish(task, plan);
         _log.Information("[UMC] Planned texture fan-out {0} ({1}): {2} path(s), {3} file operation(s), {4} diagnostic(s).",
             request.Description, request.Mode, plan.Outputs.Count, plan.Files.Count, plan.Diagnostics.Count);
-    }
-
-    private static string? TextureSourceFingerprint(ConversionTask task)
-    {
-        try
-        {
-            return ModFingerprint.Compute(task.ModDirectory, task.TexturePlan!.InputFiles);
-        }
-        catch (Exception)
-        {
-            return null; // A planned input no longer exists.
-        }
     }
 
     /// <summary>The skeleton parent of a race in the game's race tree (human.pbd).</summary>
@@ -334,19 +325,6 @@ public sealed class ModConverterService
         return _pbd?.GetParentRace(race);
     }
 
-    private static string? AnimationSourceFingerprint(ConversionTask task)
-    {
-        try
-        {
-            return ModFingerprint.Compute(task.ModDirectory,
-                task.AnimationPlan!.InputFiles.Concat(PenumbraMod.DefinitionFiles(task.ModDirectory).Where(File.Exists)));
-        }
-        catch (Exception)
-        {
-            return null; // A planned input no longer exists.
-        }
-    }
-
     public static GearConversionRequest BuildGearRequest(ConversionTask task)
     {
         if (!ushort.TryParse(task.OldIdPadded, out var sourceId) || !ushort.TryParse(task.NewIdPadded, out var targetId))
@@ -357,36 +335,18 @@ public sealed class ModConverterService
         return new GearConversionRequest(source, target, task.OutputMode);
     }
 
-    private static string? GearSourceFingerprint(ConversionTask task)
-    {
-        try
-        {
-            return ModFingerprint.Compute(task.ModDirectory, task.GearPlan!.InputFiles);
-        }
-        catch (Exception)
-        {
-            return null; // A planned input no longer exists.
-        }
-    }
-
     /// <param name="newMod">
     /// Which of the two write paths is about to run. The plan must agree both on the exact mode
     /// and on which path it was built for, so a plan made for one cannot be written by the other.
     /// </param>
     private static void EnsurePlanIsCurrent(ConversionTask task, bool newMod)
     {
-        if (!task.IsPlanned) throw new InvalidOperationException("Preview the conversion before applying it.");
+        if (!task.IsPlanned) throw new InvalidOperationException("Wait for the preview of the plan before applying it.");
         if (task.HasBlockers) throw new InvalidOperationException(task.ErrorMessage ?? "The conversion plan has blockers.");
-        var planned = task.MergedPlan?.Mode ?? task.GearPlan?.Request.Mode
-                      ?? task.AnimationPlan?.Request.Mode ?? task.TexturePlan?.Request.Mode ?? task.OutputMode;
+        var planned = task.FilePlan?.Mode ?? task.OutputMode;
         if (planned != task.OutputMode || planned.IsNewMod() != newMod)
             throw new InvalidOperationException("The output mode changed after the preview. Wait for the preview to update, then try again.");
-        var current = task.MergedPlan != null ? MergedSourceFingerprint(task)
-            : task.GearPlan != null ? GearSourceFingerprint(task)
-            : task.AnimationPlan != null ? AnimationSourceFingerprint(task)
-            : task.TexturePlan != null ? TextureSourceFingerprint(task)
-            : ConversionPlanValidator.RecomputeSourceFingerprint(task);
-        if (!string.Equals(current, task.SourceFingerprint, StringComparison.Ordinal))
+        if (!string.Equals(SourceFingerprint(task), task.SourceFingerprint, StringComparison.Ordinal))
             throw new InvalidOperationException("The mod changed on disk after the preview. The preview is updated now; try again once it is ready.");
     }
 
@@ -418,25 +378,17 @@ public sealed class ModConverterService
             var name = Path.GetFileName(sourceDir);
             var id = Guid.NewGuid().ToString("N");
             stageDir = Path.Combine(parent, $".{name}.umc-stage-{id}");
-            backupDir = Path.Combine(BackupRoot(parent, _configuration?.BackupDirectory), $"{name}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{id[..8]}");
+            backupDir = Path.Combine(BackupRoot(parent, _configuration?.BackupDirectory), BackupRetention.FolderName(name, DateTime.UtcNow, id));
             task.JournalPath = Path.Combine(parent, $".{name}.umc-recovery-{id}.json");
 
             Log($"Staging complete mod shadow: {stageDir}");
             CopyDirectory(sourceDir, stageDir);
-            if (task.MergedPlan is { } merged)
-            {
-                GearConversionExecutor.ApplyInPlace(merged, stageDir, Log);
-                GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
-            }
-            else if (task.GearPlan is { } plan)
+            if (task.FilePlan is { } plan)
             {
                 GearConversionExecutor.ApplyInPlace(plan, stageDir, Log);
+                // Only gear has models to take parts out of; for anything else there are no removals.
                 GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
             }
-            else if (task.AnimationPlan is { } animation)
-                GearConversionExecutor.ApplyInPlace(animation, stageDir, Log);
-            else if (task.TexturePlan is { } texture)
-                GearConversionExecutor.ApplyInPlace(texture, stageDir, Log);
             else
             {
                 var stagedTask = RemapTask(task, stageDir);
@@ -515,13 +467,18 @@ public sealed class ModConverterService
         return root;
     }
 
-    /// <summary>True when both paths sit on the same volume, so a directory move is atomic.</summary>
+    /// <summary>
+    /// True when both paths sit on the same volume, so a directory move is atomic. Both the paths
+    /// as written (a move between drive letters is refused outright) and the paths behind any
+    /// junction or symbolic link on the way (a Penumbra folder linked to another drive) must agree.
+    /// </summary>
     internal static bool SameVolume(string a, string b)
     {
         try
         {
-            return string.Equals(Path.GetPathRoot(Path.GetFullPath(a)), Path.GetPathRoot(Path.GetFullPath(b)),
-                StringComparison.OrdinalIgnoreCase);
+            static bool SameRoot(string x, string y)
+                => string.Equals(Path.GetPathRoot(x), Path.GetPathRoot(y), StringComparison.OrdinalIgnoreCase);
+            return SameRoot(Path.GetFullPath(a), Path.GetFullPath(b)) && SameRoot(ResolvedPath(a), ResolvedPath(b));
         }
         catch (Exception)
         {
@@ -529,13 +486,34 @@ public sealed class ModConverterService
         }
     }
 
+    /// <summary><paramref name="path"/> with every junction and symbolic link on the way resolved.</summary>
+    private static string ResolvedPath(string path)
+    {
+        var full = Path.GetFullPath(path).TrimEnd('\\', '/');
+        for (var depth = 0; depth < 16; depth++)
+        {
+            string? resolved = null;
+            for (var current = full; !string.IsNullOrEmpty(current); current = Path.GetDirectoryName(current))
+            {
+                var info = new DirectoryInfo(current);
+                if (!info.Exists || info.LinkTarget == null) continue;
+                if (info.ResolveLinkTarget(returnFinalTarget: true) is { } target)
+                    resolved = Path.Join(target.FullName, Path.GetRelativePath(current, full));
+                break;
+            }
+            if (resolved == null) return full;
+            full = Path.GetFullPath(resolved).TrimEnd('\\', '/');
+        }
+        return full;
+    }
+
     /// <summary>Applies a customization plan (hair, face, tail, ear) to a staged directory.</summary>
     private void ApplyConversionCore(ConversionTask task, Action<string> log)
     {
-        foreach (var mdl in task.PlannedMdlChanges.Where(p => p.Selected)) ApplyMdlChange(mdl, log);
-        foreach (var bp in task.PlannedBinaryPatches.Where(p => p.Selected)) ApplyBinaryPatch(bp, log);
-        foreach (var jc in task.PlannedJsonChanges.Where(j => j.Selected)) ApplyJsonChange(jc, log);
-        foreach (var rename in task.PlannedRenames.Where(r => r.Selected).OrderByDescending(r => r.OldPath.Length))
+        foreach (var mdl in task.PlannedMdlChanges) ApplyMdlChange(mdl, log);
+        foreach (var bp in task.PlannedBinaryPatches) ApplyBinaryPatch(bp, log);
+        foreach (var jc in task.PlannedJsonChanges) ApplyJsonChange(jc, log);
+        foreach (var rename in task.PlannedRenames.OrderByDescending(r => r.OldPath.Length))
             ApplyRename(rename, log);
 
         foreach (var generated in task.PlannedGeneratedFiles)
@@ -574,7 +552,10 @@ public sealed class ModConverterService
         {
             if (task.RecoveryPath is not { } backup || !Directory.Exists(backup)) return false;
             var current = Path.GetFullPath(task.ModDirectory).TrimEnd('\\', '/');
-            var failed = current + $".umc-failed-{Guid.NewGuid():N}";
+            // Named like the staging folders: hidden beside the mods, where Penumbra never takes it
+            // for one, and where the leftover sweep finds it if it cannot be deleted right away.
+            var failed = Path.Combine(Path.GetDirectoryName(current) ?? current,
+                $".{Path.GetFileName(current)}.umc-failed-{Guid.NewGuid():N}");
             if (Directory.Exists(current)) Directory.Move(current, failed);
             Directory.Move(backup, current);
             try { if (Directory.Exists(failed)) Directory.Delete(failed, true); } catch { }
@@ -595,13 +576,6 @@ public sealed class ModConverterService
     // ─────────────────────────────────────────────────────────────────────────
     // New mods
     // ─────────────────────────────────────────────────────────────────────────
-
-    public string? ApplyConversionAsNewMod(
-        ConversionTask task,
-        string         newModDir,
-        string         modDisplayName,
-        Action<string>? onLog = null)
-        => CreateNewModFromAssetChain(task, newModDir, modDisplayName, onLog);
 
     /// <summary>
     /// Creates a new mod next to the source mod. Gear conversions contain only the converted
@@ -626,24 +600,17 @@ public sealed class ModConverterService
                 throw new IOException($"The output path already exists: {finalDir}");
             var parent = Path.GetDirectoryName(finalDir) ?? throw new InvalidOperationException("The output path has no parent.");
             stageDir = Path.Combine(parent, $".{Path.GetFileName(finalDir)}.umc-stage-{Guid.NewGuid():N}");
-            if (task.MergedPlan is { } merged)
-            {
-                GearConversionExecutor.WriteNewMod(merged, task.ModDirectory, stageDir, modDisplayName, Log);
-                GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
-            }
-            else if (task.GearPlan is { } plan)
-            {
-                GearConversionExecutor.WriteNewMod(plan, task.ModDirectory, stageDir, modDisplayName, Log);
-                GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
-            }
-            else if (task.AnimationPlan is { } animation)
-                GearConversionExecutor.WriteNewMod(animation, task.ModDirectory, stageDir, modDisplayName, Log);
-            else if (task.TexturePlan is { } texture)
+            if (task.TexturePlan is { } texture)
             {
                 // A fan-out keeps its source, so the new mod is all of this one plus the added paths.
                 CopyDirectory(task.ModDirectory, stageDir);
                 GearConversionExecutor.ApplyInPlace(texture, stageDir, Log);
                 UpdateMetaJsonName(stageDir, modDisplayName, Log);
+            }
+            else if (task.FilePlan is { } plan)
+            {
+                GearConversionExecutor.WriteNewMod(plan, task.ModDirectory, stageDir, modDisplayName, Log);
+                GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
             }
             else
             {
@@ -718,13 +685,20 @@ public sealed class ModConverterService
 
     private static ConversionTask RemapTask(ConversionTask original, string newBaseDir)
     {
-        var oldBase = original.ModDirectory.TrimEnd('\\', '/');
-        var newBase = newBaseDir.TrimEnd('\\', '/');
+        // The planners work with full paths, so both sides are compared in that form: a folder
+        // typed as "E:/Mods/Hair" would otherwise match nothing, and every edit would land in the
+        // source mod instead of the copy. A path outside the mod has no place in the copy at all.
+        var oldBase = Path.GetFullPath(original.ModDirectory).TrimEnd('\\', '/');
+        var newBase = Path.GetFullPath(newBaseDir).TrimEnd('\\', '/');
 
-        string Remap(string p) =>
-            p.StartsWith(oldBase, StringComparison.OrdinalIgnoreCase)
-                ? newBase + p[oldBase.Length..]
-                : p;
+        string Remap(string p)
+        {
+            var full = Path.GetFullPath(p);
+            if (string.Equals(full, oldBase, StringComparison.OrdinalIgnoreCase)) return newBase;
+            if (full.StartsWith(oldBase + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                return newBase + full[oldBase.Length..];
+            throw new InvalidDataException($"{p} is outside the mod folder {oldBase}.");
+        }
 
         var remapped = new ConversionTask
         {
@@ -736,12 +710,10 @@ public sealed class ModConverterService
             OldIdPadded   = original.OldIdPadded,
             NewIdPadded   = original.NewIdPadded,
             TargetSlot    = original.TargetSlot,
-            IgnoreSlot    = original.IgnoreSlot,
             SourceVariant = original.SourceVariant,
             TargetVariant = original.TargetVariant,
             SourceGenderRace = original.SourceGenderRace,
             TargetGenderRace = original.TargetGenderRace,
-            SourceRoot = original.SourceRoot,
             SourceFingerprint = original.SourceFingerprint,
             PlanFingerprint = original.PlanFingerprint,
             IsPlanned     = true,
@@ -757,13 +729,11 @@ public sealed class ModConverterService
             {
                 OldPath  = Remap(r.OldPath),
                 NewPath  = Remap(r.NewPath),
-                IsDir    = r.IsDir,
-                Selected = r.Selected,
             });
 
         foreach (var jc in original.PlannedJsonChanges)
         {
-            var rc = new PlannedJsonChange { FilePath = Remap(jc.FilePath), Selected = jc.Selected };
+            var rc = new PlannedJsonChange { FilePath = Remap(jc.FilePath) };
             foreach (var c in jc.Changes)
                 rc.Changes.Add(new JsonFieldChange
                 {
@@ -771,20 +741,18 @@ public sealed class ModConverterService
                     OldValue   = c.OldValue,
                     NewValue   = c.NewValue,
                     ChangeType = c.ChangeType,
-                    Selected   = c.Selected,
                 });
             remapped.PlannedJsonChanges.Add(rc);
         }
 
         foreach (var bp in original.PlannedBinaryPatches)
         {
-            var rb = new PlannedBinaryPatch { FilePath = Remap(bp.FilePath), Selected = bp.Selected, IsStructured = bp.IsStructured };
+            var rb = new PlannedBinaryPatch { FilePath = Remap(bp.FilePath) };
             foreach (var p in bp.Patches)
                 rb.Patches.Add(new BinaryStringPatch
                 {
                     OldString = p.OldString,
                     NewString = p.NewString,
-                    Selected  = p.Selected,
                 });
             remapped.PlannedBinaryPatches.Add(rb);
         }
@@ -803,9 +771,7 @@ public sealed class ModConverterService
                 MeshCount = mdl.MeshCount,
                 VertexCount = mdl.VertexCount,
                 ShapeVertexCount = mdl.ShapeVertexCount,
-                GeometryConverted = mdl.GeometryConverted,
                 DeformationPlan = mdl.DeformationPlan,
-                Selected = mdl.Selected,
             };
             remappedMdl.BoneResolutions.AddRange(mdl.BoneResolutions);
             foreach (var patch in mdl.PathReplacements)
@@ -813,7 +779,6 @@ public sealed class ModConverterService
                 {
                     OldString = patch.OldString,
                     NewString = patch.NewString,
-                    Selected = patch.Selected,
                 });
             remapped.PlannedMdlChanges.Add(remappedMdl);
         }
@@ -838,7 +803,7 @@ public sealed class ModConverterService
             if (task.MergedPlan != null)
             {
                 foreach (var entry in task.Entries.Where(e => !e.Rejected && e.Plan != null))
-                foreach (var hit in VerifyEntry(entry, modDirectory))
+                foreach (var hit in VerifyPlan(entry.Plan!, modDirectory))
                 {
                     // Which of the run's conversions a problem belongs to is the first thing to know.
                     hit.Detail = $"{entry.Description}: {hit.Detail}";
@@ -848,38 +813,9 @@ public sealed class ModConverterService
                 return hits;
             }
 
-            if (task.GearPlan is { } plan)
+            if (task.FilePlan is { } plan)
             {
-                // Retained source paths are expected when editing the mod (shared resources, and
-                // the whole point of adding to it) but not in a new mod.
-                var source = plan.Request.Mode.IsNewMod() ? plan.Request.Source : (GearItem?)null;
-                foreach (var issue in GearConversionVerifier.Verify(modDirectory, plan.Request.Target, source, _gameFiles))
-                    hits.Add(new LeftoverHit
-                    {
-                        FilePath = modDirectory,
-                        HitType  = issue.IsError ? "missing" : "leftover",
-                        Detail   = issue.Message,
-                    });
-                return hits;
-            }
-
-            if (task.AnimationPlan is { } animation)
-            {
-                foreach (var issue in AnimationConversionVerifier.Verify(modDirectory, animation))
-                    hits.Add(new LeftoverHit
-                    {
-                        FilePath = modDirectory,
-                        HitType  = issue.IsError ? "missing" : "note",
-                        Detail   = issue.Message,
-                    });
-                return hits;
-            }
-
-            if (task.TexturePlan is { } texture)
-            {
-                // The source's paths stay on purpose; what matters is that every added one resolves.
-                foreach (var problem in texture.Verify(modDirectory))
-                    hits.Add(new LeftoverHit { FilePath = modDirectory, HitType = "missing", Detail = problem });
+                hits.AddRange(VerifyPlan(plan, modDirectory));
                 return hits;
             }
 
@@ -898,33 +834,27 @@ public sealed class ModConverterService
         return hits;
     }
 
-    /// <summary>Verifies one conversion of a run with the verifier its kind already has.</summary>
-    private IEnumerable<LeftoverHit> VerifyEntry(QueuedConversion entry, string modDirectory)
+    /// <summary>
+    /// Verifies one written plan, a whole conversion or one of a run, with the verifier of its
+    /// kind. A kind without one is a mistake to hear about, not a plan to wave through.
+    /// </summary>
+    private IEnumerable<LeftoverHit> VerifyPlan(IModFilePlan plan, string modDirectory)
     {
-        switch (entry.Plan)
+        LeftoverHit Hit(string type, string detail) => new() { FilePath = modDirectory, HitType = type, Detail = detail };
+
+        return plan switch
         {
-            case GearConversionPlan gear:
-                // Retained source paths are expected when editing the mod (shared resources, and
-                // the whole point of adding to it) but not in a new mod.
-                var source = gear.Request.Mode.IsNewMod() ? gear.Request.Source : (GearItem?)null;
-                return GearConversionVerifier.Verify(modDirectory, gear.Request.Target, source, _gameFiles)
-                    .Select(issue => new LeftoverHit
-                    {
-                        FilePath = modDirectory,
-                        HitType  = issue.IsError ? "missing" : "leftover",
-                        Detail   = issue.Message,
-                    });
-            case AnimationConversionPlan animation:
-                return AnimationConversionVerifier.Verify(modDirectory, animation)
-                    .Select(issue => new LeftoverHit
-                    {
-                        FilePath = modDirectory,
-                        HitType  = issue.IsError ? "missing" : "note",
-                        Detail   = issue.Message,
-                    });
-            default:
-                return [];
-        }
+            // Retained source paths are expected when editing the mod (shared resources, and the
+            // whole point of adding to it) but not in a new mod.
+            GearConversionPlan gear => GearConversionVerifier.Verify(modDirectory, gear.Request.Target,
+                    gear.Mode.IsNewMod() ? gear.Request.Source : (GearItem?)null, _gameFiles)
+                .Select(issue => Hit(issue.IsError ? "missing" : "leftover", issue.Message)),
+            AnimationConversionPlan animation => AnimationConversionVerifier.Verify(modDirectory, animation)
+                .Select(issue => Hit(issue.IsError ? "missing" : "note", issue.Message)),
+            // The source's paths stay on purpose; what matters is that every added one resolves.
+            TextureFanOutPlan texture => texture.Verify(modDirectory).Select(problem => Hit("missing", problem)),
+            _ => throw new InvalidOperationException($"There is no verifier for a {plan.GetType().Name}."),
+        };
     }
 
     private static List<LeftoverHit> VerifyCustomizationConversion(
@@ -935,15 +865,15 @@ public sealed class ModConverterService
         var source = new CustomizationPathEndpoint(task.Kind, race, modelId);
         var flagged = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var entry in EnumerateAll(task.ModDirectory))
+        foreach (var entry in Directory.EnumerateFileSystemEntries(task.ModDirectory, "*", SearchOption.AllDirectories))
         {
-            if (!CustomizationPaths.Contains(entry.FullName, source)) continue;
-            flagged.Add(entry.FullName);
+            if (!CustomizationPaths.Contains(entry, source)) continue;
+            flagged.Add(entry);
             hits.Add(new LeftoverHit
             {
-                FilePath = entry.FullName,
+                FilePath = entry,
                 HitType = "filename",
-                Detail = $"Path still contains the old customization root: {RelativePath(task.ModDirectory, entry.FullName)}",
+                Detail = $"Path still contains the old customization root: {RelativePath(task.ModDirectory, entry)}",
             });
         }
 
@@ -988,7 +918,7 @@ public sealed class ModConverterService
         var source = new CustomizationPathEndpoint(task.Kind, race, modelId);
         var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var rename in task.PlannedRenames.Where(rename => rename.Selected))
+        foreach (var rename in task.PlannedRenames)
         {
             var directory = Path.GetDirectoryName(rename.OldPath);
             while (directory != null && CustomizationPaths.Contains(directory, source))
@@ -1015,41 +945,26 @@ public sealed class ModConverterService
 
     private void ApplyRename(PlannedRename rename, Action<string> log)
     {
-        if (!rename.IsDir)
-        {
-            if (!File.Exists(rename.OldPath))
-                throw new FileNotFoundException("Planned rename source is missing.", rename.OldPath);
-            if (File.Exists(rename.NewPath))
-                throw new IOException($"Planned rename destination exists: {rename.NewPath}");
-            // Ensure the destination directory exists — mirrors Python's
-            // os.makedirs(os.path.dirname(new_path), exist_ok=True) before shutil.move.
-            var destDir = Path.GetDirectoryName(rename.NewPath);
-            if (!string.IsNullOrEmpty(destDir))
-                Directory.CreateDirectory(destDir);
-            var sameDir = string.Equals(
-                Path.GetDirectoryName(rename.OldPath),
-                Path.GetDirectoryName(rename.NewPath),
-                StringComparison.OrdinalIgnoreCase);
-            File.Move(rename.OldPath, rename.NewPath);
-            log(sameDir
-                ? $"Renamed: {Path.GetFileName(rename.OldPath)} → {Path.GetFileName(rename.NewPath)}"
-                : $"Moved:   {rename.OldPath} → {rename.NewPath}");
-        }
-        else
-        {
-            if (!Directory.Exists(rename.OldPath))
-                throw new DirectoryNotFoundException($"Planned rename directory is missing: {rename.OldPath}");
-            if (Directory.Exists(rename.NewPath))
-                throw new IOException($"Planned rename directory destination exists: {rename.NewPath}");
-            Directory.Move(rename.OldPath, rename.NewPath);
-            log($"Renamed dir: {Path.GetFileName(rename.OldPath)} → {Path.GetFileName(rename.NewPath)}");
-        }
+        if (!File.Exists(rename.OldPath))
+            throw new FileNotFoundException("Planned rename source is missing.", rename.OldPath);
+        if (File.Exists(rename.NewPath))
+            throw new IOException($"Planned rename destination exists: {rename.NewPath}");
+        var destDir = Path.GetDirectoryName(rename.NewPath);
+        if (!string.IsNullOrEmpty(destDir))
+            Directory.CreateDirectory(destDir);
+        var sameDir = string.Equals(
+            Path.GetDirectoryName(rename.OldPath),
+            Path.GetDirectoryName(rename.NewPath),
+            StringComparison.OrdinalIgnoreCase);
+        File.Move(rename.OldPath, rename.NewPath);
+        log(sameDir
+            ? $"Renamed: {Path.GetFileName(rename.OldPath)} → {Path.GetFileName(rename.NewPath)}"
+            : $"Moved:   {rename.OldPath} → {rename.NewPath}");
     }
 
     private void ApplyJsonChange(PlannedJsonChange jc, Action<string> log)
     {
-        var selectedChanges = jc.Changes.Where(c => c.Selected).ToList();
-        if (selectedChanges.Count == 0) return;
+        if (jc.Changes.Count == 0) return;
 
         var raw  = File.ReadAllText(jc.FilePath);
         var node = JsonNode.Parse(raw, new JsonNodeOptions { PropertyNameCaseInsensitive = false },
@@ -1058,11 +973,11 @@ public sealed class ModConverterService
 
         int applied = 0;
         // Key renames and copies go last so value edits can still find their original key.
-        foreach (var change in selectedChanges.OrderBy(c => c.ChangeType is "path_key" or "path_key_copy" ? 1 : 0))
+        foreach (var change in jc.Changes.OrderBy(c => c.ChangeType is "path_key" or "path_key_copy" ? 1 : 0))
             if (ApplyJsonChangeAtPath(node, change)) applied++;
 
-        if (applied != selectedChanges.Count)
-            throw new InvalidDataException($"Only {applied} of {selectedChanges.Count} planned JSON changes applied in {jc.FilePath}.");
+        if (applied != jc.Changes.Count)
+            throw new InvalidDataException($"Only {applied} of {jc.Changes.Count} planned JSON changes applied in {jc.FilePath}.");
         var opts = new JsonSerializerOptions { WriteIndented = true };
         File.WriteAllText(jc.FilePath, node.ToJsonString(opts), Encoding.UTF8);
         log($"Updated JSON: {Path.GetFileName(jc.FilePath)} ({applied} changes)");
@@ -1223,36 +1138,18 @@ public sealed class ModConverterService
         catch { return false; }
     }
 
+    /// <summary>Rewrites the resource paths inside a model or material, rebuilding its string table.</summary>
     private void ApplyBinaryPatch(PlannedBinaryPatch bp, Action<string> log)
     {
-        var selectedPatches = bp.Patches.Where(p => p.Selected).ToList();
-        if (selectedPatches.Count == 0) return;
+        if (bp.Patches.Count == 0) return;
 
         var bytes = File.ReadAllBytes(bp.FilePath);
-        if (bp.IsStructured)
-        {
-            var replacements = selectedPatches.ToDictionary(p => p.OldString, p => p.NewString, StringComparer.Ordinal);
-            var rewritten = StructuredPathRewriter.Rewrite(bp.FilePath, bytes, replacements);
-            if (rewritten.AsSpan().SequenceEqual(bytes))
-                throw new InvalidDataException($"No planned structured paths were found in {bp.FilePath}.");
-            File.WriteAllBytes(bp.FilePath, rewritten);
-            log($"Rewrote structured binary paths: {Path.GetFileName(bp.FilePath)} ({selectedPatches.Count})");
-            return;
-        }
-
-        int count = 0;
-        foreach (var patch in selectedPatches)
-        {
-            var oldBytes = Encoding.Latin1.GetBytes(patch.OldString);
-            var newBytes = Encoding.Latin1.GetBytes(patch.NewString);
-            if (oldBytes.Length != newBytes.Length)
-                throw new InvalidDataException($"Unsafe length-changing binary patch: '{patch.OldString}' -> '{patch.NewString}'.");
-            var replaced = ReplaceBytesInArray(ref bytes, oldBytes, newBytes);
-            if (replaced == 0) throw new InvalidDataException($"Planned binary string was not found: {patch.OldString}");
-            count += replaced;
-        }
-        File.WriteAllBytes(bp.FilePath, bytes);
-        log($"Patched binary: {Path.GetFileName(bp.FilePath)} ({count} replacement(s))");
+        var replacements = bp.Patches.ToDictionary(p => p.OldString, p => p.NewString, StringComparer.Ordinal);
+        var rewritten = StructuredPathRewriter.Rewrite(bp.FilePath, bytes, replacements);
+        if (rewritten.AsSpan().SequenceEqual(bytes))
+            throw new InvalidDataException($"No planned structured paths were found in {bp.FilePath}.");
+        File.WriteAllBytes(bp.FilePath, rewritten);
+        log($"Rewrote structured binary paths: {Path.GetFileName(bp.FilePath)} ({bp.Patches.Count})");
     }
 
     private void ApplyMdlChange(PlannedMdlChange change, Action<string> log)
@@ -1262,28 +1159,20 @@ public sealed class ModConverterService
         if (!string.Equals(inputHash, change.InputHash, StringComparison.Ordinal))
             throw new InvalidOperationException($"MDL changed after preview: {change.FilePath}");
         var model = MdlFile.Read(input);
-        var replacements = change.PathReplacements.Where(p => p.Selected)
+        var replacements = change.PathReplacements
             .ToDictionary(p => p.OldString, p => p.NewString, StringComparer.Ordinal);
         if (replacements.Count > 0) model.ReplacePaths(replacements);
-        MdlConversionReport? report = null;
-        if (change.GeometryConverted)
-        {
-            var deformationPlan = change.DeformationPlan
-                ?? throw new InvalidOperationException("The previewed MDL deformation plan is missing.");
-            report = MdlRaceConverter.Convert(model, deformationPlan);
-        }
+        var deformationPlan = change.DeformationPlan
+            ?? throw new InvalidOperationException("The previewed MDL deformation plan is missing.");
+        var report = MdlRaceConverter.Convert(model, deformationPlan);
         var output = model.Write();
         var outputHash = MdlRaceConverter.Hash(output);
         if (!string.Equals(outputHash, change.OutputHash, StringComparison.Ordinal))
             throw new InvalidDataException($"MDL conversion output changed since preview: {change.FilePath}");
         _ = MdlFile.Read(output);
         File.WriteAllBytes(change.FilePath, output);
-        if (report != null)
-            log($"Deformed MDL geometry: {Path.GetFileName(change.FilePath)} " +
-                $"({report.VertexCount} vertices, {report.ShapeVertexCount} shape vertices)");
-        else
-            log($"Rebuilt MDL string table: {Path.GetFileName(change.FilePath)} " +
-                $"({replacements.Count} path replacement(s))");
+        log($"Deformed MDL geometry: {Path.GetFileName(change.FilePath)} " +
+            $"({report.VertexCount} vertices, {report.ShapeVertexCount} shape vertices)");
     }
 
     /// <summary>Recursively copies <paramref name="sourceDir"/> to <paramref name="destDir"/>.</summary>
@@ -1297,35 +1186,6 @@ public sealed class ModConverterService
             Directory.CreateDirectory(Path.GetDirectoryName(destFile)!);
             File.Copy(file, destFile, overwrite: false);
         }
-    }
-
-    private static int ReplaceBytesInArray(ref byte[] data, byte[] oldBytes, byte[] newBytes)
-    {
-        int count = 0;
-        int idx   = 0;
-        while (true)
-        {
-            int pos = IndexOf(data, oldBytes, idx);
-            if (pos < 0) break;
-            Buffer.BlockCopy(newBytes, 0, data, pos, Math.Min(newBytes.Length, data.Length - pos));
-            idx = pos + newBytes.Length;
-            count++;
-        }
-        return count;
-    }
-
-    private static int IndexOf(byte[] data, byte[] pattern, int start = 0)
-    {
-        for (int i = start; i <= data.Length - pattern.Length; i++)
-        {
-            bool match = true;
-            for (int j = 0; j < pattern.Length; j++)
-            {
-                if (data[i + j] != pattern[j]) { match = false; break; }
-            }
-            if (match) return i;
-        }
-        return -1;
     }
 
     private static string ReplaceInString(string input, string oldVal, string newVal)
@@ -1366,23 +1226,14 @@ public sealed class ModConverterService
         return segs;
     }
 
-    private record FsEntry(string FullName, bool IsDirectory);
-
-    private static IEnumerable<FsEntry> EnumerateAll(string root)
-    {
-        // Yield files first, then dirs (deepest first handled by caller ordering)
-        var files = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories);
-        var dirs  = Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories);
-
-        foreach (var f in files) yield return new FsEntry(f, false);
-        foreach (var d in dirs)  yield return new FsEntry(d, true);
-    }
-
     public static string RelativePath(string basePath, string fullPath)
     {
         try { return Path.GetRelativePath(basePath, fullPath).Replace('\\', '/'); }
         catch { return fullPath; }
     }
+
+    // Asked for on every frame the new mod's name is shown; the framework copies the array each call.
+    private static readonly char[] InvalidNameChars = Path.GetInvalidFileNameChars();
 
     /// <summary>
     /// Returns a version of <paramref name="name"/> safe for use as a directory name
@@ -1390,10 +1241,9 @@ public sealed class ModConverterService
     /// </summary>
     public static string SanitizeFolderName(string name)
     {
-        var invalid = Path.GetInvalidFileNameChars();
         var sb = new StringBuilder(name.Length);
         foreach (var c in name)
-            sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
+            sb.Append(Array.IndexOf(InvalidNameChars, c) >= 0 ? '_' : c);
         return sb.ToString().Trim(' ', '.').TrimEnd();
     }
 }

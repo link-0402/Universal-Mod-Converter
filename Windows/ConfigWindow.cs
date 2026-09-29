@@ -20,6 +20,13 @@ public sealed class ConfigWindow : Window, IDisposable
     private string? _sweepMessage;
     private bool _measuring;
 
+    /// <summary>
+    /// Where backups go, whether that folder exists, and the hint for the folder field. Working
+    /// them out touches the disk (every history record's folder, links on the way to the temp
+    /// folder), so it happens at most once a second rather than every frame.
+    /// </summary>
+    private (string? Folder, bool Exists, string Hint, DateTime At)? _location;
+
     public ConfigWindow(Plugin plugin) : base(
         "Universal Mod Converter — Settings###UMCConfig",
         ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoCollapse)
@@ -29,26 +36,34 @@ public sealed class ConfigWindow : Window, IDisposable
 
     public void Dispose() { }
 
+    /// <summary>Backups come and go while the window is closed, so their usage is measured afresh.</summary>
+    public override void OnOpen() => Invalidate();
+
     public override void Draw()
     {
         var cfg = _plugin.Configuration;
 
         Widgets.SectionTitle("Plan");
         var advanced = cfg.ShowAdvancedDetails;
-        if (ImGui.Checkbox("Show advanced plan details (fingerprints, bone resolution)", ref advanced))
+        if (ImGui.Checkbox("Show advanced plan details", ref advanced))
         {
             cfg.ShowAdvancedDetails = advanced;
             cfg.Save();
         }
+        Widgets.Tooltip("The same switch as Advanced details in the Plan tab: every game path, metadata entry and file " +
+                        "operation a conversion produces, fingerprints, bone resolution, and the raw codes of the " +
+                        "things to check.");
 
         ImGui.Spacing();
         Widgets.SectionTitle("Safety");
         var confirm = cfg.ConfirmInPlace;
-        if (ImGui.Checkbox("Ask before converting a mod in place", ref confirm))
+        if (ImGui.Checkbox("Ask before changing an existing mod", ref confirm))
         {
             cfg.ConfirmInPlace = confirm;
             cfg.Save();
         }
+        Widgets.Tooltip("Asks before \"Convert in place\" and \"Add to this mod\", retextures added to the mod included. " +
+                        "Creating a new mod never asks, since it changes nothing that exists.");
 
         ImGui.Spacing();
         Widgets.SectionTitle("Backups");
@@ -60,17 +75,18 @@ public sealed class ConfigWindow : Window, IDisposable
     private void DrawBackupDirectory(Configuration cfg)
     {
         using (ImRaii.TextWrapPos(ImGui.GetFontSize() * 28f))
-            Widgets.Muted("Converting a mod in place keeps the untouched original here, and so does " +
-                          "reverting, so a conversion can always be undone. Leave this blank to use the " +
-                          "default location.");
+            Widgets.Muted("Converting a mod in place or adding to it keeps the untouched original here, and " +
+                          "so does reverting, so a conversion can always be undone. Leave this blank to use " +
+                          "the default location.");
         ImGui.Spacing();
 
         var buttonWidth = ImGui.GetFrameHeight();
         var backupDir   = cfg.BackupDirectory;
+        var location    = Location();
         // A fixed width: the window sizes itself to its content, so a field that fills the
         // available width would make it grow a little every frame.
         ImGui.SetNextItemWidth(ImGui.GetFontSize() * 28f - buttonWidth * 2 - ImGui.GetStyle().ItemSpacing.X * 2);
-        if (ImGui.InputTextWithHint("##BackupDirectory", DefaultLocationHint(), ref backupDir, 512))
+        if (ImGui.InputTextWithHint("##BackupDirectory", location.Hint, ref backupDir, 512))
         {
             cfg.BackupDirectory = backupDir;
             cfg.Save();
@@ -78,8 +94,8 @@ public sealed class ConfigWindow : Window, IDisposable
         }
 
         ImGui.SameLine();
-        var folder     = CurrentRoot();
-        var openReason = folder != null && Directory.Exists(folder) ? null : "This folder does not exist yet.";
+        var folder     = location.Folder;
+        var openReason = folder != null && location.Exists ? null : "This folder does not exist yet.";
         if (Widgets.IconButton("##OpenBackupDir", FontAwesomeIcon.FolderOpen, "Open this folder", openReason))
             ConverterSession.OpenFolder(folder!);
 
@@ -92,7 +108,7 @@ public sealed class ConfigWindow : Window, IDisposable
             Invalidate();
         }
 
-        if (string.IsNullOrEmpty(cfg.BackupDirectory) && CurrentRoot() is { } resolved)
+        if (string.IsNullOrEmpty(cfg.BackupDirectory) && location.Folder is { } resolved)
             Widgets.Muted(resolved);
     }
 
@@ -104,8 +120,9 @@ public sealed class ConfigWindow : Window, IDisposable
             cfg.PruneBackupsAutomatically = prune;
             cfg.Save();
         }
-        Widgets.Tooltip("Runs when the plugin starts and after each conversion. A backup you could " +
-                        "still revert to is never deleted, however old it is.");
+        Widgets.Tooltip("Runs when the plugin starts and after each conversion or revert that keeps a backup. " +
+                        "A backup you could still revert to is never deleted, however old it is. What an " +
+                        "interrupted conversion left behind is recovered at startup either way.");
 
         using (ImRaii.Disabled(!prune))
         {
@@ -154,25 +171,34 @@ public sealed class ConfigWindow : Window, IDisposable
     {
         _usage = null;
         _sweepMessage = null;
+        _location = null;
     }
 
-    private string DefaultLocationHint()
-        => ModConverterService.SameVolume(Path.GetTempPath(), PenumbraRoot() ?? Path.GetTempPath())
+    private (string? Folder, bool Exists, string Hint) Location()
+    {
+        var now = DateTime.UtcNow;
+        if (_location is { } known && now - known.At < TimeSpan.FromSeconds(1)) return (known.Folder, known.Exists, known.Hint);
+
+        var root = PenumbraRoot();
+        var hint = ModConverterService.SameVolume(Path.GetTempPath(), root ?? Path.GetTempPath())
             ? "Default: the system temp folder"
             : "Default: a hidden .umc-backups folder next to the mods";
-
-    private string? PenumbraRoot()
-        => _plugin.PenumbraIpc.IsAvailable ? _plugin.PenumbraIpc.GetModDirectory() : null;
-
-    private string? CurrentRoot()
-    {
-        if (!string.IsNullOrWhiteSpace(_plugin.Configuration.BackupDirectory))
-            return _plugin.Configuration.BackupDirectory;
-        return _plugin.BackupMaintenance.Roots(PenumbraRoot()).FirstOrDefault()
-               ?? (PenumbraRoot() is { } root
-                   ? ModConverterService.BackupRoot(root, null, create: false)
-                   : null);
+        var folder = !string.IsNullOrWhiteSpace(_plugin.Configuration.BackupDirectory)
+            ? _plugin.Configuration.BackupDirectory
+            : _plugin.BackupMaintenance.Roots(root).FirstOrDefault()
+              ?? (root != null ? ModConverterService.BackupRoot(root, null, create: false) : null);
+        _location = (folder, folder != null && Directory.Exists(folder), hint, now);
+        return (folder, _location.Value.Exists, hint);
     }
+
+    /// <summary>
+    /// Penumbra's mod folder: as the main window last read it, or from Penumbra itself when that
+    /// window has not been opened yet. Asked for at most once a second (see <see cref="Location"/>).
+    /// </summary>
+    private string? PenumbraRoot()
+        => _plugin.Session.PenumbraAvailable && _plugin.Session.PenumbraModDirectory is { } known ? known
+            : _plugin.PenumbraIpc.IsAvailable ? _plugin.PenumbraIpc.GetModDirectory()
+            : null;
 
     private void EnsureMeasured()
     {
@@ -186,21 +212,17 @@ public sealed class ConfigWindow : Window, IDisposable
         });
     }
 
+    /// <summary>Runs the same sweep as the automatic one, so the two never run at once.</summary>
     private void CleanUpNow()
     {
-        var root = PenumbraRoot();
-        _sweepMessage = "Cleaning up…";
-        System.Threading.Tasks.Task.Run(() =>
+        var started = _plugin.RunBackupMaintenance(manual: true, done: result =>
         {
-            var result = _plugin.BackupMaintenance.Sweep(root);
-            _plugin.Session.Runner.Post(() =>
-            {
-                if (result.PrunedRecords.Count > 0) _plugin.History.MarkBackupsPruned(result.PrunedRecords);
-                _sweepMessage = result.Folders == 0
-                    ? "Nothing to clean up."
-                    : $"Removed {result.Folders} backup(s), freeing {BackupMaintenanceService.Describe(result.Bytes)}.";
-                _usage = null;
-            });
+            _sweepMessage = result == null ? "Cleaning up failed; see the log."
+                : result.Folders == 0 ? "Nothing to clean up."
+                : $"Removed {result.Folders} backup(s), freeing {BackupMaintenanceService.Describe(result.Bytes)}.";
+            _usage = null;
+            _location = null;
         });
+        _sweepMessage = started ? "Cleaning up…" : "A cleanup is already running.";
     }
 }

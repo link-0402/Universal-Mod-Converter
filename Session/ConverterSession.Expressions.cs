@@ -18,7 +18,8 @@ public enum ExpressionSourceKind
 }
 
 /// <summary>A facial expression another mod provides in a face pack, or plays in one of its animations.</summary>
-public sealed record ModExpression(string Label, FacialAnimation Face);
+/// <param name="Races">The races the mod ships the face's pack for; empty when it plays a face it does not ship.</param>
+public sealed record ModExpression(string Label, FacialAnimation Face, IReadOnlySet<ushort> Races);
 
 /// <summary>
 /// Attaching a facial expression to an animation: on its own, or on top of a swap or retarget.
@@ -100,7 +101,16 @@ public sealed partial class ConverterSession
             _scanningExpressions = true;
             System.Threading.Tasks.Task.Run(() =>
             {
-                var found = ScanExpressions(directory);
+                // Whatever happens, the scan reports back, or the list would wait for it forever.
+                IReadOnlyList<ModExpression> found = [];
+                try
+                {
+                    found = ScanExpressions(directory);
+                }
+                catch (Exception ex)
+                {
+                    Runner.Post(() => Log.Add(LogLevel.Warning, $"The expressions of {directory} could not be read: {ex.Message}"));
+                }
                 Runner.Post(() =>
                 {
                     _scannedExpressionMod = directory;
@@ -113,7 +123,7 @@ public sealed partial class ConverterSession
     }
 
     /// <summary><c>chara/human/c0801/animation/f0002/nonresident/smile.pap</c>: a pack of a race's face animations.</summary>
-    [GeneratedRegex(@"^chara/human/c\d{4}/animation/f\d{4}/(?<where>resident|nonresident)/(?<name>[^/]+)\.pap$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^chara/human/c(?<race>\d{4})/animation/f\d{4}/(?<where>resident|nonresident)/(?<name>[^/]+)\.pap$", RegexOptions.IgnoreCase)]
     private static partial Regex FacePack();
 
     private const string ExpressionPrefix = "cfxf_";
@@ -123,6 +133,8 @@ public sealed partial class ConverterSession
         // How the mod plays each face, by its timelines, and the faces its packs merely hold.
         var played = new Dictionary<FacialAnimation, string>();
         var packed = new Dictionary<FacialAnimation, string>();
+        // Which races the mod ships each face's pack for: the game plays it from the character's own.
+        var races = new Dictionary<(string Entry, string? Pack), HashSet<ushort>>();
         try
         {
             var mod = PenumbraMod.Load(directory);
@@ -162,8 +174,13 @@ public sealed partial class ConverterSession
                         var name = pack.Groups["where"].Value.Equals("nonresident", StringComparison.OrdinalIgnoreCase)
                             ? pack.Groups["name"].Value
                             : null;
+                        var race = ushort.Parse(pack.Groups["race"].Value, System.Globalization.CultureInfo.InvariantCulture);
                         foreach (var (entry, _) in pap.FaceEntries.Where(e => e.Entry.Name.StartsWith(ExpressionPrefix, StringComparison.Ordinal)))
+                        {
                             packed.TryAdd(new FacialAnimation(entry.Name, name), $"{entry.Name[ExpressionPrefix.Length..]} ({file}{where})");
+                            if (!races.TryGetValue((entry.Name, name), out var shipped)) races[(entry.Name, name)] = shipped = [];
+                            shipped.Add(race);
+                        }
                         continue;
                     }
 
@@ -185,7 +202,8 @@ public sealed partial class ConverterSession
         // ships plays as the game plays that expression, or holds its first frame.
         var faces = played.Keys.Select(f => f.Entry).ToHashSet(StringComparer.Ordinal);
         return played.Concat(packed.Where(p => !faces.Contains(p.Key.Entry)))
-            .Select(f => new ModExpression(f.Value, f.Key))
+            .Select(f => new ModExpression(f.Value, f.Key,
+                races.GetValueOrDefault((f.Key.Entry, f.Key.Pack)) ?? (IReadOnlySet<ushort>)new HashSet<ushort>()))
             .OrderBy(e => e.Label, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
@@ -211,6 +229,9 @@ public sealed partial class ConverterSession
         if (ExpressionSource == ExpressionSourceKind.Mod)
             return ExpressionModFile is { } file
                 ? new ExpressionDonor($"{Path.GetFileName(ExpressionModDirectory)}: {file.Label}", Face: file.Face)
+                {
+                    PackRaces = file.Races,
+                }
                 : null;
 
         // The planner reads the pose for each animation's own race.

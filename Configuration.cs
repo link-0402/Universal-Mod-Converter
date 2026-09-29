@@ -41,10 +41,16 @@ public class Configuration : IPluginConfiguration
     /// <summary>Last-used new mod name (used as folder name and Penumbra display name).</summary>
     public string LastNewModName { get; set; } = string.Empty;
 
-    /// <summary>Ask for confirmation before converting a mod in place.</summary>
+    /// <summary>
+    /// Ask for confirmation before changing an existing mod: converting it in place, or adding to
+    /// it (retextures included). The name predates adding to a mod and is kept for saved settings.
+    /// </summary>
     public bool ConfirmInPlace { get; set; } = true;
 
-    /// <summary>Show fingerprints, bone resolutions and other diagnostics in the plan view.</summary>
+    /// <summary>
+    /// Show the plan's tables (every path, metadata entry and file operation), fingerprints, bone
+    /// resolutions and the raw diagnostic codes in the plan view.
+    /// </summary>
     public bool ShowAdvancedDetails { get; set; }
 
     /// <summary>Width of the mod browser pane, in unscaled pixels.</summary>
@@ -63,7 +69,10 @@ public class Configuration : IPluginConfiguration
     /// <summary>How many backups are kept at once, however recent they are.</summary>
     public int BackupRetentionCount { get; set; } = 10;
 
-    /// <summary>Delete expired backups on startup and after each conversion.</summary>
+    /// <summary>
+    /// Delete expired backups on startup and after each conversion. Recovering from a crash at
+    /// startup does not depend on this.
+    /// </summary>
     public bool PruneBackupsAutomatically { get; set; } = true;
 
     /// <summary>Most recent conversions first; used to revert them.</summary>

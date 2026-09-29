@@ -15,6 +15,7 @@ public sealed class ModPlanContext
 {
     private readonly Dictionary<string, Action<PenumbraMod>> _finalizers = new(StringComparer.Ordinal);
     private readonly List<string> _finalizerOrder = [];
+    private readonly Dictionary<string, string> _unchangedCopies = new(StringComparer.OrdinalIgnoreCase);
     private bool _finalized;
 
     /// <param name="shared">
@@ -25,7 +26,6 @@ public sealed class ModPlanContext
     {
         ModDirectory = Path.GetFullPath(modDirectory);
         Mode = mode;
-        Shared = shared;
         Source = PenumbraMod.Load(ModDirectory);
         Result = mode.IsNewMod() ? Source.CloneStructure() : Source.Clone();
         Locals = new GearConversionPlanner.LocalAllocator(mode.IsNewMod() ? null : ModDirectory, reuseReleased: !shared);
@@ -36,8 +36,6 @@ public sealed class ModPlanContext
     public string ModDirectory { get; }
 
     public ConversionOutputMode Mode { get; }
-
-    public bool Shared { get; }
 
     /// <summary>The mod as it is on disk. Every entry reads from this and none may change it.</summary>
     public PenumbraMod Source { get; }
@@ -51,6 +49,25 @@ public sealed class ModPlanContext
     internal GearConversionPlanner.LocalAllocator Locals { get; }
 
     /// <summary>
+    /// Where the result already holds an unchanged copy of the mod file at
+    /// <paramref name="fullPath"/>, made by an earlier conversion of the run, or null. Two
+    /// conversions that both need a file outside either item (a shared texture, say) share one
+    /// copy; a second copy under another name would map one game path to two files. A copy
+    /// whose conversion was rolled back is no longer referenced by the result and does not count.
+    /// </summary>
+    internal string? UnchangedCopy(string fullPath)
+    {
+        if (!_unchangedCopies.TryGetValue(fullPath, out var local)) return null;
+        var normalized = GamePath.NormalizeLocal(local);
+        return Result.Containers.Any(c => c.FileEntries().Any(e => GamePath.NormalizeLocal(e.Local) == normalized))
+            ? local
+            : null;
+    }
+
+    /// <summary>Records that <paramref name="local"/> is an unchanged copy of <paramref name="fullPath"/>.</summary>
+    internal void NoteUnchangedCopy(string fullPath, string local) => _unchangedCopies[fullPath] = local;
+
+    /// <summary>
     /// Registers work that finishes the whole mod rather than one entry — pruning empty groups,
     /// stamping a new identifier, deleting orphaned files. Running these per entry would undo
     /// the next entry's work, so they run once, after every entry has planned.
@@ -59,6 +76,9 @@ public sealed class ModPlanContext
     {
         if (_finalizers.TryAdd(key, finalize)) _finalizerOrder.Add(key);
     }
+
+    /// <summary>Registers work one conversion of the run needs done at the end, whatever the others register.</summary>
+    internal void AddFinalizer(Action<PenumbraMod> finalize) => AddFinalizerOnce($"#{_finalizerOrder.Count}", finalize);
 
     /// <summary>Runs the registered finalizers, once. Safe to call again.</summary>
     public void RunFinalizers()

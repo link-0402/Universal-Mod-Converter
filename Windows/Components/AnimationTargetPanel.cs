@@ -16,6 +16,8 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
     private string _emoteFilter = string.Empty;
     private string _groupName = string.Empty;
     private string _expressionFilter = string.Empty;
+    private string _expressionModFilter = string.Empty;
+    private string _expressionSwapFilter = string.Empty;
 
     public void Draw(AnimationSource source)
     {
@@ -61,6 +63,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         if (operation == AnimationOperation.Expression)
         {
             DrawExpressionPicker();
+            if (session.NeedsAnimationSourceContainer) DrawSourceContainer(source);
             return;
         }
 
@@ -99,9 +102,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         var expressions = session.AnimationExpressions;
         if (expressions == null)
         {
-            Widgets.Spinner(Theme.Accent);
-            ImGui.SameLine();
-            Widgets.Muted("Reading the expression list…");
+            Loading("Reading the expression list…");
             return;
         }
 
@@ -134,11 +135,15 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
             if (combo.Success)
             {
                 ImGui.SetNextItemWidth(-1);
-                ImGui.InputTextWithHint("##ExpressionModFilter", "Filter mods…", ref _expressionFilter, 64);
-                var filter = _expressionFilter.Trim();
+                ImGui.InputTextWithHint("##ExpressionModFilter", "Filter mods…", ref _expressionModFilter, 64);
+                var filter = _expressionModFilter.Trim();
+                // Two mods may share a name; the folder tells their rows apart.
                 foreach (var mod in mods.Where(m => filter.Length == 0 || m.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)))
+                {
+                    using var id = ImRaii.PushId(mod.Directory);
                     if (ImGui.Selectable(mod.Name, ReferenceEquals(mod, current)))
                         session.SetExpressionMod(mod.Directory);
+                }
             }
         }
         if (mods.Count == 0) Widgets.MutedWrapped("Penumbra's mod list is not available.");
@@ -147,9 +152,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         var expressions = session.ModExpressions;
         if (expressions == null)
         {
-            Widgets.Spinner(Theme.Accent);
-            ImGui.SameLine();
-            Widgets.Muted("Looking for facial animations in that mod…");
+            Loading("Looking for facial animations in that mod…");
             return;
         }
         if (expressions.Count == 0)
@@ -161,9 +164,12 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         ImGui.SetNextItemWidth(-1);
         using var files = ImRaii.Combo("##ExpressionFile", session.ExpressionModFile?.Label ?? "Choose an expression…");
         if (!files.Success) return;
-        foreach (var expression in expressions)
-            if (ImGui.Selectable(expression.Label, expression == session.ExpressionModFile))
-                session.SetExpressionModFile(expression);
+        for (var index = 0; index < expressions.Count; index++)
+        {
+            using var id = ImRaii.PushId(index);
+            if (ImGui.Selectable(expressions[index].Label, expressions[index] == session.ExpressionModFile))
+                session.SetExpressionModFile(expressions[index]);
+        }
     }
 
     // ── Idle slots ──────────────────────────────────────────────────────────
@@ -183,7 +189,8 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         ImGui.SameLine(0, 20f * Theme.Scale);
         if (ImGui.RadioButton("Option group with a variant per slot", group)) session.SetAnimationAsGroup(true);
         Widgets.Tooltip("Create a Penumbra option group whose options place the animation in each chosen slot, " +
-                        "so the slot can be picked in Penumbra at any time. Its first option, \"-\", switches it off.");
+                        "so the slot can be picked in Penumbra at any time. Its first option, \"-\", places it nowhere. " +
+                        "The mod's own copy keeps playing in the current slot as long as this mod is enabled.");
 
         if (group)
         {
@@ -198,7 +205,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
             ImGui.SameLine();
             Widgets.Muted($"{session.AnimationGroupSlots.Count} of {slots.Count} slots");
         }
-        else if (session.OutputMode == ConversionOutputMode.InPlace)  // Implied by AddToMod.
+        else if (session.EffectiveOutputMode == ConversionOutputMode.InPlace)  // Implied by AddToMod; not kept in a new mod.
         {
             var keep = session.AnimationKeepOriginal;
             if (ImGui.Checkbox("Keep it in the current slot too", ref keep)) session.SetAnimationKeepOriginal(keep);
@@ -227,8 +234,9 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
     }
 
     /// <summary>
-    /// The version the group uses, when several options of the mod have their own: one group can
-    /// hold only one file per slot. Nothing is preselected, so the choice is always deliberate.
+    /// The version a new option group uses (a slot group, or an expression added to this mod), when
+    /// several options of the mod have their own: one group can hold only one file per animation.
+    /// Nothing is preselected, so the choice is always deliberate.
     /// </summary>
     private void DrawSourceContainer(AnimationSource source)
     {
@@ -246,8 +254,8 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
                     if (ImGui.Selectable(provider.Label, provider == chosen)) session.SetAnimationSourceContainer(provider.Address);
                 }
         }
-        Widgets.Tooltip("Several options of this mod have their own version of this idle, and an option group can " +
-                        "hold only one of them per slot. Choose the one to use; the options themselves stay as they are.");
+        Widgets.Tooltip("Several options of this mod have their own version of this animation, and the new option group " +
+                        "can hold only one of them. Choose the one to use; the options themselves stay as they are.");
     }
 
     // ── Emotes ──────────────────────────────────────────────────────────────
@@ -257,9 +265,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         var emotes = session.AnimationEmotes;
         if (emotes == null)
         {
-            Widgets.Spinner(Theme.Accent);
-            ImGui.SameLine();
-            Widgets.Muted("Reading the emote list…");
+            Loading("Reading the emote list…");
             return;
         }
 
@@ -285,15 +291,9 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         {
             var emote = shown[i];
             using var id = ImRaii.PushId((int)emote.Id);
-            var start = ImGui.GetCursorPos();
-            if (ImGui.Selectable("##row", emote.Id == session.AnimationTargetEmote, ImGuiSelectableFlags.None, new Vector2(0, rowHeight)))
+            if (EmoteRow(emote.Icon, emote.Name, emote.Id == session.AnimationTargetEmote, true,
+                    string.Join("\n", emote.Timelines.Select(t => $"{t.Label}: {t.Key}")), rowHeight))
                 session.SetAnimationTargetEmote(emote.Id);
-            Widgets.Tooltip(string.Join("\n", emote.Timelines.Select(t => $"{t.Label}: {t.Key}")));
-            ImGui.SetCursorPos(start);
-            Widgets.GameIcon(emote.Icon, rowHeight);
-            ImGui.SameLine();
-            ImGui.SetCursorPosY(start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2);
-            ImGui.TextUnformatted($"/{emote.Name}");
         });
     }
 
@@ -305,19 +305,17 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         var expressions = session.AnimationExpressions;
         if (expressions == null)
         {
-            Widgets.Spinner(Theme.Accent);
-            ImGui.SameLine();
-            Widgets.Muted("Reading the expression list…");
+            Loading("Reading the expression list…");
             return;
         }
 
         ImGui.SetNextItemWidth(-1);
-        ImGui.InputTextWithHint("##ExpressionSwapFilter", "Filter expressions…", ref _emoteFilter, 64);
+        ImGui.InputTextWithHint("##ExpressionSwapFilter", "Filter expressions…", ref _expressionSwapFilter, 64);
         if (expressions.FirstOrDefault(e => e.Id == session.AnimationTargetEmote) is { } chosen)
             ImGui.TextColored(Theme.Success, $"/{chosen.Name}");
         else Widgets.Muted("No expression selected.");
 
-        var filter = _emoteFilter.Trim();
+        var filter = _expressionSwapFilter.Trim();
         var shown = expressions.Where(e => e.Id != source.EmoteId &&
                                            (filter.Length == 0 || e.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
                                             e.Pose.Contains(filter, StringComparison.OrdinalIgnoreCase)))
@@ -329,23 +327,37 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         {
             var expression = shown[i];
             using var id = ImRaii.PushId((int)expression.Id);
-            var start = ImGui.GetCursorPos();
-            using (ImRaii.Disabled(!expression.OwnPack))
-            {
-                if (ImGui.Selectable("##row", expression.Id == session.AnimationTargetEmote, ImGuiSelectableFlags.None,
-                        new Vector2(0, rowHeight)))
-                    session.SetAnimationTargetEmote(expression.Id);
-            }
-            Widgets.Tooltip(expression.OwnPack
-                ? $"facial/pose/{expression.Pose}"
-                : "The game keeps this face in the shared face pack with every other face, so it cannot be replaced on its own.");
-            ImGui.SetCursorPos(start);
-            Widgets.GameIcon(expression.Icon, rowHeight);
-            ImGui.SameLine();
-            ImGui.SetCursorPosY(start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2);
-            if (expression.OwnPack) ImGui.TextUnformatted($"/{expression.Name}");
-            else Widgets.Muted($"/{expression.Name}");
+            if (EmoteRow(expression.Icon, expression.Name, expression.Id == session.AnimationTargetEmote, expression.OwnPack,
+                    expression.OwnPack
+                        ? $"facial/pose/{expression.Pose}"
+                        : "The game keeps this face in the shared face pack with every other face, so it cannot be replaced on its own.",
+                    rowHeight))
+                session.SetAnimationTargetEmote(expression.Id);
         });
+    }
+
+    /// <summary>A row of the game's emote list: its icon and /name, selectable unless <paramref name="enabled"/> is false.</summary>
+    private static bool EmoteRow(uint icon, string name, bool selected, bool enabled, string tooltip, float rowHeight)
+    {
+        var start = ImGui.GetCursorPos();
+        bool clicked;
+        using (ImRaii.Disabled(!enabled))
+            clicked = ImGui.Selectable("##row", selected, ImGuiSelectableFlags.None, new Vector2(0, rowHeight));
+        Widgets.Tooltip(tooltip);
+        ImGui.SetCursorPos(start);
+        Widgets.GameIcon(icon, rowHeight);
+        ImGui.SameLine();
+        ImGui.SetCursorPosY(start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2);
+        if (enabled) ImGui.TextUnformatted($"/{name}");
+        else Widgets.Muted($"/{name}");
+        return clicked;
+    }
+
+    private static void Loading(string message)
+    {
+        Widgets.Spinner(Theme.Accent);
+        ImGui.SameLine();
+        Widgets.Muted(message);
     }
 
     // ── Races ───────────────────────────────────────────────────────────────

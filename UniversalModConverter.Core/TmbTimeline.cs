@@ -375,7 +375,20 @@ public sealed class TmbTimeline
         return bytes[start..(start + length)];
     }
 
-    private static string ReadString(byte[] bytes, int start, int end)
+    /// <summary>
+    /// Where an entry of kind <paramref name="magic"/> keeps its string's displacement, relative
+    /// to the entry; -1 when it has no string. <see cref="PapTimeline"/> reads strings with it
+    /// from timelines this class cannot take apart.
+    /// </summary>
+    internal static int StringField(string magic)
+    {
+        if (Pointers.TryGetValue(magic, out var layouts))
+            foreach (var layout in layouts)
+                if (layout.Kind == Kind.String) return layout.Offset;
+        return -1;
+    }
+
+    internal static string ReadString(byte[] bytes, int start, int end)
     {
         var span = bytes.AsSpan(start, Math.Min(512, end - start));
         var zero = span.IndexOf((byte)0);

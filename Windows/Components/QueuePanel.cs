@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Numerics;
+using UniversalModConverter.Core;
 using UniversalModConverter.Models;
 using UniversalModConverter.Session;
 using UniversalModConverter.Windows.Ui;
@@ -74,9 +75,17 @@ internal sealed class QueuePanel(ConverterSession session)
             {
                 ImGui.SameLine();
                 ImGui.SetCursorPosY(rowStart + (iconSize - ImGui.GetFrameHeight()) / 2);
-                Widgets.Badge("Overlaps another", Theme.Danger);
+                // Left out for overlapping another conversion, or for a problem of its own.
+                Widgets.Badge(entry.Diagnostics.Any(d => d.Code == "queue_conflict") ? "Overlaps another" : "Left out", Theme.Danger);
                 if (entry.Diagnostics.FirstOrDefault(d => d.IsBlocker) is { } blocker)
                     Widgets.Tooltip(blocker.Message);
+            }
+
+            if (session.NeedsSourceChoice(entry))
+            {
+                ImGui.SameLine();
+                ImGui.SetCursorPosY(rowStart + (iconSize - ImGui.GetFrameHeight()) / 2);
+                DrawSourceChoice(entry);
             }
 
             ImGui.SameLine(ImGui.GetContentRegionMax().X - ImGui.GetFrameHeight());
@@ -88,6 +97,31 @@ internal sealed class QueuePanel(ConverterSession session)
         }
 
         if (remove is { } removed) session.RemoveFromQueue(removed);
+    }
+
+    /// <summary>
+    /// The version an expression added to this mod uses, when several options of the mod have
+    /// their own and none was chosen before it was added to the plan. It is chosen here, on the
+    /// entry itself: the cards above only decide what gets added next.
+    /// </summary>
+    private void DrawSourceChoice(QueuedConversion entry)
+    {
+        Widgets.Icon(FontAwesomeIcon.ExclamationTriangle, Theme.Warning);
+        ImGui.SameLine();
+        var room = ImGui.GetContentRegionAvail().X - ImGui.GetFrameHeight() - ImGui.GetStyle().ItemSpacing.X * 2;
+        ImGui.SetNextItemWidth(Math.Max(ImGui.GetFrameHeight() * 4, Math.Min(220f * Theme.Scale, room)));
+        using (var combo = ImRaii.Combo("##TakeFrom", "Take it from…", ImGuiComboFlags.HeightLarge))
+        {
+            if (combo.Success)
+                foreach (var provider in entry.SourceChoices)
+                {
+                    using var id = ImRaii.PushId($"{provider.Address.Group}/{provider.Address.Index}");
+                    if (ImGui.Selectable(provider.Label)) session.ChooseQueueEntrySource(entry.Id, provider);
+                }
+        }
+        Widgets.Tooltip("Several options of this mod have their own version of this animation, and the expression's " +
+                        "option group can hold only one of them. Choose the one to use; the options themselves stay " +
+                        "as they are.");
     }
 
     private void DrawAddButton()
@@ -120,6 +154,17 @@ internal static class ConversionRow
         }
     }
 
+    /// <summary>The glyph standing in for a kind of root the game has no icon for.</summary>
+    public static FontAwesomeIcon Glyph(AssetKind kind) => kind switch
+    {
+        AssetKind.Hair                       => FontAwesomeIcon.Cut,
+        AssetKind.Face                       => FontAwesomeIcon.UserCircle,
+        AssetKind.Body                       => FontAwesomeIcon.HandPaper,
+        AssetKind.Tail or AssetKind.VieraEar => FontAwesomeIcon.Paw,
+        AssetKind.Animation                  => FontAwesomeIcon.Running,
+        _                                    => FontAwesomeIcon.Tshirt,
+    };
+
     private static void DrawSide(ConversionSide side, float iconSize, Vector4 detailColor)
     {
         if (side.Icon != 0)
@@ -128,7 +173,7 @@ internal static class ConversionRow
         {
             using (ImRaii.PushColor(ImGuiCol.Text, Theme.Muted))
             using (ImRaii.PushFont(UiBuilder.IconFont))
-                ImGui.Button(FontAwesomeIcon.Running.ToIconString() + "##kind", new Vector2(iconSize));
+                ImGui.Button(Glyph(side.Kind).ToIconString() + "##kind", new Vector2(iconSize));
         }
 
         ImGui.SameLine();

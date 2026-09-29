@@ -45,33 +45,18 @@ public sealed record TextureFanOutRequest(
 /// <summary>A redirect the plan adds; <paramref name="Local"/> is null for a file swap.</summary>
 public sealed record TextureFanOutOutput(string Scope, string GamePath, string? Local);
 
-public sealed class TextureFanOutPlan : IModFilePlan
+public sealed class TextureFanOutPlan : ModFilePlan
 {
-    internal TextureFanOutPlan(TextureFanOutRequest request, PenumbraMod result)
+    internal TextureFanOutPlan(TextureFanOutRequest request, PenumbraMod result) : base(result)
     {
         Request = request;
-        Result = result;
     }
 
     public TextureFanOutRequest Request { get; }
 
-    public PenumbraMod Result { get; }
-
-    public List<PlannedFileOperation> Files { get; } = [];
-
-    IReadOnlyList<PlannedFileOperation> IModFilePlan.Files => Files;
-
-    public List<GearPlanChange> Changes { get; } = [];
-
-    public List<PlanDiagnostic> Diagnostics { get; } = [];
+    public override ConversionOutputMode Mode => Request.Mode;
 
     public List<TextureFanOutOutput> Outputs { get; } = [];
-
-    public HashSet<string> InputFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
-
-    public bool HasBlockers => Diagnostics.Any(d => d.IsBlocker);
-
-    public string Fingerprint() => ModFingerprint.ComputePlan(Files, Result);
 
     /// <summary>Every added path whose file is missing from <paramref name="modDirectory"/>.</summary>
     public IReadOnlyList<string> Verify(string modDirectory)
@@ -118,7 +103,7 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
     public TextureFanOutPlan Plan(string modDirectory, TextureFanOutRequest request)
     {
         if (request.Mode == ConversionOutputMode.InPlace)
-            throw new ArgumentException("A fan-out keeps its source; it adds to this mod or to a new one.", nameof(request));
+            throw new ArgumentException(OutputModeRules.FanOutInPlace, nameof(request));
         // A new mod is a copy of the whole of this one, so either way the plan edits all of it.
         return new Session(this, new ModPlanContext(modDirectory, ConversionOutputMode.AddToMod), request).Run();
     }
@@ -139,7 +124,12 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
         private readonly GearConversionPlanner.LocalAllocator _locals;
         private readonly Dictionary<CustomizationPathEndpoint, HashSet<string>> _targetKeys = new();
         private readonly Dictionary<(string Local, CustomizationPathEndpoint Target), string?> _materials = new();
-        private readonly HashSet<string> _groupNames;
+
+        /// <summary>Every game path the mod already redirects, with the first place that does.</summary>
+        private readonly Dictionary<string, string> _redirected = new(StringComparer.Ordinal);
+
+        /// <summary>Target paths left alone because the mod has them already, by where and for which race.</summary>
+        private readonly Dictionary<(string Scope, ushort Race), HashSet<string>> _kept = new();
         private int _priority;
 
         public Session(TextureFanOutPlanner owner, ModPlanContext context, TextureFanOutRequest request)
@@ -152,8 +142,10 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
             _plan = new TextureFanOutPlan(request, context.Result);
             _locals = context.Locals;
             _plan.InputFiles.UnionWith(context.InputFiles);
-            _groupNames = Result.Groups.Select(g => g.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            _priority = Result.Groups.Select(g => Json.GetInt(g.Node["Priority"], 0)).DefaultIfEmpty(0).Max();
+            _priority = ModGroupBuilder.TopPriority(Result);
+            foreach (var container in _mod.Containers)
+            foreach (var key in container.FileEntries().Select(e => e.Key).Concat(container.SwapEntries().Select(e => e.Key)))
+                _redirected.TryAdd(GamePath.Normalize(key), container.Label);
         }
 
         private PenumbraMod Result => _plan.Result;
@@ -181,6 +173,9 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
             if (_request.Layout == TextureFanOutLayout.AddPathsToOptions) AddPaths(entries, targets);
             else AddGroups(entries, targets);
 
+            foreach (var ((scope, race), keys) in _kept)
+                Warn("path_exists", $"{scope} already redirects {keys.Count} of {RaceNames.Name(race)}'s paths; " +
+                                    "those are left as they are.");
             if (!_plan.HasBlockers && _plan.Outputs.Count == 0)
                 Block("empty_plan", "Every target already has these paths; there is nothing to add.");
             return _plan;
@@ -227,7 +222,6 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
 
         private void AddPaths(List<Entry> entries, List<CustomizationPathEndpoint> targets)
         {
-            var skipped = new Dictionary<(string Scope, ushort Race), int>();
             foreach (var entry in entries)
             {
                 var container = Result.GetContainer(entry.Container.Address);
@@ -236,18 +230,25 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                 {
                     var key = CustomizationPaths.Rewrite(entry.Key, _source, target);
                     if (string.Equals(key, entry.Key, StringComparison.Ordinal)) continue;
-                    if (FindKey(dictionary, key) != null)
-                    {
-                        skipped[(container.Label, target.GenderRace)] = skipped.GetValueOrDefault((container.Label, target.GenderRace)) + 1;
-                        continue;
-                    }
+                    if (Kept(key, target) || Holds(dictionary, key)) continue;
                     Add(dictionary, entry, target, key, container.Label, "Game path");
                 }
             }
+        }
 
-            foreach (var ((scope, race), count) in skipped)
-                Warn("path_exists", $"{scope} already redirects {count} of {RaceNames.Name(race)}'s paths; " +
-                                    "those are left as they are.");
+        /// <summary>
+        /// Whether the mod already has <paramref name="key"/> of its own, anywhere. The target then
+        /// keeps it: the added path would win over it wherever it lands (an option over Default, a
+        /// new group over the groups before it) and silently replace the mod's own file.
+        /// </summary>
+        private bool Kept(string key, CustomizationPathEndpoint target)
+        {
+            var normalized = GamePath.Normalize(key);
+            if (!_redirected.TryGetValue(normalized, out var where)) return false;
+            if (!_kept.TryGetValue((where, target.GenderRace), out var keys))
+                _kept[(where, target.GenderRace)] = keys = new HashSet<string>(StringComparer.Ordinal);
+            keys.Add(normalized);
+            return true;
         }
 
         // ── Create new groups for new paths ──────────────────────────────────
@@ -255,9 +256,12 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
         private void AddGroups(List<Entry> entries, List<CustomizationPathEndpoint> targets)
         {
             var defaults = entries.Where(e => e.Container.Group == null).ToList();
+            // Copied in order of the originals' priority, so each race's copies outrank one another
+            // the way the originals do (a tattoo group over a skin tone group, say).
             var groups = entries.Where(e => e.Container.Group != null)
                 .GroupBy(e => e.Container.Group!.Index)
-                .OrderBy(g => g.Key)
+                .OrderBy(g => Json.GetInt(_mod.Groups[g.Key].Node["Priority"], 0))
+                .ThenBy(g => g.Key)
                 .Select(g => (Group: _mod.Groups[g.Key], Entries: g.ToList()))
                 .ToList();
 
@@ -289,14 +293,16 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                 return;
             }
 
-            var name = UniqueName(raceName);
+            var name = ModGroupBuilder.UniqueName(Result, raceName);
             var options = new JsonArray();
             foreach (var target in targets)
             {
                 var label = _owner.OptionLabel(target);
                 var (files, swaps) = Fill(entries, [target], $"{name} / {label}");
-                options.Add(Option(label, string.Empty, files, swaps, null));
+                // An ID the mod already has all of these paths for needs no option.
+                if (files.Count > 0 || swaps.Count > 0) options.Add(ModGroupBuilder.Option(label, string.Empty, files, swaps));
             }
+            if (options.Count == 0) return;
 
             var kind = CustomizationKinds.Get(targets[0].Kind).DisplayName.ToLowerInvariant();
             AddGroup(name, $"The {kind} paths for {raceName}. Created by Universal Mod Converter.",
@@ -313,10 +319,10 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
         {
             var raceName = RaceNames.Name(race);
             var isMulti = source.Type.Equals("Multi", StringComparison.OrdinalIgnoreCase);
-            var name = UniqueName($"{source.Name} · {raceName}");
+            var name = ModGroupBuilder.UniqueName(Result, $"{source.Name} · {raceName}");
             var options = new JsonArray();
             if (!isMulti)
-                options.Add(Option(ModGroup.OffOptionName, string.Empty, new JsonObject(), new JsonObject(), null));
+                options.Add(ModGroupBuilder.Option(ModGroup.OffOptionName, string.Empty, new JsonObject()));
 
             var positions = new Dictionary<int, int>();
             foreach (var option in entries.GroupBy(e => e.Container.Address.Index).OrderBy(g => g.Key))
@@ -324,9 +330,11 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                 var node = source.Containers[option.Key].Node;
                 var label = Json.GetString(node["Name"]) is { Length: > 0 } text ? text : $"#{option.Key + 1}";
                 var (files, swaps) = Fill(option.ToList(), targets, $"{name} / {label}");
+                if (files.Count == 0 && swaps.Count == 0) continue;
                 positions[option.Key] = options.Count;
-                options.Add(Option(label, Json.GetString(node["Description"]) ?? string.Empty, files, swaps, node["Priority"]));
+                options.Add(ModGroupBuilder.Option(label, Json.GetString(node["Description"]) ?? string.Empty, files, swaps, node["Priority"]));
             }
+            if (positions.Count == 0) return;
 
             if (isMulti && options.Count > MaxMultiOptions)
             {
@@ -360,60 +368,39 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
             {
                 var key = CustomizationPaths.Rewrite(entry.Key, _source, target);
                 var dictionary = entry.IsSwap ? swaps : files;
-                if (string.Equals(key, entry.Key, StringComparison.Ordinal) || FindKey(dictionary, key) != null) continue;
+                if (string.Equals(key, entry.Key, StringComparison.Ordinal) || Kept(key, target) || Holds(dictionary, key))
+                    continue;
                 Add(dictionary, entry, target, key, scope, "Option");
             }
             return (files, swaps);
         }
 
-        private static JsonObject Option(string name, string description, JsonObject files, JsonObject swaps, JsonNode? priority)
-        {
-            var option = new JsonObject
-            {
-                ["Id"] = Guid.NewGuid().ToString(),
-                ["Name"] = name,
-                ["Description"] = description,
-            };
-            if (priority != null) option["Priority"] = priority.DeepClone();
-            option["Files"] = files;
-            option["FileSwaps"] = swaps;
-            option["Manipulations"] = new JsonArray();
-            return option;
-        }
-
         private void AddGroup(string name, string description, string type, JsonNode defaults, JsonArray options)
-        {
-            var group = new JsonObject
-            {
-                ["Id"] = Guid.NewGuid().ToString(),
-                ["Name"] = name,
-                ["Description"] = description,
-                ["Priority"] = ++_priority,
-                ["Type"] = type,
-                ["DefaultSettings"] = defaults,
-                ["Options"] = options,
-            };
-            Result.Groups.Add(new ModGroup(group, Result.Groups.Count));
-            _plan.Changes.Add(new GearPlanChange("Group", name, $"new {type.ToLowerInvariant()}-select group",
-                $"{options.Count} option(s): " +
-                string.Join(", ", options.OfType<JsonObject>().Select(o => Json.GetString(o["Name"])))));
-        }
-
-        /// <summary>Penumbra identifies a group by name in its UI, so a new one needs its own.</summary>
-        private string UniqueName(string name)
-        {
-            var candidate = name;
-            for (var i = 2; !_groupNames.Add(candidate); i++) candidate = $"{name} ({i})";
-            return candidate;
-        }
+            => _plan.Changes.Add(ModGroupBuilder.Add(Result, name, description, ++_priority, type, defaults, options));
 
         // ── Shared ───────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// The keys of each Files or FileSwaps object written to, normalized, so asking whether one
+        /// holds a path is not a walk over all of it for every entry and target.
+        /// </summary>
+        private readonly Dictionary<JsonObject, HashSet<string>> _held = new(ReferenceEqualityComparer.Instance);
+
+        private HashSet<string> Held(JsonObject dictionary)
+        {
+            if (!_held.TryGetValue(dictionary, out var keys))
+                _held[dictionary] = keys = dictionary.Select(p => GamePath.Normalize(p.Key)).ToHashSet(StringComparer.Ordinal);
+            return keys;
+        }
+
+        private bool Holds(JsonObject dictionary, string key) => Held(dictionary).Contains(GamePath.Normalize(key));
 
         private void Add(JsonObject dictionary, Entry entry, CustomizationPathEndpoint target, string key,
             string scope, string category)
         {
             var value = entry.IsSwap ? entry.Value : MaterialFor(entry, target) ?? entry.Value;
             dictionary[key] = value;
+            Held(dictionary).Add(GamePath.Normalize(key));
             _plan.Outputs.Add(new TextureFanOutOutput(scope, GamePath.Normalize(key), entry.IsSwap ? null : value));
             _plan.Changes.Add(new GearPlanChange(category, scope, GamePath.Normalize(entry.Key), GamePath.Normalize(key)));
         }
@@ -472,14 +459,8 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
             return result;
         }
 
-        private static string? FindKey(JsonObject dictionary, string gamePath)
-        {
-            var normalized = GamePath.Normalize(gamePath);
-            return dictionary.Select(p => p.Key).FirstOrDefault(k => GamePath.Normalize(k) == normalized);
-        }
+        private void Block(string code, string message) => _plan.Report(code, message, true);
 
-        private void Block(string code, string message) => _plan.Diagnostics.Add(new PlanDiagnostic(code, message, true));
-
-        private void Warn(string code, string message) => _plan.Diagnostics.Add(new PlanDiagnostic(code, message, false));
+        private void Warn(string code, string message) => _plan.Report(code, message, false);
     }
 }

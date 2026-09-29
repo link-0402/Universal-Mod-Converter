@@ -12,6 +12,7 @@ public static class ModFingerprint
         var candidates = files ?? Directory.EnumerateFiles(canonicalRoot, "*", SearchOption.AllDirectories);
 
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[128 * 1024];
         foreach (var file in candidates.Select(Path.GetFullPath)
                      .Distinct(StringComparer.OrdinalIgnoreCase)
                      .OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
@@ -21,7 +22,6 @@ public static class ModFingerprint
             hash.AppendData(Encoding.UTF8.GetBytes(relative));
             hash.AppendData([0]);
             using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var buffer = new byte[128 * 1024];
             int read;
             while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
                 hash.AppendData(buffer.AsSpan(0, read));

@@ -30,6 +30,29 @@ public enum ConversionOutputMode
 }
 
 /// <summary>
+/// The output modes a conversion cannot be written with, and why. The window offers a mode only
+/// when these allow it and the planners refuse it when they do not, both from here, so what is
+/// offered and what is refused cannot drift apart.
+/// </summary>
+public static class OutputModeRules
+{
+    /// <summary>
+    /// Hair, face, tail, ear and skin conversions that move their root patch the mod's files, so
+    /// the original does not survive them: they cannot be added beside it.
+    /// </summary>
+    public static string ReplacesOriginal(AssetKind kind)
+        => $"{CustomizationKinds.Get(kind).DisplayName} conversions replace the original; create a new mod to keep it.";
+
+    /// <summary>A new option group goes beside what the mod already has; there is nothing to convert in place.</summary>
+    public static string GroupInPlace(string? groupName)
+        => $"{(string.IsNullOrWhiteSpace(groupName) ? "The option group" : $"'{groupName.Trim()}'")} is added beside what the " +
+           "mod already has, so there is nothing to convert in place. Add it to this mod or create a new mod.";
+
+    /// <summary>A texture fan-out keeps its source and only adds paths.</summary>
+    public const string FanOutInPlace = "A fan-out keeps its source; it adds to this mod or to a new one.";
+}
+
+/// <summary>
 /// The questions the planners actually ask about an output mode. Comparing against a single
 /// member is how a third mode silently takes the wrong branch, so ask these instead.
 /// </summary>

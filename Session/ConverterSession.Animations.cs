@@ -25,14 +25,27 @@ public sealed partial class ConverterSession
     public string AnimationGroupName { get; private set; } = string.Empty;
 
     /// <summary>
-    /// Idle swap into a group, when several options hold their own version of the idle: the one
-    /// whose version the group uses, or null until the user chooses.
+    /// Idle swap into a group, or an expression added to this mod (which goes into a group too),
+    /// when several options hold their own version of the animation: the one whose version the
+    /// group uses, or null until the user chooses.
     /// </summary>
     public ContainerAddress? AnimationSourceContainer { get; private set; }
 
     /// <summary>Whether the user has to choose <see cref="AnimationSourceContainer"/> for the selection.</summary>
     public bool NeedsAnimationSourceContainer
-        => AnimationAsGroup && Source?.Animation is { Kind: AnimationSourceKind.Idle, HasVariants: true };
+        => Source?.Animation is { HasVariants: true } animation &&
+           (AnimationOperation == AnimationOperation.Swap && AnimationAsGroup && animation.Kind == AnimationSourceKind.Idle ||
+            AnimationOperation == AnimationOperation.Expression && EffectiveOutputMode == ConversionOutputMode.AddToMod);
+
+    /// <summary>
+    /// Whether the plan adds an expression on its own to this mod. That goes into an option group
+    /// beside the original (see <see cref="AnimationConversionPlanner.ExpressionGroupName"/>).
+    /// </summary>
+    public bool AddsExpressionGroup
+        => EffectiveOutputMode == ConversionOutputMode.AddToMod &&
+           (_queue.Count > 0
+               ? RunEntries.Any(e => e.Task.AnimationRequest?.Operation == AnimationOperation.Expression)
+               : Source?.Animation != null && AnimationOperation == AnimationOperation.Expression);
 
     /// <summary>In place, plain replacement: keep the source slot as well.</summary>
     public bool AnimationKeepOriginal { get; private set; }
@@ -78,7 +91,7 @@ public sealed partial class ConverterSession
     /// </summary>
     public string? AnimationGroupOutput
         => _queue.Count > 0
-            ? _queue.Select(e => e.Task.AnimationRequest?.GroupName).FirstOrDefault(name => name != null)
+            ? RunEntries.Select(e => e.Task.AnimationRequest?.GroupName).FirstOrDefault(name => name != null)
             : Source?.Animation is { Kind: AnimationSourceKind.Idle } &&
               AnimationOperation == AnimationOperation.Swap && AnimationAsGroup
                 ? AnimationGroupName.Trim()
@@ -193,7 +206,10 @@ public sealed partial class ConverterSession
 
     private string? OperationBlockReason(AnimationSource source)
     {
-        if (AnimationOperation == AnimationOperation.Expression) return null;
+        if (AnimationOperation == AnimationOperation.Expression)
+            return NeedsAnimationSourceContainer && source.Providers.All(p => p.Address != AnimationSourceContainer)
+                ? "Several options have their own version of this animation; choose the one the expression's option group uses."
+                : null;
         if (AnimationOperation == AnimationOperation.Retarget)
         {
             if (!source.Races.Contains(AnimationSourceRace)) return "Choose the race to retarget from.";
@@ -232,7 +248,8 @@ public sealed partial class ConverterSession
         {
             Expression = source.Kind == AnimationSourceKind.Expression ? null : CurrentExpression(source),
         };
-        if (AnimationOperation == AnimationOperation.Expression) return request;
+        if (AnimationOperation == AnimationOperation.Expression)
+            return NeedsAnimationSourceContainer ? request with { SourceContainer = AnimationSourceContainer } : request;
         if (AnimationOperation == AnimationOperation.Retarget)
             return request with { SourceRace = AnimationSourceRace, TargetRaces = [.. _animationTargetRaces] };
 
@@ -329,10 +346,20 @@ public sealed partial class ConverterSession
             ? $" from '{chosen.Label}'"
             : string.Empty;
 
+    /// <summary>
+    /// How an expression's description names the version its option group uses. It goes last, so
+    /// a version chosen later on the plan row reads the same as one chosen on the card.
+    /// </summary>
+    private static string VersionSuffix(string label) => $" (the version in '{label}')";
+
     private string DescribeOperation(AnimationSource source)
     {
         if (AnimationOperation == AnimationOperation.Expression)
-            return $"{source.Label} + {ExpressionLabel}";
+            return $"{source.Label} + {ExpressionLabel}" +
+                   (NeedsAnimationSourceContainer &&
+                    source.Providers.FirstOrDefault(p => p.Address == AnimationSourceContainer) is { } chosen
+                       ? VersionSuffix(chosen.Label)
+                       : string.Empty);
         if (AnimationOperation == AnimationOperation.Retarget)
             return $"{source.Label}: {RaceLabel(AnimationSourceRace)} → " +
                    string.Join(", ", _animationTargetRaces.Select(RaceLabel));
@@ -343,7 +370,8 @@ public sealed partial class ConverterSession
         if (AnimationAsGroup)
             return $"{source.Label}{ChosenProviderSuffix(source)} → option group '{AnimationGroupName.Trim()}' " +
                    $"({_animationGroupSlots.Count} slots)";
-        return $"{source.Label} → {IdleSlots.SlotLabel(source.Family ?? string.Empty, AnimationTargetSlot)}";
+        return $"{source.Label} → {IdleSlots.SlotLabel(source.Family ?? string.Empty, AnimationTargetSlot)}" +
+               (AnimationKeepOriginal && EffectiveOutputMode == ConversionOutputMode.InPlace ? " (kept in its slot too)" : string.Empty);
     }
 
     /// <summary>Short label for the default new mod name.</summary>

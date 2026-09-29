@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using UniversalModConverter.Core;
+using UniversalModConverter.Services;
 
 namespace UniversalModConverter.Models;
 
@@ -11,6 +13,10 @@ namespace UniversalModConverter.Models;
 /// </summary>
 public sealed class QueuedConversion
 {
+    public QueuedConversion() { }
+
+    private QueuedConversion(Guid id) => Id = id;
+
     public Guid Id { get; } = Guid.NewGuid();
 
     public AssetKind Kind { get; init; } = AssetKind.Gear;
@@ -20,10 +26,21 @@ public sealed class QueuedConversion
     /// materials), whose paths are simply added for further races. Such a plan has output
     /// choices of its own (see <see cref="TextureFanOutLayout"/>).
     /// </summary>
-    public bool CanFanOut { get; init; }
+    public bool CanFanOut => Task.TextureRequest != null;
 
-    /// <summary>What the queue row says: "Body e0164 → e0200".</summary>
-    public string Description { get; init; } = string.Empty;
+    /// <summary>
+    /// What the queue row says: "Body e0164 → e0200". Grows a " (the version in …)" when the
+    /// version of an expression's animation is chosen on the row (see <see cref="SourceChoices"/>).
+    /// </summary>
+    public string Description { get; set; } = string.Empty;
+
+    /// <summary>
+    /// "Only add an expression" on an animation several options of the mod have their own version
+    /// of: those versions. Added to this mod, the expression goes into an option group, which can
+    /// hold only one of them; when none was chosen before the entry was added (it was then going
+    /// into a new mod or converted in place), the plan row offers these.
+    /// </summary>
+    public ImmutableArray<AnimationProvider> SourceChoices { get; init; } = [];
 
     /// <summary>The icon and name of what is being converted, for the summary.</summary>
     public ConversionSide Source { get; init; } = new();
@@ -53,6 +70,31 @@ public sealed class QueuedConversion
         Plan = null;
         Rejected = false;
     }
+
+    /// <summary>
+    /// A copy for one preview to plan: the same choices and <see cref="Id"/>, with a task of its
+    /// own. Planning fills in the copy off the framework thread, so it never changes the entry the
+    /// queue panel is drawing.
+    /// </summary>
+    public QueuedConversion ForPlanning() => new(Id)
+    {
+        Kind          = Kind,
+        Description   = Description,
+        SourceChoices = SourceChoices,
+        Source        = Source,
+        Target        = Target,
+        Enabled       = Enabled,
+        Task          = Task.CloneInputs(),
+    };
+
+    /// <summary>Takes over what a preview found for this entry's copy. Framework thread only.</summary>
+    public void TakeResults(QueuedConversion planned)
+    {
+        ResetPlan();
+        Diagnostics.AddRange(planned.Diagnostics);
+        Plan = planned.Plan;
+        Rejected = planned.Rejected;
+    }
 }
 
 /// <summary>One end of a queued conversion, as the summary shows it.</summary>
@@ -60,6 +102,9 @@ public sealed class ConversionSide
 {
     /// <summary>Game icon ID, or 0 when the kind has no icon and a glyph stands in for it.</summary>
     public uint Icon { get; init; }
+
+    /// <summary>What this end is, which picks the glyph when there is no icon.</summary>
+    public AssetKind Kind { get; init; } = AssetKind.Gear;
 
     public string Name { get; init; } = string.Empty;
 
