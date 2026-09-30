@@ -75,6 +75,9 @@ public sealed class GameItem
     public uint      RowId        { get; init; }
     public string    Name         { get; init; } = string.Empty;
 
+    /// <summary>The name Penumbra lists the item by among a collection's changed items.</summary>
+    public string    ChangedItemName { get; init; } = string.Empty;
+
     /// <summary>Four-digit zero-padded model ID (lower 16 bits of ModelMain).</summary>
     public ushort    ModelId      { get; init; }
 
@@ -640,6 +643,13 @@ public sealed class GameDataService : IGameFileProvider
         }
     }
 
+    /// <summary>
+    /// An item's name as Penumbra lists it among a collection's changed items: its text without
+    /// soft hyphens and non-breaking spaces.
+    /// </summary>
+    private static string ChangedItemName(Lumina.Text.ReadOnly.ReadOnlySeString name)
+        => name.ExtractText().Replace("­", string.Empty).Replace(" ", string.Empty);
+
     private List<GameItem> BuildItemCache()
     {
 
@@ -671,6 +681,7 @@ public sealed class GameDataService : IGameFileProvider
                 {
                     RowId       = row.RowId,
                     Name        = name,
+                    ChangedItemName = ChangedItemName(row.Name),
                     ModelId     = primaryId,
                     Variant     = variant,
                     Slot        = slot,
@@ -690,6 +701,7 @@ public sealed class GameDataService : IGameFileProvider
                     {
                         RowId       = row.RowId,
                         Name        = name,
+                        ChangedItemName = ChangedItemName(row.Name),
                         ModelId     = (ushort)(row.Model & 0xFFFF),
                         Variant     = (ushort)((row.Model >> 16) & 0xFFFF),
                         Slot        = EquipSlot.Facewear,

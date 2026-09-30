@@ -30,6 +30,19 @@ public sealed class PenumbraIpcService : IDisposable
     private readonly ICallGateSubscriber<string, Dictionary<string, string>, string, int, int>            _addTemporaryModAll;
     private readonly ICallGateSubscriber<string, int, int>                                                _removeTemporaryModAll;
     private readonly ICallGateSubscriber<int, int, object>                                                _redrawObject;
+    private readonly ICallGateSubscriber<byte, (Guid Id, string Name)?>                                   _getCollection;
+    private readonly ICallGateSubscriber<Guid, Dictionary<string, object?>>                               _getChangedItemsForCollection;
+    private readonly ICallGateSubscriber<Func<string, (string, string)[]>>                                _checkCurrentChangedItemFunc;
+    private readonly ICallGateSubscriber<Guid, string[], string[], (int, string[], string[][])>           _resolvePaths;
+
+    /// <summary>Penumbra's ApiCollectionType.Current: the collection its own window edits.</summary>
+    private const byte CurrentCollectionType = 226;
+
+    /// <summary>
+    /// Lists the mods changing a changed item in the current collection. Penumbra hands out the
+    /// function once; it throws <see cref="ObjectDisposedException"/> after Penumbra reloads.
+    /// </summary>
+    private Func<string, (string, string)[]>? _currentChangedItemMods;
 
     // ── Events ────────────────────────────────────────────────────────────────
     /// <summary>Raised when Penumbra signals it has fully initialised.</summary>
@@ -37,8 +50,18 @@ public sealed class PenumbraIpcService : IDisposable
     /// <summary>Raised when Penumbra is disposing.</summary>
     public event Action? PenumbraDisposed;
 
+    /// <summary>
+    /// Raised when what a collection changes may have changed: a mod setting changed in any
+    /// collection, or a mod was added, deleted or renamed. May be raised off the framework thread.
+    /// </summary>
+    public event Action? ModsChanged;
+
     private ICallGateSubscriber<object>? _initializedSub;
     private ICallGateSubscriber<object>? _disposedSub;
+    private ICallGateSubscriber<int, Guid, string, bool, object>? _modSettingChangedSub;
+    private ICallGateSubscriber<string, object>? _modAddedSub;
+    private ICallGateSubscriber<string, object>? _modDeletedSub;
+    private ICallGateSubscriber<string, string, object>? _modMovedSub;
 
     public PenumbraIpcService(IDalamudPluginInterface pi, IPluginLog log)
     {
@@ -57,6 +80,10 @@ public sealed class PenumbraIpcService : IDisposable
         _addTemporaryModAll     = pi.GetIpcSubscriber<string, Dictionary<string, string>, string, int, int>("Penumbra.AddTemporaryModAll.V5");
         _removeTemporaryModAll  = pi.GetIpcSubscriber<string, int, int>("Penumbra.RemoveTemporaryModAll.V5");
         _redrawObject           = pi.GetIpcSubscriber<int, int, object>("Penumbra.RedrawObject.V5");
+        _getCollection          = pi.GetIpcSubscriber<byte, (Guid, string)?>("Penumbra.GetCollection");
+        _getChangedItemsForCollection = pi.GetIpcSubscriber<Guid, Dictionary<string, object?>>("Penumbra.GetChangedItemsForCollection");
+        _checkCurrentChangedItemFunc  = pi.GetIpcSubscriber<Func<string, (string, string)[]>>("Penumbra.CheckCurrentChangedItemFunc");
+        _resolvePaths           = pi.GetIpcSubscriber<Guid, string[], string[], (int, string[], string[][])>("Penumbra.ResolvePaths");
 
         // Subscribe to lifecycle events
         try
@@ -72,17 +99,47 @@ public sealed class PenumbraIpcService : IDisposable
             _disposedSub.Subscribe(OnPenumbraDisposed);
         }
         catch (Exception ex) { _log.Debug(ex, "[UMC] Could not subscribe to Penumbra.Disposed"); }
+
+        try
+        {
+            _modSettingChangedSub = pi.GetIpcSubscriber<int, Guid, string, bool, object>("Penumbra.ModSettingChanged.V5");
+            _modSettingChangedSub.Subscribe(OnModSettingChanged);
+            _modAddedSub = pi.GetIpcSubscriber<string, object>("Penumbra.ModAdded");
+            _modAddedSub.Subscribe(OnModAddedOrDeleted);
+            _modDeletedSub = pi.GetIpcSubscriber<string, object>("Penumbra.ModDeleted");
+            _modDeletedSub.Subscribe(OnModAddedOrDeleted);
+            _modMovedSub = pi.GetIpcSubscriber<string, string, object>("Penumbra.ModMoved");
+            _modMovedSub.Subscribe(OnModMoved);
+        }
+        catch (Exception ex) { _log.Debug(ex, "[UMC] Could not subscribe to Penumbra's mod change events"); }
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    private void OnPenumbraInitialized() => PenumbraInitialized?.Invoke();
-    private void OnPenumbraDisposed()    => PenumbraDisposed?.Invoke();
+    private void OnPenumbraInitialized()
+    {
+        _currentChangedItemMods = null;
+        PenumbraInitialized?.Invoke();
+    }
+
+    private void OnPenumbraDisposed()
+    {
+        _currentChangedItemMods = null;
+        PenumbraDisposed?.Invoke();
+    }
+
+    private void OnModSettingChanged(int change, Guid collection, string modDirectory, bool inherited) => ModsChanged?.Invoke();
+    private void OnModAddedOrDeleted(string modDirectory) => ModsChanged?.Invoke();
+    private void OnModMoved(string oldDirectory, string newDirectory) => ModsChanged?.Invoke();
 
     public void Dispose()
     {
         try { _initializedSub?.Unsubscribe(OnPenumbraInitialized); } catch { /* ignore */ }
         try { _disposedSub?.Unsubscribe(OnPenumbraDisposed); }       catch { /* ignore */ }
+        try { _modSettingChangedSub?.Unsubscribe(OnModSettingChanged); } catch { /* ignore */ }
+        try { _modAddedSub?.Unsubscribe(OnModAddedOrDeleted); }          catch { /* ignore */ }
+        try { _modDeletedSub?.Unsubscribe(OnModAddedOrDeleted); }        catch { /* ignore */ }
+        try { _modMovedSub?.Unsubscribe(OnModMoved); }                   catch { /* ignore */ }
     }
 
     // ── Availability check ────────────────────────────────────────────────────
@@ -237,6 +294,62 @@ public sealed class PenumbraIpcService : IDisposable
             _log.Debug(ex, "[UMC] GetCollectionForObject failed for index {0}", gameObjectIndex);
             return null;
         }
+    }
+
+    /// <summary>The collection Penumbra's own window currently edits, or null.</summary>
+    public (Guid Id, string Name)? GetCurrentCollection()
+    {
+        try   { return _getCollection.InvokeFunc(CurrentCollectionType); }
+        catch (Exception ex) { _log.Debug(ex, "[UMC] GetCollection failed"); return null; }
+    }
+
+    /// <summary>
+    /// The names of everything the mods enabled in a collection change, as Penumbra lists them:
+    /// item names, <c>Customization: …</c>, <c>Emote: …</c> and so on. Only the mod that wins a
+    /// file counts. Empty for a collection nothing uses; null on failure.
+    /// </summary>
+    public IReadOnlyCollection<string>? GetChangedItems(Guid collection)
+    {
+        try   { return _getChangedItemsForCollection.InvokeFunc(collection).Keys; }
+        catch (Exception ex) { _log.Debug(ex, "[UMC] GetChangedItemsForCollection failed"); return null; }
+    }
+
+    /// <summary>
+    /// The names of the mods that change <paramref name="changedItem"/> (a name from
+    /// <see cref="GetChangedItems"/>) in the collection Penumbra's window edits. Empty when none
+    /// does; null on failure.
+    /// </summary>
+    public string[]? GetCurrentChangedItemMods(string changedItem)
+    {
+        // A function kept from before Penumbra reloaded throws; the second attempt asks for a new one.
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try
+            {
+                _currentChangedItemMods ??= _checkCurrentChangedItemFunc.InvokeFunc();
+                return _currentChangedItemMods(changedItem).Select(m => m.Item2).ToArray();
+            }
+            catch (ObjectDisposedException) { _currentChangedItemMods = null; }
+            catch (Exception ex) { _log.Debug(ex, "[UMC] CheckCurrentChangedItemFunc failed"); return null; }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// What each game path loads in <paramref name="collection"/>, in the same order: a file on
+    /// disk, another game path for a file swap, or the path itself when no mod changes it.
+    /// Null on failure.
+    /// </summary>
+    public string[]? ResolvePaths(Guid collection, string[] gamePaths)
+    {
+        try
+        {
+            var (ret, resolved, _) = _resolvePaths.InvokeFunc(collection, gamePaths, []);
+            if ((PenumbraApiEc)ret == PenumbraApiEc.Success) return resolved;
+            _log.Debug($"[UMC] ResolvePaths returned {(PenumbraApiEc)ret}");
+            return null;
+        }
+        catch (Exception ex) { _log.Debug(ex, "[UMC] ResolvePaths failed"); return null; }
     }
 }
 

@@ -119,7 +119,8 @@ public sealed partial class ConverterSession
             ? $"{IdleSlots.GetFamily(family)?.Label ?? "Idle"} slot"
             : "Animation slot";
         if (source.Family != null)
-            foreach (var slot in GameData.Animations.IdleSlots(source.Family)) _animationGroupSlots.Add(slot.Index);
+            foreach (var slot in GameData.Animations.IdleSlots(source.Family))
+                if (CanSwapToIdleSlot(source, slot)) _animationGroupSlots.Add(slot.Index);
     }
 
     public void SetAnimationOperation(AnimationOperation operation)
@@ -139,13 +140,14 @@ public sealed partial class ConverterSession
 
     public void SetAnimationTargetSlot(int index)
     {
-        if (index == AnimationTargetSlot) return;
+        if (index == AnimationTargetSlot || index >= 0 && !CanSwapToIdleSlot(index)) return;
         AnimationTargetSlot = index;
         MarkDirty();
     }
 
     public void SetAnimationGroupSlot(int index, bool included)
     {
+        if (included && !CanSwapToIdleSlot(index)) return;
         if (included ? !_animationGroupSlots.Add(index) : !_animationGroupSlots.Remove(index)) return;
         MarkDirty();
     }
@@ -153,7 +155,7 @@ public sealed partial class ConverterSession
     public void SetAnimationGroupSlots(IEnumerable<int> slots)
     {
         _animationGroupSlots.Clear();
-        _animationGroupSlots.UnionWith(slots);
+        _animationGroupSlots.UnionWith(slots.Where(CanSwapToIdleSlot));
         MarkDirty();
     }
 
@@ -181,8 +183,45 @@ public sealed partial class ConverterSession
     public void SetAnimationTargetEmote(uint id)
     {
         if (id == AnimationTargetEmote) return;
+        // Shared with expression swaps, which place the face either way.
+        if (Source?.Animation is { Kind: AnimationSourceKind.Emote } source && GameData.Animations.EmotesReady &&
+            GameData.Animations.FindEmote(id) is { } emote && !CanSwapToEmote(source, emote)) return;
         AnimationTargetEmote = id;
         MarkDirty();
+    }
+
+    private AnimationSource? _swapTargetsFor;
+    private readonly Dictionary<object, bool> _swapTargets = new();
+
+    /// <summary>
+    /// Whether a swap to the emote writes anything: the game has an animation of its own at one of
+    /// the destinations for one of the source's races at least. Every other race plays the file of
+    /// a race it inherits from, and the game never asks for one of its own, so nothing is written
+    /// for it.
+    /// </summary>
+    public bool CanSwapToEmote(AnimationSource source, EmoteInfo emote)
+        => GameHasForSourceRaces(source, emote, () => EmoteVariant(source, emote).Locations.Values);
+
+    /// <summary>Whether a swap into the idle slot writes anything; see <see cref="CanSwapToEmote"/>.</summary>
+    public bool CanSwapToIdleSlot(AnimationSource source, IdleSlot slot)
+        => GameHasForSourceRaces(source, slot, () => SlotVariant(source, slot).Locations.Values);
+
+    /// <summary><see cref="CanSwapToIdleSlot(AnimationSource, IdleSlot)"/> for a slot of the selected idle's family, by index.</summary>
+    private bool CanSwapToIdleSlot(int index)
+        => Source?.Animation is { } source && AnimationSlots.FirstOrDefault(s => s.Index == index) is { } slot &&
+           CanSwapToIdleSlot(source, slot);
+
+    private bool GameHasForSourceRaces(AnimationSource source, object target, Func<IEnumerable<string>> destinations)
+    {
+        if (!ReferenceEquals(source, _swapTargetsFor))
+        {
+            _swapTargetsFor = source;
+            _swapTargets.Clear();
+        }
+        if (_swapTargets.TryGetValue(target, out var known)) return known;
+        var locations = destinations().Distinct(StringComparer.Ordinal).ToList();
+        return _swapTargets[target] = source.Races.Any(race =>
+            locations.Any(location => GameData.Animations.FileExists(PapGamePath(race, location))));
     }
 
     public void SetAnimationSourceRace(ushort race)
@@ -193,9 +232,31 @@ public sealed partial class ConverterSession
         MarkDirty();
     }
 
+    private AnimationSource? _retargetRacesFor;
+    private IReadOnlyList<ushort> _retargetRaces = [];
+
+    /// <summary>
+    /// The races a retarget can give the source's animation: those the game has a file of their
+    /// own for, at one of its locations at least. Every other race plays the file of a race it
+    /// inherits from, and the game never asks for one of its own, so a file written for it would
+    /// never load.
+    /// </summary>
+    public IReadOnlyList<ushort> RetargetRaces(AnimationSource source)
+    {
+        if (!ReferenceEquals(source, _retargetRacesFor))
+        {
+            _retargetRacesFor = source;
+            _retargetRaces = GenderRaces.Playable
+                .Where(race => source.Locations.Any(location => GameData.Animations.FileExists(PapGamePath(race, location))))
+                .ToList();
+        }
+        return _retargetRaces;
+    }
+
     public void SetAnimationTargetRace(ushort race, bool included)
     {
         if (race == AnimationSourceRace && included) return;
+        if (included && (Source?.Animation is not { } source || !RetargetRaces(source).Contains(race))) return;
         if (included ? !_animationTargetRaces.Add(race) : !_animationTargetRaces.Remove(race)) return;
         MarkDirty();
     }
@@ -309,11 +370,13 @@ public sealed partial class ConverterSession
         return new AnimationSwapVariant($"/{target.Name}", map.ToImmutable());
     }
 
-    /// <summary>An emote's animations pair with the destination's by their position in the emote.</summary>
     private AnimationSwapVariant EmoteVariant(AnimationSource source)
+        => EmoteVariant(source, GameData.Animations.FindEmote(AnimationTargetEmote));
+
+    /// <summary>An emote's animations pair with the destination's by their position in the emote.</summary>
+    private AnimationSwapVariant EmoteVariant(AnimationSource source, EmoteInfo? to)
     {
         var from = GameData.Animations.FindEmote(source.EmoteId);
-        var to = GameData.Animations.FindEmote(AnimationTargetEmote);
         var map   = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
         var roles = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
         if (from != null && to != null)
@@ -373,6 +436,34 @@ public sealed partial class ConverterSession
         return $"{source.Label} → {IdleSlots.SlotLabel(source.Family ?? string.Empty, AnimationTargetSlot)}" +
                (AnimationKeepOriginal && EffectiveOutputMode == ConversionOutputMode.InPlace ? " (kept in its slot too)" : string.Empty);
     }
+
+    // ── Targets other mods already change ───────────────────────────────────
+    // A swap writes the target's animations for every race the source has; a retarget writes
+    // the source's animations for the target race. Those are the paths looked up.
+
+    /// <summary>Who already changes the slot's loop or start for the source's races, or null.</summary>
+    public string? ModdedIdleSlot(AnimationSource source, IdleSlot slot)
+        => Modded.Paths(source, slot, () => source.Races.SelectMany(race => slot.Keys.Select(key => PapGamePath(race, $"a0001/bt_common/{key}"))));
+
+    /// <summary>Who already changes any of the emote's animations for the source's races, or null.</summary>
+    public string? ModdedEmote(AnimationSource source, EmoteInfo emote)
+        => Modded.Paths(source, emote, () => source.Races.SelectMany(race => emote.Timelines.Select(t => PapGamePath(race, t.Location))));
+
+    /// <summary>Who already changes the expression's face packs the source's faces would move to, or null.</summary>
+    public string? ModdedExpression(AnimationSource source, ExpressionInfo expression)
+        => expression.OwnPack
+            ? Modded.Paths(source, expression, () =>
+            {
+                var locations = FaceVariant(source, expression).Locations.Values.ToList();
+                return source.Races.SelectMany(race => locations.Select(location => PapGamePath(race, location)));
+            })
+            : null;
+
+    /// <summary>Who already changes the source's animations for <paramref name="race"/>, or null.</summary>
+    public string? ModdedRetargetRace(AnimationSource source, ushort race)
+        => Modded.Paths(source, race, () => source.Locations.Select(location => PapGamePath(race, location)));
+
+    private static string PapGamePath(ushort race, string location) => $"chara/human/c{race:D4}/animation/{location}.pap";
 
     /// <summary>Short label for the default new mod name.</summary>
     private string AnimationNameLabel(AnimationSource source)

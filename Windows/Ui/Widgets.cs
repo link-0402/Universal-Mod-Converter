@@ -70,6 +70,26 @@ internal static class Widgets
         ImGui.TextUnformatted(text);
     }
 
+    /// <summary>
+    /// <see cref="Tooltip(string?)"/> with two texts, either of which may be missing, a blank line
+    /// apart. One item can show only one tooltip.
+    /// </summary>
+    public static void Tooltip(string? first, string? second)
+        => Tooltip(first == null ? second : second == null ? first : $"{first}\n\n{second}");
+
+    /// <summary>
+    /// On the same line, a "modded" badge when another mod already changes the chosen target,
+    /// which <paramref name="note"/> (from <see cref="Session.ModdedTargets"/>) names in its tooltip.
+    /// Nothing when <paramref name="note"/> is null.
+    /// </summary>
+    public static void ModdedBadge(string? note)
+    {
+        if (note == null) return;
+        ImGui.SameLine();
+        Badge("modded", Theme.Danger);
+        Tooltip(note);
+    }
+
     /// <summary>A button that is disabled with an explanation instead of silently doing nothing.</summary>
     public static bool Button(string label, string? disabledReason, Vector2 size = default, bool primary = false, string? tooltip = null)
     {
@@ -161,6 +181,28 @@ internal static class Widgets
         bool clicked;
         using (ImRaii.PushStyle(ImGuiStyleVar.FramePadding, new Vector2(padding, 0)))
             clicked = IconTextButton(buttonIcon, buttonText, null, tooltip);
+        ImGui.SetCursorPos(after);
+        return clicked;
+    }
+
+    /// <summary>
+    /// Header text with a compact checkbox at the right end of its line, above the separator.
+    /// Returns whether it was clicked; <paramref name="value"/> then holds the new state.
+    /// </summary>
+    public static bool SectionTitle(string text, FontAwesomeIcon? icon, string toggleText, ref bool value, string? tooltip = null)
+    {
+        var start = ImGui.GetCursorPos();
+        SectionTitle(text, icon);
+        var after = ImGui.GetCursorPos();
+
+        // Without vertical frame padding the box is one text line high, like the title.
+        var label = toggleText.Split("##")[0];
+        var width = ImGui.GetTextLineHeight() + ImGui.GetStyle().ItemInnerSpacing.X + ImGui.CalcTextSize(label).X;
+        ImGui.SetCursorPos(new Vector2(ImGui.GetContentRegionMax().X - width, start.Y));
+        bool clicked;
+        using (ImRaii.PushStyle(ImGuiStyleVar.FramePadding, new Vector2(ImGui.GetStyle().FramePadding.X, 0)))
+            clicked = ImGui.Checkbox(toggleText, ref value);
+        Tooltip(tooltip);
         ImGui.SetCursorPos(after);
         return clicked;
     }

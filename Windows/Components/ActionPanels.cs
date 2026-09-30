@@ -171,6 +171,9 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
             var published = session.Task.IsApplied &&
                             string.Equals(session.Task.PublishedPath, path, StringComparison.OrdinalIgnoreCase);
             var conflict = !published && session.PathExists(path);
+            // With nothing planned there is nothing to create yet, so a folder of that name is no
+            // conflict until the plan would write there.
+            if (conflict && session.Queue.Count == 0) return;
             var color = conflict ? Theme.Danger : published ? Theme.Success : Theme.Muted;
             Widgets.Icon(conflict ? FontAwesomeIcon.ExclamationCircle
                 : published ? FontAwesomeIcon.CheckCircle : FontAwesomeIcon.FolderPlus, color);

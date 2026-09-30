@@ -103,8 +103,9 @@ public sealed class AnimationConversionPlan : ModFilePlan
 /// <para>
 /// A swap moves a PAP to another location of the same race. The game finds an animation by
 /// its entry name, which the destination's timeline expects to be its own, so the entry and
-/// the embedded timeline's motion name are renamed to the destination's (read from the game
-/// file, following the race's skeleton parents when the race has no file of its own).
+/// the embedded timeline's motion name are renamed to the destination's, read from the game
+/// file. A race with no file of its own there gets none: the game plays the file of a race it
+/// inherits from and never asks for one of its own. The same holds for retargets.
 /// </para>
 /// <para>
 /// A retarget rebuilds the PAP's body animations for each target race's base skeleton and
@@ -287,6 +288,8 @@ public sealed class AnimationConversionPlanner(
                 }
                 var destination = FromLocation(provider.Path.Race, destinationLocation);
                 if (destination == null) continue;
+                if (!GameHas(destination, variant.Label, provider,
+                        _request.KeepOriginal ? "stays where it is." : "is removed from the mod with the rest.")) continue;
                 if (SwapContent(provider, destination) is not { } local) continue;
 
                 var container = Result.GetContainer(provider.Container.Address);
@@ -357,7 +360,8 @@ public sealed class AnimationConversionPlanner(
                 {
                     if (!variant.Locations.TryGetValue(provider.Path.Location, out var destinationLocation)) continue;
                     var destination = FromLocation(provider.Path.Race, destinationLocation);
-                    if (destination == null || SwapContent(provider, destination) is not { } local) continue;
+                    if (destination == null || !GameHas(destination, variant.Label, provider, "is left out of that option.")) continue;
+                    if (SwapContent(provider, destination) is not { } local) continue;
                     if (GamePath.FindKey(files, destination.GamePath) != null)
                     {
                         Block("target_conflict", $"{variant.Label}: two files map to {destination.GamePath}.");
@@ -410,6 +414,26 @@ public sealed class AnimationConversionPlanner(
         private void AddSingleGroup(string name, string description, int selected, JsonArray options)
             => _plan.Changes.Add(ModGroupBuilder.Add(Result, name, description, ModGroupBuilder.TopPriority(Result) + 1,
                 "Single", selected, options));
+
+        private readonly HashSet<string> _noRaceFile = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Whether the game has a body animation of its own at <paramref name="destination"/>. It asks
+        /// for a race's own file only where it has one; a race without one plays the file of a race it
+        /// inherits from, so a file written for it would never load, and none is. Reported once per
+        /// destination, with what becomes of the source's file (<paramref name="outcome"/>). Face packs
+        /// are placed either way (see <see cref="RenameFace"/>).
+        /// </summary>
+        private bool GameHas(PapPath destination, string label, Provider provider, string outcome)
+        {
+            if (destination.IsFacial || Game(destination.GamePath) != null) return true;
+            if (_noRaceFile.Add(destination.GamePath))
+                Warn("no_race_file",
+                    $"{RaceNames.Describe(destination.Race)} has no {label} animation of its own ({destination.Key}) in the game " +
+                    $"and plays the one of a race it inherits from, so nothing is written there for it; this mod's " +
+                    $"{provider.Path.Key} for it {outcome}");
+            return false;
+        }
 
         /// <summary>Writes the source PAP renamed for <paramref name="destination"/>; returns its local path.</summary>
         private string? SwapContent(Provider provider, PapPath destination)
@@ -472,17 +496,11 @@ public sealed class AnimationConversionPlanner(
             var body = pap.BodyEntries.ToList();
             if (body.Count == 0) throw new InvalidDataException("The file has no body animation to move.");
 
-            var resolved = ResolvingRace(destination.Race, race => Game(destination.WithRace(race).GamePath) != null, _owner._parentRace);
-            if (resolved is not { } race)
+            // Swaps only write where the game has a file of its own (see GameHas), which names the animations.
+            if (Game(destination.GamePath) is not { } game)
                 throw new InvalidDataException(
-                    $"The game has no animation at {destination.Location} for {RaceNames.Describe(destination.Race)} " +
-                    "or any race it inherits from, so there is no name to give the converted animation.");
-            if (race != destination.Race)
-                Note("inherited_name",
-                    $"{RaceNames.Describe(destination.Race)} has no animation of its own for " +
-                    $"{_destinationLabel ?? destination.Key} ({destination.Key}). " +
-                    $"It inherits the animation from {RaceNames.Describe(race)}.");
-            var destinationBody = new PapFile(Game(destination.WithRace(race).GamePath)!).BodyEntries.ToList();
+                    $"The game has no animation at {destination.GamePath}, so there is no name to give the converted animation.");
+            var destinationBody = new PapFile(game).BodyEntries.ToList();
 
             var from = Played(source, body);
             var to = Played(destination, destinationBody);
@@ -677,8 +695,15 @@ public sealed class AnimationConversionPlanner(
 
             foreach (var target in targets)
             {
-                if (Skeleton(target) is not { } targetSkeleton) continue;
-                foreach (var provider in providers)
+                // The game asks for a race's own file only where it has one; a race without one
+                // plays the file of a race it inherits from, so a file written for it never loads.
+                var own = providers.Where(p => Game(p.Path.WithRace(target).GamePath) != null).ToList();
+                foreach (var missing in providers.Except(own).Select(p => p.Path.Key).Distinct())
+                    Warn("no_race_file",
+                        $"{RaceNames.Describe(target)} has no {missing} of its own in the game and plays the one of a race it " +
+                        "inherits from, so none is written for it.");
+                if (own.Count == 0 || Skeleton(target) is not { } targetSkeleton) continue;
+                foreach (var provider in own)
                 {
                     if (Local(provider.FullPath) is not { } bytes) continue;
                     var destination = provider.Path.WithRace(target);
@@ -917,14 +942,14 @@ public sealed class AnimationConversionPlanner(
 
         /// <summary>
         /// Reports which other races will play a retargeted file: a race without its own file
-        /// plays the one of the first race up its skeleton parents that has one.
+        /// plays the one of the first race up its skeleton parents that has one. Only races the
+        /// game has a file for get one written, so the game's files alone decide.
         /// </summary>
         private void DescribeInheritance(List<Provider> providers, List<ushort> targets)
         {
             foreach (var location in providers.Select(p => p.Path).DistinctBy(p => p.Location))
             {
-                bool Has(ushort race) => targets.Contains(race) || race == _request.SourceRace ||
-                                         Game(location.WithRace(race).GamePath) != null;
+                bool Has(ushort race) => Game(location.WithRace(race).GamePath) != null;
                 foreach (var target in targets)
                 {
                     var users = GenderRaces.Playable.Where(r => r != target && !targets.Contains(r) &&
