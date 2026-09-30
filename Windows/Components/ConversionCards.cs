@@ -288,7 +288,11 @@ internal sealed class ConversionCards(ConverterSession session)
 
     private void DrawTarget()
     {
-        Widgets.SectionTitle("To", FontAwesomeIcon.Bullseye);
+        var hide = session.HideModdedTargets;
+        if (Widgets.SectionTitle("To", FontAwesomeIcon.Bullseye, "Hide modded##HideModded", ref hide,
+                "Leave out targets another mod already changes in your collection (the ones shown in red). " +
+                "Whatever is selected or ticked always stays."))
+            session.SetHideModdedTargets(hide);
         if (session.Source is not { } source)
         {
             Widgets.MutedWrapped("Select a source item first.");
@@ -337,6 +341,7 @@ internal sealed class ConversionCards(ConverterSession session)
             ImGui.TextColored(Theme.Success, chosen.Name);
             ImGui.SameLine();
             Widgets.Muted(chosen.ModelIdDisplay);
+            Widgets.ModdedBadge(session.Modded.Item(chosen));
         }
         else
         {
@@ -351,12 +356,12 @@ internal sealed class ConversionCards(ConverterSession session)
             return;
         }
 
-        var items = session.TargetCandidates;
+        var items = session.ShownTargetCandidates;
         using var list = ImRaii.Child("##TargetList", new Vector2(-1, -1), true);
         if (!list.Success) return;
         if (items.Count == 0)
         {
-            Widgets.Muted("No items match.");
+            Widgets.Muted(session.TargetCandidates.Count > 0 ? "Every matching item is already modded." : "No items match.");
             return;
         }
 
@@ -365,15 +370,18 @@ internal sealed class ConversionCards(ConverterSession session)
         {
             var item     = items[i];
             var selected = ReferenceEquals(item, session.TargetItem);
+            var modded   = session.Modded.Item(item);
             using var id = ImRaii.PushId(i);
             var start    = ImGui.GetCursorPos();
             if (ImGui.Selectable("##row", selected, ImGuiSelectableFlags.None, new Vector2(0, rowHeight)))
                 session.SelectTarget(item);
+            Widgets.Tooltip(modded);
             ImGui.SetCursorPos(start);
             Widgets.GameIcon(item.Icon, rowHeight);
             ImGui.SameLine();
             ImGui.SetCursorPosY(start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2);
-            ImGui.TextUnformatted(item.Name);
+            if (modded != null) ImGui.TextColored(Theme.Danger, item.Name);
+            else ImGui.TextUnformatted(item.Name);
             var idText = item.ModelIdDisplay;
             ImGui.SameLine(ImGui.GetContentRegionMax().X - ImGui.CalcTextSize(idText).X);
             Widgets.Muted(idText);
@@ -422,18 +430,20 @@ internal sealed class ConversionCards(ConverterSession session)
         }
 
         using var list = ImRaii.Child("##TextureTargets", new Vector2(-1, -1), true);
-        if (list.Success)
-            foreach (var race in races)
-                DrawTextureTargetRace(kind, race);
+        if (!list.Success) return;
+        var shown = false;
+        foreach (var race in races)
+            shown |= DrawTextureTargetRace(kind, race);
+        if (!shown) Widgets.Muted("Every target is already modded.");
     }
 
     /// <summary>
     /// One race/gender row. A kind with at most one ID per race (skins, and any race/kind pair
     /// with a single option) is a single toggle; a kind with several (faces, mostly) expands into
     /// a checkbox per ID the players of that race can choose. A skin row names every race that
-    /// wears that skin.
+    /// wears that skin. Returns whether anything was drawn: a modded toggle may be hidden.
     /// </summary>
-    private void DrawTextureTargetRace(AssetKind kind, ushort race)
+    private bool DrawTextureTargetRace(AssetKind kind, ushort race)
     {
         var options = kind == AssetKind.Body ? null : session.GameData.TryGetCustomizationOptions(kind, race);
         if (options is not { Count: > 1 })
@@ -443,29 +453,34 @@ internal sealed class ConversionCards(ConverterSession session)
                 ? bodyId
                 : options is { Count: > 0 } list ? list[0].Id : (ushort)1;
             var label = kind == AssetKind.Body ? SkinLabel(race) : ConverterSession.RaceLabel(race);
-            DrawTextureTargetCheckbox(label, $"{race}", race, id);
-            return;
+            return DrawTextureTargetCheckbox(label, $"{race}", race, id);
         }
 
         var selected = session.TextureTargetCount(race);
+        var modded = options.Count(o => !session.IsTextureSource(race, o.Id) && session.Modded.Customization(kind, race, o.Id) != null);
         var header = ConverterSession.RaceLabel(race) +
                      (options.Any(o => session.IsTextureSource(race, o.Id)) ? "  ·  source" : string.Empty) +
-                     (selected > 0 ? $"  ·  {selected} selected" : string.Empty);
-        if (!ImGui.CollapsingHeader($"{header}###TextureRace{race}")) return;
+                     (selected > 0 ? $"  ·  {selected} selected" : string.Empty) +
+                     (modded > 0 ? $"  ·  {modded} modded" : string.Empty);
+        if (!ImGui.CollapsingHeader($"{header}###TextureRace{race}")) return true;
 
         // CollapsingHeader does not leave a lasting ID scope, so the race is folded into every
         // checkbox's own ID: two expanded races can otherwise share the same face ID.
         using var indent = ImRaii.PushIndent();
+        var shown = false;
         foreach (var option in options)
-        {
-            DrawTextureTargetCheckbox(option.Label, $"{race}_{option.Id}", race, option.Id);
-            if (option.Clans != null && !session.IsTextureSource(race, option.Id))
-                Widgets.Tooltip($"Only {option.Clans} players can choose this.");
-        }
+            shown |= DrawTextureTargetCheckbox(option.Label, $"{race}_{option.Id}", race, option.Id,
+                option.Clans != null ? $"Only {option.Clans} players can choose this." : null);
+        if (!shown) Widgets.Muted("Every option is already modded.");
+        return true;
     }
 
-    /// <summary>A target toggle; the source's own is always on and cannot be changed.</summary>
-    private void DrawTextureTargetCheckbox(string label, string id, ushort race, ushort modelId)
+    /// <summary>
+    /// A target toggle, red when another mod already changes that race or ID, and left out when
+    /// those are hidden and it is not ticked; the source's own is always on and cannot be changed.
+    /// Returns whether it was drawn.
+    /// </summary>
+    private bool DrawTextureTargetCheckbox(string label, string id, ushort race, ushort modelId, string? tooltip = null)
     {
         if (session.IsTextureSource(race, modelId))
         {
@@ -473,11 +488,18 @@ internal sealed class ConversionCards(ConverterSession session)
             using (ImRaii.Disabled())
                 ImGui.Checkbox($"{label} (source)##{id}", ref always);
             Widgets.Tooltip("The mod already has this; it is always kept as it is.");
-            return;
+            return true;
         }
 
+        var modded = session.Modded.Customization(session.TargetCustomizationKind, race, modelId);
         var on = session.IsTextureTarget(race, modelId);
-        if (ImGui.Checkbox($"{label}##{id}", ref on)) session.SetTextureTarget(race, modelId, on);
+        if (!session.ShowsTarget(modded, on)) return false;
+        using (ImRaii.PushColor(ImGuiCol.Text, Theme.Danger, modded != null))
+        {
+            if (ImGui.Checkbox($"{label}##{id}", ref on)) session.SetTextureTarget(race, modelId, on);
+        }
+        Widgets.Tooltip(tooltip, modded);
+        return true;
     }
 
     /// <summary>"Midlander Female — also Elezen, Miqo'te": every race that wears this skin.</summary>
@@ -565,6 +587,8 @@ internal sealed class ConversionCards(ConverterSession session)
         Widgets.Badge(chosen?.Label ?? $"{session.TargetOptionLabel} (not available)", chosen != null ? Theme.Success : Theme.Danger);
         ImGui.SameLine();
         Widgets.Muted($"{options.Count} available");
+        if (chosen != null)
+            Widgets.ModdedBadge(session.Modded.Customization(session.TargetCustomizationKind, session.TargetRace, chosen.Id));
 
         var note = source.Kind is AssetKind.Tail or AssetKind.VieraEar
             ? "Tails and Viera ears can convert into each other."
@@ -573,22 +597,31 @@ internal sealed class ConversionCards(ConverterSession session)
 
         using (var grid = ImRaii.Child("##IdGrid", new Vector2(-1, -noteHeight), true))
         {
-            if (grid.Success)
+            var shown = options.Where(o => session.ShowsTarget(
+                    session.Modded.Customization(session.TargetCustomizationKind, session.TargetRace, o.Id),
+                    o.Id == session.TargetCustomizationId))
+                .ToList();
+            if (grid.Success && shown.Count == 0) Widgets.Muted("Every option is already modded.");
+            else if (grid.Success)
             {
                 var padding = ImGui.GetStyle().FramePadding.X * 2;
                 var spacing = ImGui.GetStyle().ItemSpacing.X;
                 var avail   = ImGui.GetContentRegionAvail().X;
                 var cell    = Math.Min(avail, options.Max(o => ImGui.CalcTextSize(o.Label).X) + padding);
                 var columns = Math.Max(1, (int)((avail + spacing) / (cell + spacing)));
-                for (var i = 0; i < options.Count; i++)
+                for (var i = 0; i < shown.Count; i++)
                 {
-                    var option   = options[i];
+                    var option   = shown[i];
                     var selected = option.Id == session.TargetCustomizationId;
+                    var modded   = session.Modded.Customization(session.TargetCustomizationKind, session.TargetRace, option.Id);
                     if (i % columns != 0) ImGui.SameLine();
-                    using var color = ImRaii.PushColor(ImGuiCol.Button, Theme.Accent.WithAlpha(0.6f), selected);
-                    if (ImGui.Button(option.Label, new Vector2(cell, 0)))
-                        session.SetCustomizationId(option.Id);
-                    if (option.Clans != null) Widgets.Tooltip($"Only {option.Clans} players can choose this.");
+                    using (ImRaii.PushColor(ImGuiCol.Button, Theme.Accent.WithAlpha(0.6f), selected)
+                               .Push(ImGuiCol.Text, Theme.Danger, modded != null))
+                    {
+                        if (ImGui.Button(option.Label, new Vector2(cell, 0)))
+                            session.SetCustomizationId(option.Id);
+                    }
+                    Widgets.Tooltip(option.Clans != null ? $"Only {option.Clans} players can choose this." : null, modded);
                 }
             }
         }

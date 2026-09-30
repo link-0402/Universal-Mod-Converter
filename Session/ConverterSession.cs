@@ -76,10 +76,17 @@ public sealed partial class ConverterSession
         OutputMode      = plugin.Configuration.OutputMode;
         TextureLayout   = plugin.Configuration.TextureLayout;
         TextureAsNewMod = plugin.Configuration.TextureAsNewMod;
+        HideModdedTargets = plugin.Configuration.HideModdedTargets;
+        Modded          = new ModdedTargets(plugin.PenumbraIpc,
+            folder => Mods.FirstOrDefault(m => string.Equals(m.Folder, folder, StringComparison.OrdinalIgnoreCase))?.Name,
+            () => PenumbraModDirectory);
     }
 
     public BackgroundRunner Runner { get; } = new();
     public LogStore Log { get; } = new();
+
+    /// <summary>Which targets other mods already change, for marking them in the target lists.</summary>
+    public ModdedTargets Modded { get; }
     public ConversionHistoryService History => _plugin.History;
     public GameDataService GameData => _plugin.GameData;
     private Configuration Config => _plugin.Configuration;
@@ -116,6 +123,50 @@ public sealed partial class ConverterSession
     public string TargetFilter { get; private set; } = string.Empty;
     public IReadOnlyList<GameItem> TargetCandidates { get; private set; } = [];
     private bool _candidatesWaitForItems;
+
+    /// <summary>Leave targets other mods already change (see <see cref="Modded"/>) out of the target lists.</summary>
+    public bool HideModdedTargets { get; private set; }
+
+    public void SetHideModdedTargets(bool hide)
+    {
+        if (hide == HideModdedTargets) return;
+        HideModdedTargets = hide;
+        Config.HideModdedTargets = hide;
+        Config.Save();
+    }
+
+    /// <summary>
+    /// Whether a target list shows a target another mod may already change (<paramref name="modded"/>
+    /// says who, or is null). A <paramref name="chosen"/> target (selected, ticked, or the source
+    /// itself) always shows, so it can still be seen and unticked.
+    /// </summary>
+    public bool ShowsTarget(string? modded, bool chosen) => chosen || modded == null || !HideModdedTargets;
+
+    private IReadOnlyList<GameItem>? _shownFrom;
+    private GameItem? _shownChosen;
+    private int _shownVersion;
+    private IReadOnlyList<GameItem> _shownCandidates = [];
+
+    /// <summary>
+    /// The gear targets the list shows: <see cref="TargetCandidates"/>, less the ones other mods
+    /// already change when <see cref="HideModdedTargets"/> is on. Kept until either changes.
+    /// </summary>
+    public IReadOnlyList<GameItem> ShownTargetCandidates
+    {
+        get
+        {
+            if (!HideModdedTargets) return TargetCandidates;
+            var version = Modded.Version;
+            if (!ReferenceEquals(_shownFrom, TargetCandidates) || !ReferenceEquals(_shownChosen, TargetItem) || _shownVersion != version)
+            {
+                _shownFrom       = TargetCandidates;
+                _shownChosen     = TargetItem;
+                _shownVersion    = version;
+                _shownCandidates = TargetCandidates.Where(i => ShowsTarget(Modded.Item(i), ReferenceEquals(i, TargetItem))).ToList();
+            }
+            return _shownCandidates;
+        }
+    }
 
     public AssetKind TargetCustomizationKind { get; private set; } = AssetKind.Hair;
     public ushort TargetRace { get; private set; } = 101;
@@ -203,14 +254,14 @@ public sealed partial class ConverterSession
     /// <summary>A failed conversion's banner stays up through the preview its failure starts.</summary>
     private bool _keepResultThroughPreview;
 
-    public string? NewModPath
+    public string? NewModPath => NewModPathFor(NewModName);
+
+    /// <summary>Where a new mod named <paramref name="name"/> is created: beside this mod, in a folder of that name.</summary>
+    private string? NewModPathFor(string name)
     {
-        get
-        {
-            if (!HasMod || string.IsNullOrWhiteSpace(NewModName)) return null;
-            var parent = Path.GetDirectoryName(ModDirectory.TrimEnd('\\', '/'));
-            return string.IsNullOrEmpty(parent) ? null : Path.Combine(parent, ModConverterService.SanitizeFolderName(NewModName));
-        }
+        if (!HasMod || string.IsNullOrWhiteSpace(name)) return null;
+        var parent = Path.GetDirectoryName(ModDirectory.TrimEnd('\\', '/'));
+        return string.IsNullOrEmpty(parent) ? null : Path.Combine(parent, ModConverterService.SanitizeFolderName(name));
     }
 
     // ── Plan and result ──────────────────────────────────────────────────────
@@ -257,6 +308,7 @@ public sealed partial class ConverterSession
             _checkedFor = Runner.Finished;
             _checkedPaths.Clear();
             _checkedReverts.Clear();
+            Modded.Invalidate();
         }
         if (!_initialized) return;
 
@@ -288,6 +340,7 @@ public sealed partial class ConverterSession
 
     public void RefreshPenumbraState()
     {
+        Modded.Invalidate();
         PenumbraAvailable = _plugin.PenumbraIpc.IsAvailable;
         if (PenumbraAvailable) RefreshMods();
         else
@@ -722,9 +775,18 @@ public sealed partial class ConverterSession
         RefreshDefaultNewModName();
     }
 
+    /// <summary>Ends every suggested new mod name, so a converted copy never takes its source's name.</summary>
+    private const string NewModNameSuffix = " - UMC";
+
     private void RefreshDefaultNewModName()
     {
         if (!_newModNameIsDefault) return;
+        if (!HasMod)
+        {
+            NewModName = string.Empty;
+            return;
+        }
+
         var run = RunEntries.ToList();
         var label = run.Count switch
         {
@@ -732,7 +794,15 @@ public sealed partial class ConverterSession
             1 => run[0].CanFanOut ? $"+ {run[0].Target.Detail}" : run[0].Target.Name,
             _ => $"{run.Count} conversions",
         };
-        NewModName = HasMod ? (label.Length == 0 ? ModName : $"{ModName} ({label})") : string.Empty;
+        var name = (label.Length == 0 ? ModName : $"{ModName} ({label})") + NewModNameSuffix;
+
+        // A suggestion is never a folder that already exists, such as the one the last conversion
+        // created: it is numbered instead. Checked on disk, not through PathExists, whose answers
+        // may predate a conversion that has only just finished.
+        var suggested = name;
+        for (var number = 2; number < 100 && NewModPathFor(suggested) is { } path && (Directory.Exists(path) || File.Exists(path)); number++)
+            suggested = $"{name} ({number})";
+        NewModName = suggested;
     }
 
     /// <summary>The plan itself changed: its entries, the output mode or the mod.</summary>

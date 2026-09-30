@@ -203,7 +203,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
             ImGui.SameLine();
             if (ImGui.SmallButton("None")) session.SetAnimationGroupSlots([]);
             ImGui.SameLine();
-            Widgets.Muted($"{session.AnimationGroupSlots.Count} of {slots.Count} slots");
+            Widgets.Muted($"{session.AnimationGroupSlots.Count} of {slots.Count(s => session.CanSwapToIdleSlot(source, s))} slots");
         }
         else if (session.EffectiveOutputMode == ConversionOutputMode.InPlace)  // Implied by AddToMod; not kept in a new mod.
         {
@@ -212,25 +212,39 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
             Widgets.Tooltip("Copy instead of move: both slots play this animation.");
         }
 
+        var missing = slots.Count(s => s.Index != source.SlotIndex && !session.CanSwapToIdleSlot(source, s));
+        if (missing > 0) NotListed(source, missing, missing == 1 ? "slot is" : "slots are");
+
         using var grid = ImRaii.Child("##Slots", new Vector2(-1, -1), true);
         if (!grid.Success) return;
+        var shown = false;
         foreach (var slot in slots)
         {
+            var modded = session.ModdedIdleSlot(source, slot);
+            // The current slot stays for orientation, whoever changes it.
+            var chosen = slot.Index == source.SlotIndex ||
+                         (group ? session.AnimationGroupSlots.Contains(slot.Index) : slot.Index == session.AnimationTargetSlot);
+            if (!chosen && !session.CanSwapToIdleSlot(source, slot)) continue;
+            if (!session.ShowsTarget(modded, chosen)) continue;
+            shown = true;
             using var id = ImRaii.PushId(slot.Index);
             var label = slot.Index == source.SlotIndex ? $"{slot.Label} (current)" : slot.Label;
-            if (group)
+            using (ImRaii.PushColor(ImGuiCol.Text, Theme.Danger, modded != null))
             {
-                var included = session.AnimationGroupSlots.Contains(slot.Index);
-                if (ImGui.Checkbox(label, ref included)) session.SetAnimationGroupSlot(slot.Index, included);
+                if (group)
+                {
+                    var included = session.AnimationGroupSlots.Contains(slot.Index);
+                    if (ImGui.Checkbox(label, ref included)) session.SetAnimationGroupSlot(slot.Index, included);
+                }
+                else
+                {
+                    using var disabled = ImRaii.Disabled(slot.Index == source.SlotIndex);
+                    if (ImGui.Selectable(label, slot.Index == session.AnimationTargetSlot)) session.SetAnimationTargetSlot(slot.Index);
+                }
             }
-            else
-            {
-                using var disabled = ImRaii.Disabled(slot.Index == source.SlotIndex);
-                if (ImGui.Selectable(label, slot.Index == session.AnimationTargetSlot)) session.SetAnimationTargetSlot(slot.Index);
-            }
-            if (slot.StartKey == null) Widgets.Tooltip($"{slot.LoopKey} (no start animation)");
-            else Widgets.Tooltip($"{slot.LoopKey} and {slot.StartKey}");
+            Widgets.Tooltip(slot.StartKey == null ? $"{slot.LoopKey} (no start animation)" : $"{slot.LoopKey} and {slot.StartKey}", modded);
         }
+        if (!shown) Widgets.Muted("Every slot is already modded.");
     }
 
     /// <summary>
@@ -276,23 +290,35 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
             ImGui.TextColored(Theme.Success, $"/{chosen.Name}");
             ImGui.SameLine();
             Widgets.Muted(string.Join(", ", chosen.Timelines.Select(t => t.Label)));
+            Widgets.ModdedBadge(session.ModdedEmote(source, chosen));
         }
         else Widgets.Muted("No emote selected.");
 
         var filter = _emoteFilter.Trim();
-        var shown = emotes.Where(e => e.Id != source.EmoteId &&
-                                      (filter.Length == 0 || e.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
-                                       e.Timelines.Any(t => t.Key.Contains(filter, StringComparison.OrdinalIgnoreCase))))
+        var candidates = emotes.Where(e => e.Id != source.EmoteId).ToList();
+        var missing = candidates.Count(e => e.Id != session.AnimationTargetEmote && !session.CanSwapToEmote(source, e));
+        if (missing > 0) NotListed(source, missing, missing == 1 ? "emote is" : "emotes are");
+        var matching = candidates.Where(e => (e.Id == session.AnimationTargetEmote || session.CanSwapToEmote(source, e)) &&
+                                             (filter.Length == 0 || e.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                                              e.Timelines.Any(t => t.Key.Contains(filter, StringComparison.OrdinalIgnoreCase))))
+            .ToList();
+        var shown = matching.Where(e => session.ShowsTarget(session.HideModdedTargets ? session.ModdedEmote(source, e) : null,
+                e.Id == session.AnimationTargetEmote))
             .ToList();
         using var list = ImRaii.Child("##Emotes", new Vector2(-1, -1), true);
         if (!list.Success) return;
+        if (shown.Count == 0 && matching.Count > 0)
+        {
+            Widgets.Muted("Every matching emote is already modded.");
+            return;
+        }
         var rowHeight = ImGui.GetTextLineHeight() * 1.5f;
         Widgets.Clipped(shown.Count, rowHeight + ImGui.GetStyle().ItemSpacing.Y, i =>
         {
             var emote = shown[i];
             using var id = ImRaii.PushId((int)emote.Id);
             if (EmoteRow(emote.Icon, emote.Name, emote.Id == session.AnimationTargetEmote, true,
-                    string.Join("\n", emote.Timelines.Select(t => $"{t.Label}: {t.Key}")), rowHeight))
+                    string.Join("\n", emote.Timelines.Select(t => $"{t.Label}: {t.Key}")), session.ModdedEmote(source, emote), rowHeight))
                 session.SetAnimationTargetEmote(emote.Id);
         });
     }
@@ -312,16 +338,27 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         ImGui.SetNextItemWidth(-1);
         ImGui.InputTextWithHint("##ExpressionSwapFilter", "Filter expressions…", ref _expressionSwapFilter, 64);
         if (expressions.FirstOrDefault(e => e.Id == session.AnimationTargetEmote) is { } chosen)
+        {
             ImGui.TextColored(Theme.Success, $"/{chosen.Name}");
+            Widgets.ModdedBadge(session.ModdedExpression(source, chosen));
+        }
         else Widgets.Muted("No expression selected.");
 
         var filter = _expressionSwapFilter.Trim();
-        var shown = expressions.Where(e => e.Id != source.EmoteId &&
-                                           (filter.Length == 0 || e.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
-                                            e.Pose.Contains(filter, StringComparison.OrdinalIgnoreCase)))
+        var matching = expressions.Where(e => e.Id != source.EmoteId &&
+                                              (filter.Length == 0 || e.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                                               e.Pose.Contains(filter, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var shown = matching.Where(e => session.ShowsTarget(session.HideModdedTargets ? session.ModdedExpression(source, e) : null,
+                e.Id == session.AnimationTargetEmote))
             .ToList();
         using var list = ImRaii.Child("##Expressions", new Vector2(-1, -1), true);
         if (!list.Success) return;
+        if (shown.Count == 0 && matching.Count > 0)
+        {
+            Widgets.Muted("Every matching expression is already modded.");
+            return;
+        }
         var rowHeight = ImGui.GetTextLineHeight() * 1.5f;
         Widgets.Clipped(shown.Count, rowHeight + ImGui.GetStyle().ItemSpacing.Y, i =>
         {
@@ -331,27 +368,40 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
                     expression.OwnPack
                         ? $"facial/pose/{expression.Pose}"
                         : "The game keeps this face in the shared face pack with every other face, so it cannot be replaced on its own.",
-                    rowHeight))
+                    session.ModdedExpression(source, expression), rowHeight))
                 session.SetAnimationTargetEmote(expression.Id);
         });
     }
 
-    /// <summary>A row of the game's emote list: its icon and /name, selectable unless <paramref name="enabled"/> is false.</summary>
-    private static bool EmoteRow(uint icon, string name, bool selected, bool enabled, string tooltip, float rowHeight)
+    /// <summary>
+    /// A row of the game's emote list: its icon and /name, selectable unless <paramref name="enabled"/>
+    /// is false, and red when <paramref name="modded"/> says another mod already changes it.
+    /// </summary>
+    private static bool EmoteRow(uint icon, string name, bool selected, bool enabled, string tooltip, string? modded, float rowHeight)
     {
         var start = ImGui.GetCursorPos();
         bool clicked;
         using (ImRaii.Disabled(!enabled))
             clicked = ImGui.Selectable("##row", selected, ImGuiSelectableFlags.None, new Vector2(0, rowHeight));
-        Widgets.Tooltip(tooltip);
+        Widgets.Tooltip(tooltip, modded);
         ImGui.SetCursorPos(start);
         Widgets.GameIcon(icon, rowHeight);
         ImGui.SameLine();
         ImGui.SetCursorPosY(start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2);
-        if (enabled) ImGui.TextUnformatted($"/{name}");
-        else Widgets.Muted($"/{name}");
+        if (!enabled) Widgets.Muted($"/{name}");
+        else if (modded != null) ImGui.TextColored(Theme.Danger, $"/{name}");
+        else ImGui.TextUnformatted($"/{name}");
         return clicked;
     }
+
+    /// <summary>
+    /// Says how many targets a swap would write nothing for, and so are not listed: the game has
+    /// no animation of their own there for any race the mod provides, and never asks for one.
+    /// </summary>
+    private static void NotListed(AnimationSource source, int count, string what)
+        => Widgets.MutedWrapped($"{count} {what} not listed: the game has no animation of its own there for " +
+                                $"{string.Join(", ", source.Races.Select(RaceNames.Name))}, which play another race's " +
+                                "instead, so a swapped file would never load.");
 
     private static void Loading(string message)
     {
@@ -377,27 +427,42 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         }
         Widgets.Tooltip("The race whose files are rebuilt. Only races this mod provides the animation for are listed.");
 
-        Widgets.MutedWrapped("To: races without their own file play their parent race's animation (the game's race tree), " +
-                             "so the preview lists which other races each new file also covers.");
+        Widgets.MutedWrapped("To: only races the game has this animation for are listed. The others play their parent race's " +
+                             "(the game's race tree) and never load one of their own; the preview lists which of them each new " +
+                             "file also covers.");
+        // Only races with a file of their own can be given one; ticked ones stay so they can be unticked.
+        var retargetable = session.RetargetRaces(source);
+        var races = GenderRaces.Playable
+            .Where(r => r == session.AnimationSourceRace || retargetable.Contains(r) || session.AnimationTargetRaces.Contains(r))
+            .ToList();
         using var grid = ImRaii.Child("##Races", new Vector2(-1, -1), true);
         if (!grid.Success) return;
+        if (races.All(r => r == session.AnimationSourceRace))
+        {
+            Widgets.MutedWrapped("The game has this animation for no other race: every other race plays the one of a race " +
+                                 "it inherits from, so there is no race to retarget it to.");
+            return;
+        }
         using var table = ImRaii.Table("##RaceTable", 2, ImGuiTableFlags.SizingStretchSame);
         if (!table.Success) return;
-        foreach (var race in GenderRaces.Playable)
+        foreach (var race in races)
         {
-            ImGui.TableNextColumn();
-            using var id = ImRaii.PushId(race);
             var included = session.AnimationTargetRaces.Contains(race);
             var isSource = race == session.AnimationSourceRace;
             var provided = source.Races.Contains(race);
+            var modded   = isSource ? null : session.ModdedRetargetRace(source, race);
+            if (!session.ShowsTarget(modded, included)) continue;
+            ImGui.TableNextColumn();
+            using var id = ImRaii.PushId(race);
             using (ImRaii.Disabled(isSource))
+            using (ImRaii.PushColor(ImGuiCol.Text, Theme.Danger, modded != null))
             {
                 if (ImGui.Checkbox(ConverterSession.RaceLabel(race), ref included)) session.SetAnimationTargetRace(race, included);
             }
             Widgets.Tooltip(isSource ? "This is the source race."
                 : provided
                     ? $"{RaceNames.Describe(race)}. The mod already has this animation for this race; it would be replaced."
-                    : RaceNames.Describe(race));
+                    : RaceNames.Describe(race), modded);
             if (provided && !isSource)
             {
                 ImGui.SameLine();

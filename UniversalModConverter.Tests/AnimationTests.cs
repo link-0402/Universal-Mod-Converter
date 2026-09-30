@@ -21,7 +21,7 @@ internal static class AnimationTests
         ("An animation inside an option gets a new slot group beside it", IdleSwapGroupInOption),
         ("Adding a slot group to the mod keeps the original where it is", IdleSwapGroupKeepsOriginal),
         ("Swapped files follow game-path layouts and reuse unchanged files", SwapLocalNames),
-        ("Swap takes the name from the parent race", SwapInheritsName),
+        ("A swap writes nothing for a race without the destination of its own", SwapSkipsRaceWithoutFile),
         ("Swap pairs the animation the action timeline plays", SwapFromDefaultIdle),
         ("An animation with no counterpart is explained in plain words", UnpairedIsExplained),
         ("A facial expression swaps to another, with its timeline in every option", FaceSwap),
@@ -842,23 +842,30 @@ internal static class AnimationTests
         Assert.True(plan.Files.Single(f => f.Destination == slot3).Content!.SequenceEqual(b), "option B's version is used");
     }
 
-    private static void SwapInheritsName()
+    private static void SwapSkipsRaceWithoutFile()
     {
         using var mod = new TempDir();
         var loop = Loop3.Replace("c0101", "c0801");
-        Definition(mod, $$$"""{"Files":{"{{{loop}}}":"loop.pap"}}""");
+        Definition(mod, $$$"""{"Files":{"{{{loop}}}":"loop.pap","{{{Loop3}}}":"loop.pap"}}""");
         mod.File("loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
-        // c0801 has no own pose05; the game plays c0101's, whose name is used.
+        // c0801 has no pose05 of its own: the game plays c0101's and never asks for one, so only
+        // c0101 gets the swapped file, and c0801's is removed with the rest.
         var plan = new AnimationConversionPlanner(Game(), race => race == 801 ? (ushort)101 : null, null)
-            .Plan(mod.Path, SlotRequest(ConversionOutputMode.NewMod, ("Standing idle 5", Loop5, Start5)));
+            .Plan(mod.Path, SlotRequest(ConversionOutputMode.InPlace, ("Standing idle 5", Loop5, Start5)));
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
-        Assert.True(plan.Diagnostics.Any(d => d.Code == "inherited_name"), "The inherited name must be reported.");
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "no_race_file" && d.Message.Contains("Miqo'te") &&
+                                              d.Message.Contains("removed")), "the skipped race is explained");
+        Assert.Equal(new[] { Loop5 }, plan.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
         var write = plan.Files.Single(f => f.Operation == LocalFileOperation.Write);
         Assert.Equal("cbem_pose05_1lp", new PapFile(write.Content!).Entries[0].Name);
 
-        plan = new AnimationConversionPlanner(Game(), _ => null, null)
-            .Plan(mod.Path, SlotRequest(ConversionOutputMode.NewMod, ("Standing idle 5", Loop5, Start5)));
-        Assert.True(plan.Diagnostics.Any(d => d.IsBlocker && d.Code == "swap_failed"), "Without a parent the name is unknown.");
+        // In an option group the race is left out of the option, which stays for the races that have it.
+        var group = new AnimationConversionPlanner(Game(), _ => null, null).Plan(mod.Path,
+            SlotRequest(ConversionOutputMode.NewMod, ("Standing idle 5", Loop5, Start5)) with { GroupName = "Slot" });
+        Assert.True(!group.HasBlockers, string.Join(" ", group.Diagnostics.Select(d => d.Message)));
+        Assert.True(group.Diagnostics.Any(d => d.Code == "no_race_file" && d.Message.Contains("left out")), "explained in the group too");
+        Assert.Equal(new[] { Loop5 },
+            group.Result.Groups.Single(g => g.Name == "Slot").Containers[1].FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
     }
 
     private static void SwapFromDefaultIdle()
@@ -885,18 +892,24 @@ internal static class AnimationTests
         mod.File("c0101/loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
         var game = Game();
         game.Files[PapPath.BaseSkeletonPath(101)] = [1];
+        game.Files[PapPath.BaseSkeletonPath(301)] = [3];
         game.Files[PapPath.BaseSkeletonPath(1101)] = [2];
+        // Lalafell males have the animation of their own; Highlander males play the Midlander one.
+        game.Files[Loop3.Replace("c0101", "c1101")] = BuildPap([("cbem_pose03_1lp", 0)], model: 1101);
         var retargeter = new FakeRetargeter();
         var request = new AnimationConversionRequest([PapPath.TryParse(Loop3, out var p) ? p.Location : ""],
             AnimationOperation.Retarget, ConversionOutputMode.InPlace, "test")
         {
             SourceRace = 101,
-            TargetRaces = [1101],
+            TargetRaces = [1101, 301],
         };
         ushort? Parent(ushort race) => race switch { 1201 => 1101, 1101 => 101, 101 => null, _ => 101 };
         var plan = new AnimationConversionPlanner(game, Parent, retargeter).Plan(mod.Path, request);
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
         Assert.Equal(1, retargeter.Calls);
+        // The game never asks for a file of the Highlander male's own, so none is written.
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "no_race_file" && d.Message.Contains("Highlander")),
+            "a race without a file of its own is skipped and told");
         // Named, not coded: the message is for someone reading the plan, not the file paths.
         Assert.True(plan.Diagnostics.Any(d => d.Code == "inherited_by" && d.Message.Contains("Lalafell Female")),
             "Lalafell female inherits the new Lalafell male file.");

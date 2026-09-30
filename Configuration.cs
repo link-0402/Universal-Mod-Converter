@@ -31,6 +31,9 @@ public class Configuration : IPluginConfiguration
     /// <summary>Write a texture fan-out to a copy of the mod instead of the mod itself.</summary>
     public bool TextureAsNewMod { get; set; }
 
+    /// <summary>Leave targets other mods already change (the ones marked red) out of the target lists.</summary>
+    public bool HideModdedTargets { get; set; }
+
     /// <summary>
     /// Replaced by <see cref="OutputMode"/> in version 3. Kept so an older configuration file
     /// still deserializes, and migrated once.
