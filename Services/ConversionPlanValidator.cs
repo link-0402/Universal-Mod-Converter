@@ -53,7 +53,7 @@ internal static class ConversionPlanValidator
             .ToArray();
         task.PlanFingerprint = ModFingerprint.ComputePlan(operations);
         if (operations.Length == 0)
-            task.Diagnostics.Add(new PlanDiagnostic("empty_plan", "No connected conversion operations were found.", true));
+            task.Diagnostics.Add(new PlanDiagnostic("empty_plan", "Nothing in this mod would change for this conversion, so there is nothing to convert.", true));
 
         task.IsPlanned = true;
         task.ErrorMessage = task.HasBlockers
