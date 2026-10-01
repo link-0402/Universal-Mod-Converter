@@ -88,7 +88,7 @@ internal sealed class ConversionCards(ConverterSession session)
                 Widgets.Muted("Scanning the mod");
             }
             else
-                Widgets.MutedWrapped("No gear, facewear, hair, face, tail, Viera-ear, skin or animation was found in this mod.");
+                Widgets.MutedWrapped("No gear, facewear, hair, face, tail, Viera ear, skin or animation was found in this mod.");
             return;
         }
 
