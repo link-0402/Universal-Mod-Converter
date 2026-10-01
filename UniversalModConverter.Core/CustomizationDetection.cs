@@ -1,6 +1,6 @@
 namespace UniversalModConverter.Core;
 
-/// <summary>Finds the hair, face, tail, Viera-ear and skin roots a mod changes.</summary>
+/// <summary>Finds the hair, face, tail, Viera ear and skin roots a mod changes.</summary>
 public static class CustomizationDetection
 {
     /// <inheritdoc cref="FindRoots(ModIndex)"/>

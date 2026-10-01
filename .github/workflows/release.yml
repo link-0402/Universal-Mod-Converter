@@ -16,6 +16,16 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
+      - name: Check that the tag matches the plugin version
+        shell: pwsh
+        run: |
+          $project = [xml](Get-Content -LiteralPath 'UniversalModConverter.csproj' -Raw)
+          $version = ($project.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1)
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          if ($version -ne $tag -and $version -ne "$tag.0") {
+            throw "The tag v$tag does not match the plugin version $version in UniversalModConverter.csproj."
+          }
+
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:

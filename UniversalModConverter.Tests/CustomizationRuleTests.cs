@@ -1,6 +1,6 @@
 using UniversalModConverter.Core;
 
-/// <summary>Material-root rules for hair, face, tail and Viera-ear conversion.</summary>
+/// <summary>Material-root rules for hair, face, tail and Viera ear conversion.</summary>
 internal static class CustomizationRuleTests
 {
     public static (string Name, Action Run)[] All =>
