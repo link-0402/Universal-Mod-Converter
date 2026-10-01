@@ -4,7 +4,7 @@ namespace UniversalModConverter.Windows.Ui;
 
 /// <summary>
 /// Human titles for the plan's diagnostic codes. The codes are how the converter talks to
-/// itself; a plan full of <c>inherited_name</c> and <c>variant_group_options</c> asks the
+/// itself; a plan full of <c>inherited_by</c> and <c>no_race_file</c> asks the
 /// reader to know the source. The raw code stays reachable — in the tooltip, and in the
 /// column itself under Advanced details — because it is what to search for in a bug report.
 /// </summary>
@@ -14,7 +14,6 @@ internal static class DiagnosticText
     {
         // Animations: swapping
         ["unpaired"]               = "Nothing to convert to",
-        ["inherited_name"]         = "Inherited animation",
         ["destination_replaced"]   = "Replaces the mod's own file",
         ["multiple_animations"]    = "Several animations in one file",
         ["swap_failed"]            = "Swap not possible",
@@ -28,6 +27,8 @@ internal static class DiagnosticText
         ["no_game_face"]           = "No game face there",
         ["no_face_timeline"]       = "Face plays at the game's pace",
         ["timeline_swap_failed"]   = "Timeline could not be swapped",
+        ["nothing_written"]        = "Nothing would be written",
+        ["no_race_file"]           = "No file of its own for a race",
 
         // Animations: option groups
         ["several_sources"]        = "Choose which version",
@@ -68,6 +69,7 @@ internal static class DiagnosticText
         ["pbd_invalid"]            = "Race data invalid",
         ["accessory_skin_material"] = "Body materials on an accessory",
         ["unused_material_kept"]   = "Unused material kept",
+        ["xaela_material_dropped"] = "Xaela material removed",
 
         // Skin and face retextures
         ["not_fan_out"]            = "No longer a retexture",
@@ -79,6 +81,7 @@ internal static class DiagnosticText
         ["material_missing"]       = "Material file missing",
         ["material_texture_missing"] = "Texture not found for a target",
         ["material_unreadable"]    = "Material unreadable",
+        ["shared_paths"]           = "Shares files with another target",
 
         // Adding to a mod
         ["additive_shared_path"]         = "Shared with the original",

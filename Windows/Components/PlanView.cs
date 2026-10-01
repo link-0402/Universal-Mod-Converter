@@ -191,9 +191,9 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
 
         var blockers = task.Diagnostics.Count(d => d.IsBlocker);
         var notes    = task.Diagnostics.Count - blockers;
-        var title    = blockers > 0
-            ? $"{blockers} problem(s) to fix" + (notes > 0 ? $", {notes} thing(s) to check" : string.Empty)
-            : $"{notes} thing(s) to check";
+        var problems = blockers == 1 ? "1 problem to fix" : $"{blockers} problems to fix";
+        var checks   = notes == 1 ? "1 thing to check" : $"{notes} things to check";
+        var title    = blockers > 0 ? problems + (notes > 0 ? $", {checks}" : string.Empty) : checks;
         ImGui.SetNextItemOpen(true, ImGuiCond.Appearing);
         bool open;
         using (ImRaii.PushColor(ImGuiCol.Text, blockers > 0 ? Theme.Danger : Theme.Warning))

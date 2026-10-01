@@ -12,7 +12,7 @@ using Dalamud.Interface.Utility.Raii;
 namespace UniversalModConverter.Windows.Components;
 
 /// <summary>
-/// The conversion plan: what Preview and Apply work on, each entry shown as source icon →
+/// The conversion plan: what the Plan tab previews and Apply converts, each entry shown as source icon →
 /// target icon with its switch and remove button. Nothing converts until it is in here, so
 /// even a single conversion is confirmed by adding it, and the cards above only ever choose
 /// what to add next.
