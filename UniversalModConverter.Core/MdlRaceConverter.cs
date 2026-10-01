@@ -130,18 +130,21 @@ public static class MdlRaceConverter
         var values = new HashSet<(int Mesh, int Vertex)>();
         foreach (var shapeMesh in model.ShapeMeshes)
         {
-            var meshIndex = -1;
-            for (var i = 0; i < model.Meshes.Length; i++)
-                if (model.Meshes[i].StartIndex == shapeMesh.MeshIndexOffset) { meshIndex = i; break; }
-            if (meshIndex < 0 || (ulong)shapeMesh.ShapeValueOffset + shapeMesh.ShapeValueCount > (ulong)model.ShapeValues.Length)
+            // Meshes with nothing in them share the start index of the next real one, and a LOD's
+            // shape meshes can share one with another LOD's. The shape belongs to the mesh at that
+            // start that holds the vertices it replaces; this only fills in a statistic, so a shape
+            // that fits none is counted against the largest rather than refused.
+            var candidates = Enumerable.Range(0, model.Meshes.Length)
+                .Where(i => model.Meshes[i].StartIndex == shapeMesh.MeshIndexOffset).ToList();
+            if (candidates.Count == 0 || (ulong)shapeMesh.ShapeValueOffset + shapeMesh.ShapeValueCount > (ulong)model.ShapeValues.Length)
                 throw new MdlConversionException("malformed_shape_data", "A shape mesh references invalid values or mesh data.");
+            var replaced = new List<uint>((int)shapeMesh.ShapeValueCount);
             for (var i = 0u; i < shapeMesh.ShapeValueCount; i++)
-            {
-                var value = model.ShapeValues[checked((int)(shapeMesh.ShapeValueOffset + i))];
-                if (value.ReplacementVertexIndex >= model.Meshes[meshIndex].VertexCount)
-                    throw new MdlConversionException("malformed_shape_data", "A shape replacement vertex is outside its mesh.");
-                values.Add((meshIndex, value.ReplacementVertexIndex));
-            }
+                replaced.Add(model.ShapeValues[checked((int)(shapeMesh.ShapeValueOffset + i))].ReplacementVertexIndex);
+            var highest = replaced.Count == 0 ? 0u : replaced.Max();
+            var meshIndex = candidates.FirstOrDefault(i => model.Meshes[i].VertexCount > highest,
+                candidates.OrderByDescending(i => model.Meshes[i].VertexCount).First());
+            foreach (var vertex in replaced) values.Add((meshIndex, (int)vertex));
         }
         return values.Count;
     }

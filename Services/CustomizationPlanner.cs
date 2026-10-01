@@ -54,7 +54,15 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         var resources = ReadResources(root);
         var keys = new KeyRules(source, target, resources);
         var references = new References();
-        var assets = DiscoverAssets(root, resources.Files, CustomizationPaths.MovedRoots(source, target), references);
+        // The index keeps one file per game path, the last option's; every option's file is converted.
+        var optionFiles = new List<(string GamePath, string Local)>();
+        foreach (var container in mod.Containers)
+        foreach (var (key, local) in container.FileEntries())
+        {
+            try { optionFiles.Add((Normalize(key), PathSafety.ResolveRelative(root, GamePath.ToLocal(local)))); }
+            catch (InvalidDataException) { /* a path outside the mod folder is no file of the mod's */ }
+        }
+        var assets = DiscoverAssets(root, resources.Files, optionFiles, CustomizationPaths.MovedRoots(source, target), references);
         if (assets.Count == 0)
             throw new InvalidDataException($"No {descriptor.DisplayName.ToLowerInvariant()} root matched " +
                                            $"c{sourceRace:D4}/{descriptor.Token(oldId)}.");
@@ -257,13 +265,17 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
     /// <param name="sources">The roots the conversion moves (see <see cref="CustomizationPaths.MovedRoots"/>).</param>
     private static HashSet<string> DiscoverAssets(string root,
-        IReadOnlyDictionary<string, string> mappings, IReadOnlyList<CustomizationPathEndpoint> sources, References references)
+        IReadOnlyDictionary<string, string> mappings, IReadOnlyList<(string GamePath, string Local)> optionFiles,
+        IReadOnlyList<CustomizationPathEndpoint> sources, References references)
     {
         var assets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var queue = new Queue<string>();
 
         foreach (var (gamePath, localPath) in mappings)
             if (Moves(gamePath)) Add(localPath);
+        // Another option may redirect the same game path to a file of its own.
+        foreach (var (gamePath, localPath) in optionFiles)
+            if (Moves(gamePath) && File.Exists(localPath)) Add(localPath);
 
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
         {

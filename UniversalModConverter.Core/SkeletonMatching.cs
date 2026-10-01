@@ -201,10 +201,15 @@ public static class SkeletonMatcher
         return result.ToImmutable();
     }
 
-    /// <summary>Whether a bone belongs to a standard: the game's own bones, then IVCS's iv_ bones, then YAS's ya_ bones.</summary>
+    /// <summary>
+    /// Whether a bone belongs to a standard: the game's own bones, then IVCS's iv_ bones and the
+    /// tail bones (n_sippo_) it gives every race, then YAS's ya_ bones. Seven races have no tail
+    /// in the game's skeleton (Highlander, female Roegadyn, Lalafell, Viera); IVCS adds one.
+    /// </summary>
     public static bool InStandard(string name, SkeletonStandard standard, IReadOnlySet<string> vanilla)
         => vanilla.Contains(name) ||
-           standard >= SkeletonStandard.Ivcs && name.StartsWith("iv_", StringComparison.Ordinal) ||
+           standard >= SkeletonStandard.Ivcs && (name.StartsWith("iv_", StringComparison.Ordinal) ||
+                                                  name.StartsWith("n_sippo_", StringComparison.Ordinal)) ||
            standard == SkeletonStandard.IvcsYas && name.StartsWith("ya_", StringComparison.Ordinal);
 
     /// <summary>

@@ -100,6 +100,8 @@ public sealed class ConversionHistoryService(Configuration configuration)
         var name     = Path.GetFileName(published);
         var parked   = Path.Combine(ModConverterService.BackupRoot(parent, configuration.BackupDirectory),
             BackupRetention.FolderName($"{name}-reverted", DateTime.UtcNow, Guid.NewGuid().ToString("N")));
+        if (!ModConverterService.SameVolume(parked, parent))
+            return new RevertResult(false, ModConverterService.BackupOnOtherDrive(Path.GetDirectoryName(parked)!), null, null);
         var moved    = false;
         try
         {

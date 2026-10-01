@@ -165,6 +165,15 @@ internal static class SkeletonMatchingTests
         Assert.True(!SkeletonMatcher.IsStandardLayout(Skeleton("s", Big), game, SkeletonStandard.IvcsYas), "other groups are no standard");
         string[] shuffled = ["n_root", "j_sebo_a", "j_kosi", "j_kubi", "iv_a", "n_hara_noanim_trans"];
         Assert.True(!SkeletonMatcher.IsStandardLayout(Skeleton("s", shuffled), game, SkeletonStandard.Ivcs), "game bones moved to other indices");
+
+        // Seven races have no tail in the game's skeleton; IVCS and YAS add its bones to them.
+        string[] tailedIvcs = [.. Game[..4], "iv_a", "iv_b", "n_sippo_a", "n_sippo_b", "n_hara_noanim_trans"];
+        string[] tailedYas = [.. Game[..4], "iv_a", "n_sippo_a", "n_sippo_b", "ya_a"];
+        Assert.True(SkeletonMatcher.IsStandardLayout(Skeleton("s", tailedIvcs), game, SkeletonStandard.Ivcs), "IVCS adds the tail bones the game lacks");
+        Assert.True(SkeletonMatcher.IsStandardLayout(Skeleton("s", tailedYas), game, SkeletonStandard.IvcsYas), "so does IVCS + YAS");
+        Assert.True(!SkeletonMatcher.IsStandardLayout(Skeleton("s", tailedIvcs), game, SkeletonStandard.Vanilla), "the game's own layout has no tail here");
+        string[] tailOnly = [.. Game[..4], "n_sippo_a", "n_hara_noanim_trans"];
+        Assert.True(!SkeletonMatcher.IsStandardLayout(Skeleton("s", tailOnly), game, SkeletonStandard.Ivcs), "a tail alone is no IVCS");
     }
 
     private static void TargetSmallestStandard()

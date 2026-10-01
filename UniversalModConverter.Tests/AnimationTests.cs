@@ -25,6 +25,7 @@ internal static class AnimationTests
         ("An expression where the idle is gets a group that switches it for every race", IdleExpressionAtSource),
         ("Swapped files follow game-path layouts and reuse unchanged files", SwapLocalNames),
         ("A swap writes nothing for a race without the destination of its own", SwapSkipsRaceWithoutFile),
+        ("A swap that would write nothing is refused instead of removing the mod's animation", SwapWritingNothingIsRefused),
         ("Swap pairs the animation the action timeline plays", SwapFromDefaultIdle),
         ("An animation with no counterpart is explained in plain words", UnpairedIsExplained),
         ("A facial expression swaps to another, with its timeline in every option", FaceSwap),
@@ -990,6 +991,26 @@ internal static class AnimationTests
             "explained for each slot");
         Assert.Equal(new[] { Idle0, Loop5 }.Order().ToArray(),
             several.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
+    }
+
+    private static void SwapWritingNothingIsRefused()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"loop.pap"}}""");
+        mod.File("loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        // The game has no idle 5 files, so no race has anything to convert to.
+        var game = Game();
+        game.Files.Remove(Loop5);
+        game.Files.Remove(Start5);
+        var request = SlotRequest(ConversionOutputMode.InPlace, ("Standing idle 5", Loop5, Start5));
+
+        // Converting in place would delete the mod's only idle and write none: refused.
+        var plan = Planner(game).Plan(mod.Path, request);
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "nothing_written" && d.IsBlocker), "the empty swap is a blocker");
+
+        // Keeping the original loses nothing, so the plan stands (with its warning).
+        var kept = Planner(game).Plan(mod.Path, request with { KeepOriginal = true });
+        Assert.True(!kept.Diagnostics.Any(d => d.Code == "nothing_written"), "nothing is removed, so nothing is refused");
     }
 
     private static void SwapFromDefaultIdle()

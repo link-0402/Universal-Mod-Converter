@@ -167,7 +167,7 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
             var entries = CollectEntries();
             foreach (var target in targets)
                 _targetKeys[target] = entries
-                    .Select(e => GamePath.Normalize(CustomizationPaths.Rewrite(e.Key, _source, target)))
+                    .Select(e => GamePath.Normalize(Retarget(e.Key, target)))
                     .ToHashSet(StringComparer.Ordinal);
 
             if (_request.Layout == TextureFanOutLayout.AddPathsToOptions) AddPaths(entries, targets);
@@ -199,8 +199,32 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
             }
             if (targets.Count == 0 && !_plan.HasBlockers)
                 Block("no_targets", "Tick at least one race or face to add the paths for.");
-            return targets.OrderBy(t => t.GenderRace).ThenBy(t => t.Kind).ThenBy(t => t.ModelId).ToList();
+            var ordered = targets.OrderBy(t => t.GenderRace).ThenBy(t => t.Kind).ThenBy(t => t.ModelId).ToList();
+
+            // Hair and Hrothgar tails load their files from a shared root, so a target that loads from
+            // the source's own root, or from the same root as another target, is already served.
+            var settled = new HashSet<CustomizationPathEndpoint> { _source };
+            var distinct = new List<CustomizationPathEndpoint>();
+            foreach (var target in ordered)
+            {
+                var root = PathsOf(target);
+                if (settled.Add(root)) distinct.Add(target);
+                else
+                    Warn("shared_paths", $"{Describe(target)} loads the same files as another root of this run " +
+                                         $"({Describe(root)}), so nothing is added for it.");
+            }
+            return distinct;
         }
+
+        /// <summary>The root whose files <paramref name="target"/> loads: its own, or the shared one hair and Hrothgar tails use.</summary>
+        private static CustomizationPathEndpoint PathsOf(CustomizationPathEndpoint target) => CustomizationPaths.GetMaterialEndpoint(target);
+
+        /// <summary><paramref name="value"/> moved from the source's root to the root <paramref name="target"/> loads its files from.</summary>
+        private string Retarget(string value, CustomizationPathEndpoint target)
+            => CustomizationPaths.Rewrite(value, _source, PathsOf(target));
+
+        private static string Describe(CustomizationPathEndpoint endpoint)
+            => $"{RaceNames.Name(endpoint.GenderRace)} {CustomizationKinds.Get(endpoint.Kind).DisplayName.ToLowerInvariant()} {endpoint.ModelId}";
 
         /// <summary>
         /// Every redirect under the source's roots (an Au Ra tail's Xaela material root too),
@@ -231,7 +255,7 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                 var dictionary = entry.IsSwap ? container.GetOrCreateFileSwaps() : container.GetOrCreateFiles();
                 foreach (var target in targets)
                 {
-                    var key = CustomizationPaths.Rewrite(entry.Key, _source, target);
+                    var key = Retarget(entry.Key, target);
                     if (string.Equals(key, entry.Key, StringComparison.Ordinal)) continue;
                     if (Kept(key, target) || Holds(dictionary, key)) continue;
                     Add(dictionary, entry, target, key, container.Label, "Game path");
@@ -369,7 +393,7 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
             foreach (var entry in entries)
             foreach (var target in targets)
             {
-                var key = CustomizationPaths.Rewrite(entry.Key, _source, target);
+                var key = Retarget(entry.Key, target);
                 var dictionary = entry.IsSwap ? swaps : files;
                 if (string.Equals(key, entry.Key, StringComparison.Ordinal) || Kept(key, target) || Holds(dictionary, key))
                     continue;
@@ -433,7 +457,7 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                     var replacements = new Dictionary<string, string>(StringComparer.Ordinal);
                     foreach (var texture in MtrlFile.ReadTexturePaths(bytes))
                     {
-                        var moved = CustomizationPaths.Rewrite(texture, _source, target);
+                        var moved = Retarget(texture, target);
                         if (string.Equals(moved, texture, StringComparison.Ordinal) || replacements.ContainsKey(texture)) continue;
                         var normalized = GamePath.Normalize(moved);
                         if (_targetKeys[target].Contains(normalized) || _owner._game.FileExists(normalized))
@@ -446,7 +470,7 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                     if (replacements.Count > 0)
                     {
                         var content = MtrlFile.RewritePaths(bytes, replacements);
-                        var destination = _locals.Reserve(GamePath.Normalize(CustomizationPaths.Rewrite(entry.Key, _source, target)), null);
+                        var destination = _locals.Reserve(GamePath.Normalize(Retarget(entry.Key, target)), null);
                         _plan.Files.Add(new PlannedFileOperation(LocalFileOperation.Write, GamePath.ToLocal(entry.Value), destination,
                             content, $"texture paths moved to {RaceNames.Name(target.GenderRace)}"));
                         result = destination;
