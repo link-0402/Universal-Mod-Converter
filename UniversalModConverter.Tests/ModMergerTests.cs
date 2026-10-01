@@ -11,7 +11,53 @@ internal static class ModMergerTests
         ("Merging modpacks: a group of each pack keeps its own IDs", DuplicateIdsAreReplaced),
         ("Merging modpacks: a renamed file never stands in for one of the same new name", RenamedFileKeepsItsSource),
         ("Merging modpacks: merged groups keep IDs every condition can find, and the top pack's options win", MergedGroupIds),
+        ("Merging modpacks: IMC options pair by name and the lower pack's others are kept", ImcOptionsPairByName),
     ];
+
+    /// <summary>
+    /// Options of an IMC group pair by name, not by position: a top pack with fewer or reordered
+    /// options must not delete the lower pack's, nor give one option another's ID, or the
+    /// lower pack's conditions end up pointing at nothing, or at the wrong option.
+    /// </summary>
+    private static void ImcOptionsPairByName()
+    {
+        using var baseMod = new TempDir();
+        using var overlay = new TempDir();
+        const string baseImc = "aaaaaaaa-0000-0000-0000-000000000001", topImc = "bbbbbbbb-0000-0000-0000-000000000001";
+        const string baseHood = "aaaaaaaa-0000-0000-0000-000000000002", baseCape = "aaaaaaaa-0000-0000-0000-000000000003";
+        const string topCape = "bbbbbbbb-0000-0000-0000-000000000002";
+        const string imc = """
+            "Identifier":{"PrimaryId":100,"SecondaryId":0,"Variant":1,"ObjectType":"Equipment","EquipSlot":"Body","BodySlot":"Unknown"},
+            "DefaultEntry":{"MaterialId":1,"DecalId":0,"VfxId":0,"MaterialAnimationId":0,"AttributeMask":0,"SoundId":0}
+            """;
+
+        baseMod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Base","Groups":[
+              {"Type":"Imc","Id":"{{{baseImc}}}","Name":"Parts",{{{imc}}},
+               "Options":[{"Id":"{{{baseHood}}}","Name":"Hood","AttributeMask":1},{"Id":"{{{baseCape}}}","Name":"Cape","AttributeMask":2}]},
+              {"Type":"Multi","Id":"aaaaaaaa-0000-0000-0000-000000000004","Name":"Extras","Options":[
+                {"Name":"Glow","Files":{},"Condition":{"Group":"{{{baseImc}}}","Options":["{{{baseHood}}}"]} } ] } ] }
+            """);
+        overlay.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Top","Groups":[
+              {"Type":"Imc","Id":"{{{topImc}}}","Name":"Parts",{{{imc.Replace("\"MaterialId\":1", "\"MaterialId\":2")}}},
+               "Options":[{"Id":"{{{topCape}}}","Name":"Cape","AttributeMask":2}]} ] }
+            """);
+
+        var result = ModMerger.Plan(baseMod.Path, overlay.Path, "Merged").Result;
+        var parts = result.Groups.Single(g => g.Name == "Parts");
+        var byName = parts.Options.ToDictionary(o => Json.GetString(o["Name"])!, o => Json.GetString(o["Id"]));
+        Assert.Equal(new[] { "Cape", "Hood" }, byName.Keys.Order().ToArray());
+        Assert.Equal(baseCape, byName["Cape"]);   // not Hood's ID, which sits first in the lower pack
+        Assert.Equal(baseHood, byName["Hood"]);   // not dropped: the lower pack's condition names it
+        Assert.Equal(2, Json.GetInt(parts.Node["DefaultEntry"]?["MaterialId"], 0));
+
+        var ids = result.Groups.SelectMany(g => g.Options.Select(o => Json.GetString(o["Id"]))).OfType<string>()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var glow = result.Groups.Single(g => g.Name == "Extras").Options.Single();
+        Assert.True(glow["Condition"]?["Options"]?.AsArray().All(x => ids.Contains(Json.GetString(x) ?? "")) == true,
+            "the lower pack's condition still finds its option");
+    }
 
     /// <summary>
     /// A merged group keeps the lower pack's IDs, which its conditions refer to, and a condition

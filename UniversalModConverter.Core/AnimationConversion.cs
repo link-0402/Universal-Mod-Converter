@@ -363,8 +363,18 @@ public sealed class AnimationConversionPlanner(
                 _races = sources.Select(p => p.Path.Race).Distinct().Count();
             }
 
+            var planned = _plan.Changes.Count;
             if (_request.StaysAtSource) PlanAtSource(sources);
             foreach (var variant in variants) PlanDestination(variant, sources);
+            // Every destination may lack a game animation of its own to convert to (a race with no
+            // file for the slot): the mod's animation would then go with nothing to take its place.
+            var removes = !Keeps || targets.Count > 0 && !SourceRaceStays;
+            if (removes && _plan.Changes.Count == planned && !_plan.HasBlockers)
+            {
+                Block("nothing_written", "Nothing would be written for the chosen destinations, yet the mod's own animation would " +
+                                         "be removed. Choose a destination or race the game has an animation for, or keep the original.");
+                return;
+            }
             if (providers.Any(p => p.Path.IsFacial)) SwapFaceTimelines(variants[0]);
 
             if (!Keeps)

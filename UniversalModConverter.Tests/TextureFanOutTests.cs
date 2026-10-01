@@ -20,7 +20,40 @@ internal static class TextureFanOutTests
         ("Tags count the textures a root's materials load", MaterialTextureTags),
         ("An unreadable material is reported once, not once per target", UnreadableMaterialOnce),
         ("A written plan lets go of the contents it carried", ReleasesContents),
+        ("Hair textures go to the shared root the game loads them from", HairSharedRoot),
     ];
+
+    /// <summary>
+    /// Hair 101-200 loads its textures from the Midlander root of the same ID. A target that
+    /// loads from the source's own root already has the textures, and one that loads from
+    /// another root gets them there, not under its own race where nothing would read them.
+    /// </summary>
+    private static void HairSharedRoot()
+    {
+        using var mod = new TempDir();
+        const string texture = "chara/human/c0201/obj/hair/h0115/texture/c0201h0115_hir_c_mask_x.tex";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Hair","DefaultData":{"Files":{"{{{texture}}}":"hair/mask.tex"} } }
+            """);
+        mod.File("hair/mask.tex", [1]);
+        var source = new CustomizationPathEndpoint(AssetKind.Hair, 201, 115);
+        CustomizationPathEndpoint Hair(ushort race, ushort id) => new(AssetKind.Hair, race, id);
+
+        // Au Ra Female hair 115 reads the same shared root: nothing to add, and the plan says why.
+        var same = new TextureFanOutPlanner(new FakeGame()).Plan(mod.Path,
+            Request(source, TextureFanOutLayout.AddPathsToOptions, false, Hair(1401, 115)));
+        Assert.True(same.Diagnostics.Any(d => d.Code == "shared_paths" && !d.IsBlocker), "the shared root is explained");
+        Assert.True(same.Diagnostics.Any(d => d.Code == "empty_plan" && d.IsBlocker), "nothing is left to add");
+        Assert.True(same.Result.Default.Files!.Count == 1, "no dead path is written under the Au Ra root");
+
+        // Another ID loads from its own shared root: the paths go there, once for both races that share it.
+        var other = new TextureFanOutPlanner(new FakeGame()).Plan(mod.Path,
+            Request(source, TextureFanOutLayout.AddPathsToOptions, false, Hair(1401, 116), Hair(801, 116)));
+        Assert.True(!other.HasBlockers, string.Join("; ", other.Diagnostics.Select(d => d.Message)));
+        var keys = other.Result.Default.Files!.Select(p => GamePath.Normalize(p.Key)).Order().ToArray();
+        Assert.Equal(new[] { texture, texture.Replace("h0115", "h0116").Replace("c0201h0116", "c0201h0116") }.Order().ToArray(), keys);
+        Assert.True(other.Diagnostics.Count(d => d.Code == "shared_paths") == 1, "the second race sharing the root is told");
+    }
 
     private static string[] Names(AssetContents contents) => contents.Tags().Select(t => t.Name()).ToArray();
 

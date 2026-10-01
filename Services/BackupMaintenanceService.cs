@@ -29,6 +29,8 @@ public sealed class BackupMaintenanceService(
     /// this session or another one, so it is left alone.
     /// </summary>
     private static readonly TimeSpan OrphanGrace = TimeSpan.FromHours(1);
+    /// <summary>How long a recovery journal is left alone, so a swap still being made is never undone under it.</summary>
+    private static readonly TimeSpan SwapGrace = TimeSpan.FromMinutes(2);
 
     public sealed record Usage(long Bytes, int Folders);
 
@@ -130,17 +132,24 @@ public sealed class BackupMaintenanceService(
         {
             try
             {
-                if (now - File.GetLastWriteTimeUtc(journal) < OrphanGrace) continue;
+                var age = now - File.GetLastWriteTimeUtc(journal);
+                if (age < SwapGrace) continue;
                 using var document = JsonDocument.Parse(File.ReadAllText(journal));
                 var root = document.RootElement;
                 var source = root.TryGetProperty("Source", out var s) ? s.GetString() : null;
                 var backup = root.TryGetProperty("Backup", out var b) ? b.GetString() : null;
 
-                if (!string.IsNullOrEmpty(source) && !Directory.Exists(source) &&
-                    !string.IsNullOrEmpty(backup) && Directory.Exists(backup))
+                // A mod folder gone with its backup still there is a swap the plugin died in the middle of,
+                // which only a swap still running could be mistaken for, and that takes seconds. Any other
+                // journal waits out the longer grace, in case its conversion is still being written.
+                var interrupted = !string.IsNullOrEmpty(source) && !Directory.Exists(source) &&
+                                  !string.IsNullOrEmpty(backup) && Directory.Exists(backup);
+                if (!interrupted && age < OrphanGrace) continue;
+
+                if (interrupted)
                 {
-                    Directory.Move(backup, source);
-                    log.Warning("[UMC] An interrupted conversion was rolled back: restored {0}.", source);
+                    Directory.Move(backup!, source!);
+                    log.Warning("[UMC] An interrupted conversion was rolled back: restored {0}.", source!);
                 }
 
                 File.Delete(journal);

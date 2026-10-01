@@ -476,16 +476,28 @@ public static class ModMerger
             var clone = (JsonObject)group.Node.DeepClone();
             if (Json.GetString(target.Node["Id"]) is { } id) clone["Id"] = id;
             var cloneOptions = (clone["Options"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
-            var targetOptions = target.Options.ToList();
+            var topOptions = group.Options.ToList();
+            // Options pair by name, as in every other group, so a reordered or missing option does
+            // not hand its ID to another one; the lower pack's options the top pack lacks are kept.
+            var unmatched = target.Options.ToList();
             for (var i = 0; i < cloneOptions.Count; i++)
             {
-                if (i < targetOptions.Count && Json.GetString(targetOptions[i]["Id"]) is { } optionId) cloneOptions[i]["Id"] = optionId;
+                if (FindOption(unmatched, cloneOptions[i]) is { } existing && Json.GetString(existing["Id"]) is { } optionId)
+                {
+                    cloneOptions[i]["Id"] = optionId;
+                    unmatched.Remove(existing);
+                    if (i < topOptions.Count) MapId(topOptions[i], existing);
+                }
                 else FreshId(cloneOptions[i]);
+            }
+            if (unmatched.Count > 0 && clone["Options"] is JsonArray options)
+            {
+                foreach (var kept in unmatched) options.Add(kept.DeepClone());
+                _notes.Add($"The '{group.Name}' IMC options only '{BaseName}' has were kept in the merged group.");
             }
             _result.Groups[target.Index] = new ModGroup(clone, target.Index);
             _appended.Add(clone);
             MapId(group.Node, target.Node);
-            foreach (var (option, existing) in group.Options.Zip(targetOptions)) MapId(option, existing);
             _conflicts.Add(new MergeConflict($"IMC attributes of '{group.Name}'", group.Name, OverlayName));
             return true;
         }

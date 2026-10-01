@@ -381,7 +381,10 @@ public sealed class ModConverterService
             var name = Path.GetFileName(sourceDir);
             var id = Guid.NewGuid().ToString("N");
             stageDir = Path.Combine(parent, $".{name}.umc-stage-{id}");
-            backupDir = Path.Combine(BackupRoot(parent, _configuration?.BackupDirectory), BackupRetention.FolderName(name, DateTime.UtcNow, id));
+            var backupRoot = BackupRoot(parent, _configuration?.BackupDirectory);
+            // The swap moves whole folders, which cannot cross drives: say so now, not after copying the mod.
+            if (!SameVolume(backupRoot, parent)) throw new InvalidOperationException(BackupOnOtherDrive(backupRoot));
+            backupDir = Path.Combine(backupRoot, BackupRetention.FolderName(name, DateTime.UtcNow, id));
             task.JournalPath = Path.Combine(parent, $".{name}.umc-recovery-{id}.json");
 
             Log($"Staging complete mod shadow: {stageDir}");
@@ -420,20 +423,36 @@ public sealed class ModConverterService
         }
         catch (Exception ex)
         {
+            task.ErrorMessage = ex.Message;
+            _log.Error(ex, "[UMC] ApplyConversion failed");
             if (sourceMoved && backupDir != null && Directory.Exists(backupDir) && !Directory.Exists(task.ModDirectory))
             {
-                Directory.Move(backupDir, task.ModDirectory);
-                task.ResultStatus = ConversionResultStatus.RolledBack;
+                try
+                {
+                    Directory.Move(backupDir, task.ModDirectory);
+                    task.ResultStatus = ConversionResultStatus.RolledBack;
+                }
+                catch (Exception rollback)
+                {
+                    // The mod folder is empty and the original is whole in the backup: say where it is.
+                    task.ResultStatus = ConversionResultStatus.Failed;
+                    task.ErrorMessage = $"{ex.Message} Putting the original back failed too ({rollback.Message}). " +
+                                        $"The original mod is safe in {backupDir}.";
+                    _log.Error(rollback, "[UMC] Rolling back ApplyConversion failed");
+                }
             }
             else
                 task.ResultStatus = ConversionResultStatus.Failed;
             if (stageDir != null && Directory.Exists(stageDir))
                 try { Directory.Delete(stageDir, true); } catch { }
-            task.ErrorMessage = ex.Message;
-            _log.Error(ex, "[UMC] ApplyConversion failed");
-            onLog?.Invoke($"Error: {ex.Message}");
+            onLog?.Invoke($"Error: {task.ErrorMessage}");
         }
     }
+
+    /// <summary>Why a backup folder on another drive than the mods cannot be used.</summary>
+    internal static string BackupOnOtherDrive(string backupFolder)
+        => $"The backup folder '{backupFolder}' is on a different drive than the mods, so nothing can be moved into it. " +
+           "Choose a folder on the same drive in Settings, or clear it to use the default.";
 
     /// <summary>
     /// Where backups are written, preferring the system temp folder so they are transient

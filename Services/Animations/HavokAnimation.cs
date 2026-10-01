@@ -614,7 +614,9 @@ internal sealed unsafe class HavokAnimation
         if (!float.IsFinite(duration) || duration < 0 || duration > 3600)
             throw new InvalidDataException("The animation's duration is invalid or exceeds one hour.");
         var intervals = Math.Max(1, sourceFrames - 1);
-        var subdivision = Math.Max(1, checked((int)Math.Ceiling(duration * 30d / intervals)));
+        // Durations are stored as floats, so a 30 fps animation's ratio is often 1.00000003: without
+        // a tolerance that ceils to 2 and the rebuilt animation has twice the frames it needs.
+        var subdivision = Math.Max(1, checked((int)Math.Ceiling(duration * 30d / intervals - 1e-3)));
         var count = checked(intervals * subdivision + 1);
         if (count > 216001) throw new InvalidDataException("The animation has too many frames.");
         return count;
