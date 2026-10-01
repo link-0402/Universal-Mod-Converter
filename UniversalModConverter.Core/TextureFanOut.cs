@@ -202,17 +202,20 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
             return targets.OrderBy(t => t.GenderRace).ThenBy(t => t.Kind).ThenBy(t => t.ModelId).ToList();
         }
 
-        /// <summary>Every redirect under the source root, wherever in the mod it lives.</summary>
+        /// <summary>
+        /// Every redirect under the source's roots (an Au Ra tail's Xaela material root too),
+        /// wherever in the mod it lives.
+        /// </summary>
         private List<Entry> CollectEntries()
         {
             var entries = new List<Entry>();
             foreach (var container in _mod.Containers)
             {
                 foreach (var (key, local) in container.FileEntries())
-                    if (CustomizationPaths.Contains(GamePath.Normalize(key), _source))
+                    if (CustomizationPaths.Owns(GamePath.Normalize(key), _source))
                         entries.Add(new Entry(container, key, local, false));
                 foreach (var (key, target) in container.SwapEntries())
-                    if (CustomizationPaths.Contains(GamePath.Normalize(key), _source))
+                    if (CustomizationPaths.Owns(GamePath.Normalize(key), _source))
                         entries.Add(new Entry(container, key, target, true));
             }
             return entries;

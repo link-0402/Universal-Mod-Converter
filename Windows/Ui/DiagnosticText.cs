@@ -30,21 +30,16 @@ internal static class DiagnosticText
         ["timeline_swap_failed"]   = "Timeline could not be swapped",
 
         // Animations: option groups
-        ["duplicate_option"]       = "Two options share a name",
-        ["empty_option"]           = "Empty option",
-        ["group_name"]             = "Group name needed",
-        ["group_in_place"]         = "Option group cannot replace",
         ["several_sources"]        = "Choose which version",
 
         // Animations: retargeting
         ["authored_race"]          = "Built for another race",
+        ["retarget_source"]        = "Made for another skeleton",
         ["inherited_by"]           = "Shared with other races",
         ["retarget_note"]          = "Retargeting note",
         ["retarget_failed"]        = "Retargeting failed",
         ["retarget_unavailable"]   = "Retargeting unavailable",
         ["no_target_race"]         = "No target race chosen",
-        ["mod_skeleton"]           = "Uses the mod's own skeleton",
-        ["missing_skeleton"]       = "Skeleton missing",
         ["skeleton_warning"]       = "Skeleton warning",
 
         // Gear and customization

@@ -52,7 +52,9 @@ public static partial class ChangedItemKeys
             "Ear"  => AssetKind.VieraEar,
             _      => AssetKind.Body,
         };
-        customization = new ChangedCustomization(kind, genderRace, ushort.Parse(match.Groups["id"].Value));
+        // Penumbra names an Au Ra tail's Xaela material root (t0103) as a tail of its own ("Tail 103").
+        var owner = CustomizationPaths.Owner(new CustomizationPathEndpoint(kind, genderRace, ushort.Parse(match.Groups["id"].Value)));
+        customization = new ChangedCustomization(kind, genderRace, owner.ModelId);
         return true;
     }
 }

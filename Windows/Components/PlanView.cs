@@ -33,7 +33,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         ("File swap", "File swaps"),
         ("Reference", "References inside models, materials and effects"),
         ("Game dependency", "Game files copied into the mod"),
-        ("Metadata", "Metadata (EQP, EQDP, IMC, EST, …)"),
+        ("Metadata", "Metadata (EQP, EQDP, IMC, EST and more)"),
         ("IMC group", "IMC option groups"),
         ("Group", "Option groups"),
     ];
@@ -75,7 +75,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         EnsureModel(task);
         var filterWidth = Math.Min(320f * Theme.Scale, ImGui.GetContentRegionAvail().X);
         ImGui.SetNextItemWidth(filterWidth);
-        ImGui.InputTextWithHint("##PlanFilter", "Filter changes…", ref _filter, 256);
+        ImGui.InputTextWithHint("##PlanFilter", "Filter changes", ref _filter, 256);
 
         Widgets.Muted($"Source fingerprint: {task.SourceFingerprint}");
         Widgets.CopyOnRightClick(task.SourceFingerprint);
@@ -95,11 +95,11 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
 
     private void DrawEmpty(ConversionTask task)
     {
-        if (session.Runner.CurrentLabel == "Planning…")
+        if (session.Runner.CurrentLabel == "Planning")
         {
             Widgets.Spinner(Theme.Accent);
             ImGui.SameLine();
-            Widgets.Muted("Planning the conversion…");
+            Widgets.Muted("Planning the conversion");
             return;
         }
 
@@ -163,7 +163,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         {
             // The preview follows the plan by itself; it only stays outdated while it cannot run.
             var waiting = session.PreviewBlockReason;
-            Widgets.Badge(waiting == null ? "Updating…" : "Outdated", Theme.Warning);
+            Widgets.Badge(waiting == null ? "Updating" : "Outdated", Theme.Warning);
             Widgets.Tooltip(waiting);
         }
 
@@ -411,6 +411,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         "numeric_id"          => "ID",
         "numeric_id_string"   => "ID",
         "path_key_copy"       => "Copy",
+        "path_key_remove"     => "Remove",
         "dependency_files"    => "Add",
         "manipulation_insert" => "Meta",
         _                     => changeType,

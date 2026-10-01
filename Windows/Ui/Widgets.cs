@@ -242,10 +242,10 @@ internal static class Widgets
             keep = (int)(keep * 0.85f);
             var head = keep / 3;
             var tail = keep - head;
-            var candidate = string.Concat(text.AsSpan(0, head), "…", text.AsSpan(text.Length - tail));
+            var candidate = string.Concat(text.AsSpan(0, head), "...", text.AsSpan(text.Length - tail));
             if (ImGui.CalcTextSize(candidate).X <= maxWidth) return candidate;
         }
-        return string.Concat("…", text.AsSpan(Math.Max(0, text.Length - 6)));
+        return string.Concat("...", text.AsSpan(Math.Max(0, text.Length - 6)));
     }
 
     /// <summary>An indeterminate spinner the height of a text line.</summary>

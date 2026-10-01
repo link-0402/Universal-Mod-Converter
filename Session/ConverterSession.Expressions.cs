@@ -27,7 +27,7 @@ public sealed record ModExpression(string Label, FacialAnimation Face, IReadOnly
 /// </summary>
 public sealed partial class ConverterSession
 {
-    /// <summary>Swap or retarget: also attach the chosen expression.</summary>
+    /// <summary>An idle, a swap or a retarget: also attach the chosen expression.</summary>
     public bool AttachExpression { get; private set; }
 
     public ExpressionSourceKind ExpressionSource { get; private set; } = ExpressionSourceKind.Vanilla;
@@ -213,7 +213,7 @@ public sealed partial class ConverterSession
         if (!WantsExpression) return null;
         return ExpressionSource switch
         {
-            ExpressionSourceKind.Vanilla when AnimationExpressions == null => "Reading the expression list…",
+            ExpressionSourceKind.Vanilla when AnimationExpressions == null => "Reading the expression list",
             ExpressionSourceKind.Vanilla when GameData.Animations.FindExpression(ExpressionEmote) == null
                 => "Choose the expression to attach.",
             ExpressionSourceKind.Mod when ExpressionModDirectory == null => "Choose the mod to take the expression from.",

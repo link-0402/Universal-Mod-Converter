@@ -153,7 +153,7 @@ public sealed class MergeSession(Plugin plugin)
         {
             if (Runner.IsBusy) return "Wait for the current operation to finish.";
             if (PlanBlockReason is { } reason) return reason;
-            if (!PlanIsCurrent) return "Planning the merge…";
+            if (!PlanIsCurrent) return "Planning the merge";
             if (PlanError != null) return PlanError;
             if (string.IsNullOrWhiteSpace(Name)) return "Enter a name for the merged mod.";
             if (OutputPath is not { } path) return "Cannot determine where to create the merged mod.";
@@ -194,7 +194,7 @@ public sealed class MergeSession(Plugin plugin)
         var version = _version;
         var (baseDir, overlayDir) = Winner == 0 ? (SecondDirectory, FirstDirectory) : (FirstDirectory, SecondDirectory);
         var name = Name;
-        _planning = Runner.TryRun("Planning the merge…", () => ModMerger.Plan(baseDir, overlayDir, name), plan =>
+        _planning = Runner.TryRun("Planning the merge", () => ModMerger.Plan(baseDir, overlayDir, name), plan =>
         {
             _planning = false;
             if (version != _version) return;
@@ -221,11 +221,11 @@ public sealed class MergeSession(Plugin plugin)
         plan.Result.Meta["Name"] = name;
         Result = null;
         Main.Log.BeginOperation(isConversion: true);
-        Main.Log.Add($"{description} into '{name}', keeping '{plan.OverlayName}' where both change the same thing…");
+        Main.Log.Add($"{description} into '{name}', keeping '{plan.OverlayName}' where both change the same thing");
 
         void Post(string message) => Runner.Post(() => Main.Log.Add(message));
 
-        Runner.TryRun("Merging…", () => plugin.Converter.PublishMerge(plan, path, Post), output =>
+        Runner.TryRun("Merging", () => plugin.Converter.PublishMerge(plan, path, Post), output =>
         {
             var task = new ConversionTask
             {

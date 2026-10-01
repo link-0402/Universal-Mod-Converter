@@ -47,7 +47,7 @@ public sealed class ModdedTargets
     // What each query answered, so a marked row does not ask Penumbra again every frame.
     private readonly Dictionary<string, string> _itemNotes = new(StringComparer.Ordinal);
     private readonly Dictionary<ChangedCustomization, string?> _customizationNotes = new();
-    private readonly Dictionary<(object Scope, object Target), string?> _paths = new();
+    private readonly Dictionary<(object Scope, object Target), IReadOnlyList<string>> _paths = new();
 
     private bool _loaded;
     private long _loadedAt;
@@ -117,26 +117,33 @@ public sealed class ModdedTargets
     /// time they are asked for.
     /// </summary>
     public string? Paths(object scope, object target, Func<IEnumerable<string>> gamePaths)
+        => PathMods(scope, target, gamePaths) is { Count: > 0 } mods ? DescribeMods(mods) : null;
+
+    /// <summary>The mods that already change any of a target's game paths, as <see cref="Paths"/> looks them up; empty for none.</summary>
+    public IReadOnlyList<string> PathMods(object scope, object target, Func<IEnumerable<string>> gamePaths)
     {
         Update();
-        if (_collection is not { } collection || collection.Id == Guid.Empty) return null;
+        if (_collection is not { } collection || collection.Id == Guid.Empty) return [];
         if (_paths.TryGetValue((scope, target), out var cached)) return cached;
 
-        string? note = null;
+        IReadOnlyList<string> mods = [];
         var paths = gamePaths().Distinct(StringComparer.Ordinal).ToArray();
         if (paths.Length > 0 && _ipc.ResolvePaths(collection.Id, paths) is { } resolved)
-        {
             // Unchanged paths come back as they were asked for.
-            var mods = paths.Zip(resolved)
+            mods = paths.Zip(resolved)
                 .Where(p => !string.Equals(p.First, p.Second, StringComparison.OrdinalIgnoreCase))
                 .Select(p => ModBehind(p.Second))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
-            if (mods.Count > 0) note = Describe(collection.Name, mods);
-        }
-        _paths[(scope, target)] = note;
-        return note;
+        return _paths[(scope, target)] = mods;
     }
+
+    /// <summary>
+    /// Names <paramref name="mods"/> (from <see cref="PathMods"/>) as changing something in the
+    /// collection. <paramref name="what"/> starts the sentence, e.g. "Its loop is already".
+    /// </summary>
+    public string DescribeMods(IReadOnlyList<string> mods, string what = "Already")
+        => Describe(_collection?.Name ?? string.Empty, mods, what);
 
     private void Update()
     {
@@ -195,8 +202,8 @@ public sealed class ModdedTargets
         return mods.Count == 0 ? $"Already changed by a mod in the collection '{name}'." : Describe(name, mods);
     }
 
-    private static string Describe(string collection, IReadOnlyList<string> mods)
-        => $"Already changed in the collection '{collection}' by:\n{string.Join("\n", mods.Select(m => $"• {m}"))}";
+    private static string Describe(string collection, IReadOnlyList<string> mods, string what = "Already")
+        => $"{what} changed in the collection '{collection}' by:\n{string.Join("\n", mods.Select(m => $"• {m}"))}";
 
     /// <summary>The mod a resolved path belongs to, by the folder it lies in under Penumbra's mod root.</summary>
     private string ModBehind(string resolved)

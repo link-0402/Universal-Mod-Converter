@@ -34,7 +34,7 @@ internal sealed class LogView(LogStore log)
             ImGui.Checkbox("Errors", ref _showErrors);
         ImGui.SameLine();
         ImGui.SetNextItemWidth(160f * Theme.Scale);
-        ImGui.InputTextWithHint("##LogFilter", "Search…", ref _filter, 128);
+        ImGui.InputTextWithHint("##LogFilter", "Search", ref _filter, 128);
         ImGui.SameLine();
         ImGui.Checkbox("Follow", ref _autoScroll);
         Widgets.Tooltip("Keep the newest entry in view.");

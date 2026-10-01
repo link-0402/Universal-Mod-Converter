@@ -34,7 +34,7 @@ public enum PlanContents
     AnimationSwap = 4,
     AnimationRetarget = 8,
 
-    /// <summary>"Only add an expression".</summary>
+    /// <summary>An expression attached where the animation is: "Only add an expression", or an idle kept in its slot.</summary>
     AnimationExpression = 16,
 
     Animation = AnimationSwap | AnimationRetarget | AnimationExpression,
@@ -244,7 +244,6 @@ public sealed partial class ConverterSession
         ? TextureAsNewMod ? ConversionOutputMode.NewMod : ConversionOutputMode.AddToMod
         // A preferred mode the plan cannot use waits rather than being overwritten by the
         // fallback: it applies again as soon as the plan can use it.
-        : OutputMode == ConversionOutputMode.InPlace && InPlaceBlockReason != null ? ConversionOutputMode.AddToMod
         : OutputMode == ConversionOutputMode.AddToMod && AddToModBlockReason != null ? ConversionOutputMode.NewMod
         : OutputMode;
 
@@ -411,7 +410,7 @@ public sealed partial class ConverterSession
             if (CustomizationTargets.BlockReason(source.Kind, source.GenderRace ?? 0, TargetCustomizationKind, TargetRace) is { } blocked)
                 return blocked;
             var options = GameData.TryGetCustomizationOptions(TargetCustomizationKind, TargetRace);
-            if (options == null) return "Loading the options players can choose…";
+            if (options == null) return "Loading the options players can choose";
             if (options.Count > 0 && options.All(o => o.Id != TargetCustomizationId))
                 return $"{GameDataService.OptionLabel(TargetCustomizationKind, (ushort)TargetCustomizationId)} is not available to {RaceLabel(TargetRace)} players.";
             return null;
@@ -424,7 +423,7 @@ public sealed partial class ConverterSession
         get
         {
             if (PreviewBlockReason is { } reason) return reason;
-            if (!Task.IsPlanned || !PlanIsCurrent) return "Updating the preview…";
+            if (!Task.IsPlanned || !PlanIsCurrent) return "Updating the preview";
             if (Task.HasBlockers) return "The plan has blockers. Resolve them first.";
             if (Task.IsApplied) return "This plan was already applied.";
             if (_queue.Count > 0 && _queue.All(e => !e.Enabled)) return "Enable at least one conversion in the plan.";
@@ -479,7 +478,7 @@ public sealed partial class ConverterSession
     {
         _scanPending = false;
         var directory = ModDirectory;
-        Runner.TryRun("Scanning mod…", () =>
+        Runner.TryRun("Scanning mod", () =>
         {
             var (ok, error) = _plugin.Converter.ValidateModDirectory(directory);
             if (!ok) return (Error: error, Items: new List<DetectedItem>());
@@ -693,19 +692,14 @@ public sealed partial class ConverterSession
     /// </summary>
     public PlanContents OutputContents
         => _queue.Count > 0
-            ? RunEntries.Aggregate(PlanContents.None, (all, e) => all | ContentsOf(e.Kind, e.Task.AnimationRequest?.Operation))
+            ? RunEntries.Aggregate(PlanContents.None, (all, e) => all | ContentsOf(e.Kind, e.Task.AnimationRequest))
             : Source is { } source
-                ? ContentsOf(source.Kind, AnimationOperation)
+                ? source.Animation is { } animation ? SelectionContents(animation) : ContentsOf(source.Kind, null)
                 : PlanContents.None;
 
-    private static PlanContents ContentsOf(AssetKind kind, AnimationOperation? operation) => kind switch
+    private static PlanContents ContentsOf(AssetKind kind, AnimationConversionRequest? request) => kind switch
     {
-        AssetKind.Animation => operation switch
-        {
-            AnimationOperation.Retarget   => PlanContents.AnimationRetarget,
-            AnimationOperation.Expression => PlanContents.AnimationExpression,
-            _                             => PlanContents.AnimationSwap,
-        },
+        AssetKind.Animation => AnimationContents(request),
         _ when CustomizationKinds.IsCustomization(kind) => PlanContents.Customization,
         _ => PlanContents.Gear,
     };
@@ -727,17 +721,9 @@ public sealed partial class ConverterSession
         }
     }
 
-    /// <summary>
-    /// Why the plan cannot be converted in place, or null: a slot group for an animation is added
-    /// beside what the mod already has, into this mod or a new one.
-    /// </summary>
-    public string? InPlaceBlockReason
-        => AnimationGroupOutput is { } group ? OutputModeRules.GroupInPlace(group) : null;
-
     public void SetOutputMode(ConversionOutputMode mode)
     {
         if (mode == ConversionOutputMode.AddToMod && AddToModBlockReason != null) return;
-        if (mode == ConversionOutputMode.InPlace && InPlaceBlockReason != null) return;
         if (mode == OutputMode) return;
         OutputMode = mode;
         Config.OutputMode = mode;
@@ -899,7 +885,7 @@ public sealed partial class ConverterSession
         if (_keepResultThroughPreview) _keepResultThroughPreview = false;
         else Result = null;
 
-        Runner.TryRun("Planning…", () =>
+        Runner.TryRun("Planning", () =>
         {
             _plugin.Converter.PlanConversion(task);
             return task;
@@ -1158,14 +1144,14 @@ public sealed partial class ConverterSession
         var description = enabledEntries.Count == 1 ? enabledEntries[0].Description : DescribeQueue();
         Result = null;
         Log.BeginOperation(isConversion: true);
-        Log.Add($"Converting {description} ({OutputModeLabel(mode, newModName)})…");
+        Log.Add($"Converting {description} ({OutputModeLabel(mode, newModName)})");
         if (task.MeshRemovals.Count > 0)
             Log.Add($"Removing {task.MeshRemovals.Values.Sum(r => r.Groups.Length)} mesh group(s) and " +
                     $"{task.MeshRemovals.Values.Sum(r => r.PartsOrEmpty.Length)} single part(s) from {task.MeshRemovals.Count} model(s).");
 
         void Post(string message) => Runner.Post(() => Log.Add(message));
 
-        Runner.TryRun("Converting…", () =>
+        Runner.TryRun("Converting", () =>
         {
             string? outputDir;
             if (isNewMod)
@@ -1177,7 +1163,7 @@ public sealed partial class ConverterSession
             }
 
             if (outputDir == null) return (Output: (string?)null, Issues: new List<LeftoverHit>());
-            Post("Verifying the converted item…");
+            Post("Verifying the converted item");
             return (Output: outputDir, Issues: _plugin.Converter.VerifyConversion(task, isNewMod ? outputDir : null));
         }, result =>
         {
@@ -1365,9 +1351,9 @@ public sealed partial class ConverterSession
         }
 
         Log.BeginOperation(isConversion: false);
-        Log.Add($"Reverting {record.Description}…");
+        Log.Add($"Reverting {record.Description}");
         Result = null;
-        Runner.TryRun("Reverting…", () => History.Revert(record, msg => Runner.Post(() => Log.Add(msg))), result =>
+        Runner.TryRun("Reverting", () => History.Revert(record, msg => Runner.Post(() => Log.Add(msg))), result =>
         {
             History.MarkReverted(record, result);
             _plugin.RunBackupMaintenance();

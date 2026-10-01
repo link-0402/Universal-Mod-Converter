@@ -42,7 +42,7 @@ public sealed partial class ConverterSession
                 return $"{CustomizationKinds.Get(source.Kind).DisplayName} conversions have to run on their own. " +
                        "Clear the plan first.";
             // Choosing the version here would add the same expression a second time, overlapping the first.
-            if (source.Animation is { } animation && AnimationOperation == AnimationOperation.Expression &&
+            if (source.Animation is { } animation && ExpressionAtSource(animation) &&
                 _queue.Any(e => NeedsSourceChoice(e) && e.Task.AnimationRequest!.SourceLocations.SequenceEqual(animation.Locations)))
                 return "This expression is already in the plan without a version chosen; choose it there, under \"Take it from\".";
             var description = Describe(source);
@@ -53,13 +53,14 @@ public sealed partial class ConverterSession
     }
 
     /// <summary>
-    /// Whether a queued "Only add an expression" still needs the version its option group uses:
-    /// it is added to this mod, several options have their own version of the animation, and none
-    /// was chosen when it was added to the plan (it was then going into a new mod or in place).
+    /// Whether a queued expression, attached where the animation is, still needs the version its
+    /// option group uses: it is added to this mod, several options have their own version of the
+    /// animation, and none was chosen when it was added to the plan (it was then going into a new
+    /// mod or in place).
     /// </summary>
     public bool NeedsSourceChoice(QueuedConversion entry)
         => entry.SourceChoices.Length > 1 && EffectiveOutputMode == ConversionOutputMode.AddToMod &&
-           entry.Task.AnimationRequest is { Operation: AnimationOperation.Expression, SourceContainer: null };
+           entry.Task.AnimationRequest is { ExpressionAtSource: true, SourceContainer: null };
 
     /// <summary>Chooses the version a queued expression's option group uses; see <see cref="NeedsSourceChoice"/>.</summary>
     public void ChooseQueueEntrySource(Guid id, AnimationProvider provider)
@@ -92,8 +93,7 @@ public sealed partial class ConverterSession
             Target        = TargetSide(source),
             Task          = task,
             // The output mode may still change to one that puts the expression into an option group.
-            SourceChoices = source.Animation is { HasVariants: true } animation &&
-                            AnimationOperation == AnimationOperation.Expression
+            SourceChoices = source.Animation is { HasVariants: true } animation && ExpressionAtSource(animation)
                 ? animation.Providers
                 : [],
         });
@@ -152,12 +152,7 @@ public sealed partial class ConverterSession
             {
                 Kind   = AssetKind.Animation,
                 Name   = AnimationNameLabel(animation),
-                Detail = AnimationOperation switch
-                {
-                    AnimationOperation.Retarget   => "Race retarget",
-                    AnimationOperation.Expression => "Expression added",
-                    _                             => "Animation swap",
-                } + (AttachExpression && AnimationOperation != AnimationOperation.Expression ? " + expression" : ""),
+                Detail = AnimationTargetDetail(animation),
             };
         if (source.IsCustomization)
             return source.CanFanOut

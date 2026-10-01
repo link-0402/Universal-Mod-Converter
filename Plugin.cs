@@ -56,7 +56,8 @@ public sealed class Plugin : IDalamudPlugin
         PenumbraIpc = new PenumbraIpcService(PluginInterface, Log);
         GameData    = new GameDataService(DataManager, Log);
         Converter   = new ModConverterService(Log, GameData, Framework,
-            new HavokAnimationRetargeter(new HavokAnimation(SigScanner), Framework), Configuration);
+            new HavokAnimationRetargeter(new HavokAnimation(SigScanner), new SkeletonLibrary(PenumbraIpc, GameData, Framework, Log),
+                Framework), Configuration);
         History     = new ConversionHistoryService(Configuration);
         BackupMaintenance = new BackupMaintenanceService(Configuration, History, Log);
         Session     = new ConverterSession(this);

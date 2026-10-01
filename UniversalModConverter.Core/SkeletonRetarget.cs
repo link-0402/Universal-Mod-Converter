@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using System.Numerics;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace UniversalModConverter.Core;
 
@@ -52,6 +54,33 @@ public sealed record SkeletonDescription(string Name, ImmutableArray<SkeletonBon
         for (var i = 0; i < Bones.Length; i++)
             if (Bones[i].Name == bone) return i;
         return -1;
+    }
+
+    /// <summary>A content hash of everything an animation depends on, so files holding the same skeleton are known to.</summary>
+    public string Fingerprint()
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        void Text(string value) => hash.AppendData(Encoding.UTF8.GetBytes(value + "\0"));
+        void Number(float value) => hash.AppendData(BitConverter.GetBytes(value));
+        Text(Name);
+        foreach (var bone in Bones)
+        {
+            Text(bone.Name);
+            hash.AppendData(BitConverter.GetBytes(bone.Parent));
+            var r = bone.Reference;
+            foreach (var value in new[] { r.Position.X, r.Position.Y, r.Position.Z, r.Rotation.X, r.Rotation.Y, r.Rotation.Z,
+                         r.Rotation.W, r.Scale.X, r.Scale.Y, r.Scale.Z })
+                Number(value);
+        }
+        foreach (var name in FloatNames) Text(name);
+        foreach (var value in ReferenceFloats) Number(value);
+        foreach (var partition in Partitions)
+        {
+            Text(partition.Name);
+            hash.AppendData(BitConverter.GetBytes(partition.Start));
+            hash.AppendData(BitConverter.GetBytes(partition.Count));
+        }
+        return Convert.ToHexString(hash.GetHashAndReset());
     }
 }
 

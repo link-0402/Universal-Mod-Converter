@@ -33,8 +33,9 @@ public sealed class ModConverterService
     private readonly Configuration?       _configuration;
     private readonly CustomizationPlanner _customizationPlanner;
     private readonly IAnimationRetargeter? _retargeter;
-    private HumanPbd? _pbd;
-    private bool _pbdLoaded;
+
+    /// <summary>The game's race tree, read once whichever thread asks first: planning and the window both do.</summary>
+    private readonly Lazy<HumanPbd?> _pbd;
 
     public ModConverterService(IPluginLog log, GameDataService? gameData = null, IFramework? framework = null,
         IAnimationRetargeter? retargeter = null, Configuration? configuration = null)
@@ -44,6 +45,7 @@ public sealed class ModConverterService
         _retargeter    = retargeter;
         _configuration = configuration;
         _gameFiles     = (IGameFileProvider?)gameData ?? NoGameFiles.Instance;
+        _pbd           = new Lazy<HumanPbd?>(ReadRaceTree);
         var skeletons = gameData == null || framework == null
             ? null
             : new SkeletonHierarchyService(gameData, new HavokSkeletonHierarchyReader(framework), log);
@@ -230,8 +232,8 @@ public sealed class ModConverterService
 
     /// <summary>
     /// The request for the output mode chosen at preview time; a plan entry is made before the
-    /// mode may change. Adding to the mod always keeps the source slot, keeping it when converting
-    /// in place is the user's choice, and a new mod holds the moved animation alone.
+    /// mode may change. Adding to the mod always keeps the animation where it is, converting in
+    /// place keeps it there when asked to, and a new mod holds only what the conversion writes.
     /// </summary>
     private static AnimationConversionRequest ForMode(AnimationConversionRequest request, ConversionOutputMode mode)
         => request with
@@ -308,21 +310,19 @@ public sealed class ModConverterService
     }
 
     /// <summary>The skeleton parent of a race in the game's race tree (human.pbd).</summary>
-    private ushort? ParentRace(ushort race)
+    public ushort? ParentRace(ushort race) => _pbd.Value?.GetParentRace(race);
+
+    private HumanPbd? ReadRaceTree()
     {
-        if (!_pbdLoaded)
+        try
         {
-            _pbdLoaded = true;
-            try
-            {
-                if (_gameData?.GetHumanPbdBytes() is { } bytes) _pbd = new HumanPbd(bytes);
-            }
-            catch (Exception ex)
-            {
-                _log.Warning(ex, "[UMC] The race tree could not be read; animations will not inherit between races.");
-            }
+            if (_gameData?.GetHumanPbdBytes() is { } bytes) return new HumanPbd(bytes);
         }
-        return _pbd?.GetParentRace(race);
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "[UMC] The race tree could not be read; animations will not inherit between races.");
+        }
+        return null;
     }
 
     public static GearConversionRequest BuildGearRequest(ConversionTask task)
@@ -384,16 +384,14 @@ public sealed class ModConverterService
             Log($"Staging complete mod shadow: {stageDir}");
             CopyDirectory(sourceDir, stageDir);
             if (task.FilePlan is { } plan)
-            {
                 GearConversionExecutor.ApplyInPlace(plan, stageDir, Log);
-                // Only gear has models to take parts out of; for anything else there are no removals.
-                GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
-            }
             else
             {
                 var stagedTask = RemapTask(task, stageDir);
                 ApplyConversionCore(stagedTask, Log);
             }
+            // Gear and customization models can lose parts; anything else has no removals.
+            GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
             ValidateModDefinition(stageDir);
 
             File.WriteAllText(task.JournalPath, JsonSerializer.Serialize(new
@@ -608,10 +606,7 @@ public sealed class ModConverterService
                 UpdateMetaJsonName(stageDir, modDisplayName, Log);
             }
             else if (task.FilePlan is { } plan)
-            {
                 GearConversionExecutor.WriteNewMod(plan, task.ModDirectory, stageDir, modDisplayName, Log);
-                GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
-            }
             else
             {
                 CopyDirectory(task.ModDirectory, stageDir);
@@ -619,6 +614,8 @@ public sealed class ModConverterService
                 ApplyConversionCore(stagedTask, Log);
                 UpdateMetaJsonName(stageDir, modDisplayName, Log);
             }
+            // The copy of a customization's mod keeps its layout, so its models are where the plan says.
+            GearOutputModels.ApplyRemovals(stageDir, task.MeshRemovals, Log);
 
             ValidateModDefinition(stageDir);
             Directory.Move(stageDir, finalDir);
@@ -857,17 +854,31 @@ public sealed class ModConverterService
         };
     }
 
+    /// <summary>
+    /// The roots a customization conversion moves away (an Au Ra tail's Xaela material root too,
+    /// when the target has one), or none when the task does not name its source.
+    /// </summary>
+    private static IReadOnlyList<CustomizationPathEndpoint> MovedCustomizationRoots(ConversionTask task)
+    {
+        if (task.SourceGenderRace is not { } race ||
+            !ushort.TryParse(task.OldIdPadded, out var modelId)) return [];
+        var source = new CustomizationPathEndpoint(task.Kind, race, modelId);
+        if (task.TargetGenderRace is not { } targetRace || !ushort.TryParse(task.NewIdPadded, out var targetId))
+            return [source];
+        return CustomizationPaths.MovedRoots(source,
+            new CustomizationPathEndpoint(task.TargetCustomizationKind ?? task.Kind, targetRace, targetId));
+    }
+
     private static List<LeftoverHit> VerifyCustomizationConversion(
         ConversionTask task, List<LeftoverHit> hits)
     {
-        if (task.SourceGenderRace is not { } race ||
-            !ushort.TryParse(task.OldIdPadded, out var modelId)) return hits;
-        var source = new CustomizationPathEndpoint(task.Kind, race, modelId);
+        var moved = MovedCustomizationRoots(task);
+        if (moved.Count == 0) return hits;
         var flagged = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var entry in Directory.EnumerateFileSystemEntries(task.ModDirectory, "*", SearchOption.AllDirectories))
         {
-            if (!CustomizationPaths.Contains(entry, source)) continue;
+            if (!Moved(entry)) continue;
             flagged.Add(entry);
             hits.Add(new LeftoverHit
             {
@@ -879,7 +890,7 @@ public sealed class ModConverterService
 
         foreach (var jsonFile in PenumbraMod.DefinitionFiles(task.ModDirectory).Where(File.Exists))
         {
-            if (!CustomizationPaths.Contains(File.ReadAllText(jsonFile), source) || !flagged.Add(jsonFile)) continue;
+            if (!Moved(File.ReadAllText(jsonFile)) || !flagged.Add(jsonFile)) continue;
             hits.Add(new LeftoverHit
             {
                 FilePath = jsonFile,
@@ -895,7 +906,7 @@ public sealed class ModConverterService
                      .Where(file => structuredExtensions.Contains(Path.GetExtension(file))))
         {
             if (!BinaryPathRewriter.ExtractPaths(File.ReadAllBytes(binaryFile))
-                    .Any(path => CustomizationPaths.Contains(path, source)) || !flagged.Add(binaryFile)) continue;
+                    .Any(Moved) || !flagged.Add(binaryFile)) continue;
             hits.Add(new LeftoverHit
             {
                 FilePath = binaryFile,
@@ -905,6 +916,8 @@ public sealed class ModConverterService
         }
 
         return hits;
+
+        bool Moved(string value) => moved.Any(root => CustomizationPaths.Contains(value, root));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -913,15 +926,13 @@ public sealed class ModConverterService
 
     private void PruneEmptyCustomizationDirs(ConversionTask task, Action<string> log)
     {
-        if (task.SourceGenderRace is not { } race ||
-            !ushort.TryParse(task.OldIdPadded, out var modelId)) return;
-        var source = new CustomizationPathEndpoint(task.Kind, race, modelId);
+        var moved = MovedCustomizationRoots(task);
         var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var rename in task.PlannedRenames)
         {
             var directory = Path.GetDirectoryName(rename.OldPath);
-            while (directory != null && CustomizationPaths.Contains(directory, source))
+            while (directory != null && moved.Any(root => CustomizationPaths.Contains(directory, root)))
             {
                 candidates.Add(directory);
                 directory = Path.GetDirectoryName(directory);
@@ -973,7 +984,7 @@ public sealed class ModConverterService
 
         int applied = 0;
         // Key renames and copies go last so value edits can still find their original key.
-        foreach (var change in jc.Changes.OrderBy(c => c.ChangeType is "path_key" or "path_key_copy" ? 1 : 0))
+        foreach (var change in jc.Changes.OrderBy(c => c.ChangeType is "path_key" or "path_key_copy" or "path_key_remove" ? 1 : 0))
             if (ApplyJsonChangeAtPath(node, change)) applied++;
 
         if (applied != jc.Changes.Count)
@@ -1070,6 +1081,12 @@ public sealed class ModConverterService
                 {
                     if (string.Equals(kv.Key, change.OldValue, StringComparison.OrdinalIgnoreCase))
                     {
+                        // Keys nothing loads once the conversion is done go.
+                        if (change.ChangeType == "path_key_remove")
+                        {
+                            dictNode.Remove(kv.Key);
+                            return true;
+                        }
                         var val = dictNode[kv.Key];
                         // Keys under shared material roots are copied: other customizations still load them.
                         if (change.ChangeType == "path_key_copy")

@@ -154,6 +154,7 @@ public static class MdlMeshGroups
 /// <param name="Conversion">
 /// The conversion that produced it. A run of several conversions ships the models of all of them,
 /// and each follows the rules of its own: whether it changes slots, whether it becomes an accessory.
+/// Null for a hair, face, tail or ear model, which has no slot rules.
 /// </param>
 public sealed record GearOutputModel(string Local, ImmutableArray<string> GamePaths, ImmutableArray<string> Options,
     ushort? GenderRace, IReadOnlyList<MdlMeshGroup> Groups, string? EditError,

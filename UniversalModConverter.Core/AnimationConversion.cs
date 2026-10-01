@@ -6,7 +6,11 @@ namespace UniversalModConverter.Core;
 
 public enum AnimationOperation
 {
-    /// <summary>Move the animation to another slot or emote of the same race.</summary>
+    /// <summary>
+    /// Move the animation to other locations of the same race: another emote or expression, or
+    /// any number of idle slots. It may be retargeted to other races on the way (see
+    /// <see cref="AnimationConversionRequest.TargetRaces"/>).
+    /// </summary>
     Swap,
 
     /// <summary>Rebuild the animation for the skeleton of other races.</summary>
@@ -18,8 +22,7 @@ public enum AnimationOperation
 
 /// <summary>
 /// One destination of a swap: which location (see <see cref="PapPath.Location"/>) each source
-/// location moves to. A single variant is a plain replacement; several become the options of
-/// one Penumbra group.
+/// location moves to. A swap places the animation at every destination it is given.
 /// </summary>
 public sealed record AnimationSwapVariant(string Label, ImmutableDictionary<string, string> Locations)
 {
@@ -37,35 +40,52 @@ public sealed record AnimationConversionRequest(
     ConversionOutputMode Mode,
     string Description)
 {
-    /// <summary>Swap: the destinations. Exactly one unless <see cref="GroupName"/> is set.</summary>
+    /// <summary>Swap: the destinations. The animation is placed at every one of them.</summary>
     public ImmutableArray<AnimationSwapVariant> Variants { get; init; } = [];
 
-    /// <summary>Swap: create a single-select group with one option per variant.</summary>
-    public string? GroupName { get; init; }
+    /// <summary>
+    /// Swap: the animation also stays where it is, converted there like at its destinations:
+    /// the target races get it there too, and it gets the expression. It then needs no
+    /// destination besides.
+    /// </summary>
+    public bool StaysAtSource { get; init; }
 
-    /// <summary>Swap into a group: the option selected by default.</summary>
-    public int DefaultVariant { get; init; }
+    /// <summary>Swap: keep the animation where it is, as it is, instead of moving it away.</summary>
+    public bool KeepOriginal { get; init; }
 
     /// <summary>
-    /// Swap into a group: where the animation comes from when several containers of the mod hold
-    /// their own version of it. One group can hold only one version per slot.
+    /// An expression attached where the animation is, added to this mod (see
+    /// <see cref="ExpressionAtSource"/>): where several containers of the mod hold their own
+    /// version of the animation, the one its option group uses. One group can hold only one
+    /// version per location.
     /// </summary>
     public ContainerAddress? SourceContainer { get; init; }
 
-    /// <summary>Swap without a group: keep the source slot as well instead of moving it.</summary>
-    public bool KeepOriginal { get; init; }
-
-    /// <summary>Retarget: the race whose files are converted.</summary>
+    /// <summary>Retarget, or a swap that retargets on the way: the race whose files are converted.</summary>
     public ushort SourceRace { get; init; }
 
-    /// <summary>Retarget: the races to build the animation for.</summary>
+    /// <summary>Retarget, or a swap that retargets on the way: the races to build the animation for.</summary>
     public ImmutableArray<ushort> TargetRaces { get; init; } = [];
+
+    /// <summary>
+    /// Retargeting into a new mod: whether it holds the source race's animation too. Adding to
+    /// this mod always keeps it and converting in place always moves it to the target races (see
+    /// <see cref="ConversionOutputModes.KeepsSourceRace"/>).
+    /// </summary>
+    public bool IncludeSourceRace { get; init; } = true;
 
     /// <summary>
     /// Any operation: a facial expression to attach to every animation the conversion writes.
     /// With <see cref="AnimationOperation.Expression"/> it is the whole conversion.
     /// </summary>
     public ExpressionDonor? Expression { get; init; }
+
+    /// <summary>
+    /// Whether the expression is attached where the animation already is. Added to this mod, that
+    /// goes into an option group beside the original, so the animation still plays without it.
+    /// </summary>
+    public bool ExpressionAtSource
+        => Expression != null && (Operation == AnimationOperation.Expression || Operation == AnimationOperation.Swap && StaysAtSource);
 }
 
 /// <summary>Rebuilds a PAP's body animations for another race's skeleton.</summary>
@@ -74,10 +94,31 @@ public interface IAnimationRetargeter
     /// <summary>Why retargeting cannot run in this game build, or null.</summary>
     string? UnavailableReason { get; }
 
-    RetargetedPap Retarget(byte[] pap, byte[] sourceSkeleton, byte[] targetSkeleton, ushort targetRace);
+    RetargetedPap Retarget(RetargetRequest request);
 }
 
-public sealed record RetargetedPap(byte[] Bytes, ImmutableArray<string> Notes);
+/// <summary>A race's base skeleton the converted mod itself replaces, and the option it is in.</summary>
+public sealed record ModSkeleton(ushort Race, string Label, byte[] Bytes);
+
+/// <summary>
+/// One PAP to rebuild: made for <see cref="SourceRace"/>, rebuilt for <see cref="TargetRace"/>.
+/// The retargeter finds the skeletons itself (see <see cref="SkeletonMatcher"/>); those the mod
+/// replaces (<see cref="ModSkeletons"/>) are among them, and one it has for the target race is
+/// the one the result plays on.
+/// </summary>
+public sealed record RetargetRequest(byte[] Pap, ushort SourceRace, ushort TargetRace)
+{
+    public ImmutableArray<ModSkeleton> ModSkeletons { get; init; } = [];
+
+    /// <summary>The skeleton parent of a race, for finding the skeletons it inherits.</summary>
+    public Func<ushort, ushort?> ParentRace { get; init; } = _ => null;
+}
+
+/// <param name="Source">
+/// The skeleton the animation was found to be made for, in words, when it is not the game's own
+/// for its race: "the Miqo'te Female skeleton from IVCS (168 bones)". Said once per file.
+/// </param>
+public sealed record RetargetedPap(byte[] Bytes, ImmutableArray<string> Notes, string? Source = null);
 
 /// <summary>A file the plan produces, used to verify the published mod.</summary>
 public sealed record AnimationOutput(string Scope, string GamePath, string Local, string Hash);
@@ -108,9 +149,15 @@ public sealed class AnimationConversionPlan : ModFilePlan
 /// inherits from and never asks for one of its own. The same holds for retargets.
 /// </para>
 /// <para>
-/// A retarget rebuilds the PAP's body animations for each target race's base skeleton and
-/// writes them to that race's path. The source skeleton is the one the PAP declares it was
-/// authored for; skeletons the mod itself replaces are preferred over the game's.
+/// A retarget rebuilds the PAP's body animations for a skeleton of each target race and writes
+/// them to that race's path. The retargeter finds the skeleton the animation was made for among
+/// the game's, the mod's own and those of other installed mods, for the race the PAP declares
+/// it was made for; the target race gets a standard layout (see <see cref="SkeletonMatcher"/>),
+/// or the mod's own skeleton for it when it replaces one.
+/// </para>
+/// <para>
+/// A swap may do both: an idle can go to several slots at once, stay where it is too, and be
+/// retargeted on the way, the target races getting it wherever the others do.
 /// </para>
 /// </summary>
 public sealed class AnimationConversionPlanner(
@@ -126,7 +173,13 @@ public sealed class AnimationConversionPlanner(
     private readonly Func<ushort, ushort?> _parentRace = parentRace;
     private readonly IAnimationRetargeter? _retargeter = retargeter;
 
-    private sealed record Provider(ModContainer Container, string Key, string Local, string FullPath, PapPath Path);
+    /// <param name="RetargetedFrom">
+    /// Set for a target race of a retarget: the source race, whose file (<paramref name="Key"/>,
+    /// <paramref name="Local"/> and <paramref name="FullPath"/> are the source race's) is rebuilt for
+    /// <paramref name="Path"/>'s race when it is first read (see <c>Session.Content</c>).
+    /// </param>
+    private sealed record Provider(ModContainer Container, string Key, string Local, string FullPath, PapPath Path,
+        ushort? RetargetedFrom = null);
 
     /// <summary>Plans one conversion on its own, finishing the mod definition as it goes.</summary>
     public AnimationConversionPlan Plan(string modDirectory, AnimationConversionRequest request)
@@ -176,6 +229,9 @@ public sealed class AnimationConversionPlanner(
         private readonly Dictionary<(string File, string Destination), string> _written = new();
         private readonly Dictionary<string, string> _hashes = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>Source race files rebuilt for a target race, and the race each was made for.</summary>
+        private readonly Dictionary<(string File, ushort Race), (byte[] Bytes, ushort Authored)?> _rebuilt = new();
+
         /// <summary>Expression timelines a face swap moved away from, for the orphan check.</summary>
         private readonly List<string> _movedTimelines = [];
 
@@ -197,6 +253,18 @@ public sealed class AnimationConversionPlanner(
 
         private PenumbraMod Result => _plan.Result;
 
+        private ImmutableArray<AnimationSwapVariant> Variants => _request.Variants.IsDefault ? [] : _request.Variants;
+
+        /// <summary>Whether the animation's own keys stay: a swap that keeps it, or one that also converts it where it is.</summary>
+        private bool Keeps => _request.KeepOriginal || _request.StaysAtSource;
+
+        /// <summary>The races to retarget to, without the source race.</summary>
+        private List<ushort> TargetRaces()
+            => _request.TargetRaces.IsDefault ? [] : _request.TargetRaces.Where(r => r != _request.SourceRace).Distinct().ToList();
+
+        /// <summary>Retargeting: whether the source race keeps its animation, as the output mode decides.</summary>
+        private bool SourceRaceStays => _request.Mode.KeepsSourceRace(_request.IncludeSourceRace);
+
         public AnimationConversionPlan Run()
         {
             var providers = CollectProviders();
@@ -210,9 +278,10 @@ public sealed class AnimationConversionPlanner(
                 return _plan;
             }
 
-            // A face pack plays on the face skeleton and is itself the face: it can only move.
+            // A face pack plays on the face skeleton and is itself the face: it can only move, to one place.
             if (providers.Any(p => p.Path.IsFacial) &&
-                (_request.Operation != AnimationOperation.Swap || _request.Expression != null || _request.GroupName != null))
+                (_request.Operation != AnimationOperation.Swap || _request.Expression != null || _request.StaysAtSource ||
+                 TargetRaces().Count > 0 || Variants.Length > 1))
             {
                 Block("facial_swap_only", "A facial expression can only be swapped to another expression, as a plain replacement.");
                 return _plan;
@@ -263,33 +332,79 @@ public sealed class AnimationConversionPlanner(
 
         // ── Swaps ───────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Places the animation at every destination, renamed for each, in the containers it
+        /// comes from, and where it is when it stays there too. Retargeting on the way, the target
+        /// races get the source race's animation rebuilt for them wherever the other races get
+        /// theirs, in place of any version of their own the mod has; the source race keeps its
+        /// own only where the output mode says so (see <see cref="SourceRaceStays"/>).
+        /// </summary>
         private void PlanSwap(List<Provider> providers)
         {
-            var variants = _request.Variants;
-            var grouped = _request.GroupName != null;
-            if (variants.IsDefaultOrEmpty) { Block("no_destination", "Choose where the animation goes."); return; }
-            if (!grouped && variants.Length != 1) { Block("no_destination", "A replacement needs exactly one destination."); return; }
-            if (grouped && string.IsNullOrWhiteSpace(_request.GroupName)) { Block("group_name", "The option group needs a name."); return; }
+            var variants = Variants;
+            if (variants.IsEmpty && !_request.StaysAtSource) { Block("no_destination", "Choose where the animation goes."); return; }
 
-            if (grouped)
+            var sources = providers;
+            var targets = TargetRaces();
+            if (targets.Count > 0)
             {
-                PlanSwapGroup(providers, variants);
-                return;
+                var from = providers.Where(p => p.Path.Race == _request.SourceRace).ToList();
+                if (from.Count == 0)
+                {
+                    Block("empty_plan", $"This mod does not replace the selected animation for {RaceNames.Describe(_request.SourceRace)}.");
+                    return;
+                }
+                if (Retargeter() == null) return;
+                sources =
+                [
+                    .. providers.Where(p => !targets.Contains(p.Path.Race) && (SourceRaceStays || p.Path.Race != _request.SourceRace)),
+                    .. targets.SelectMany(t => from.Select(p => RetargetedTo(p, t))),
+                ];
+                _races = sources.Select(p => p.Path.Race).Distinct().Count();
             }
 
-            var variant = variants[0];
+            if (_request.StaysAtSource) PlanAtSource(sources);
+            foreach (var variant in variants) PlanDestination(variant, sources);
+            if (providers.Any(p => p.Path.IsFacial)) SwapFaceTimelines(variants[0]);
+
+            if (!Keeps)
+                foreach (var provider in providers)
+                {
+                    // Unpaired parts (a start without a counterpart) leave together with the rest.
+                    // A location that is also a destination was just rewritten; leave it.
+                    if (variants.Any(v => v.Locations.Values.Contains(provider.Path.Location))) continue;
+                    RemoveKey(provider);
+                }
+            else if (targets.Count > 0 && !SourceRaceStays)
+                // Converting in place, the animation goes from the source race to the target races.
+                foreach (var provider in providers.Where(p => p.Path.Race == _request.SourceRace)) RemoveKey(provider);
+
+            if (targets.Count > 0 && !_plan.HasBlockers) DescribeInheritance(OutputLocations(providers, variants), targets);
+        }
+
+        /// <summary>Takes a provider's own key out of the result's container.</summary>
+        private void RemoveKey(Provider provider)
+        {
+            var files = Result.GetContainer(provider.Container.Address).Files;
+            if (files != null && GamePath.FindKey(files, provider.Key) is { } key) files.Remove(key);
+        }
+
+        /// <summary>Places the animation at one destination, renamed for it, in the containers it comes from.</summary>
+        private void PlanDestination(AnimationSwapVariant variant, List<Provider> sources)
+        {
             _destinationLabel = variant.Label;
-            foreach (var provider in providers)
+            foreach (var provider in sources)
             {
                 if (!variant.Locations.TryGetValue(provider.Path.Location, out var destinationLocation))
                 {
+                    // Said once for every race: the message names the part, not the race.
                     Warn("unpaired", Unpaired(variant, provider));
                     continue;
                 }
                 var destination = FromLocation(provider.Path.Race, destinationLocation);
                 if (destination == null) continue;
-                if (!GameHas(destination, variant.Label, provider,
-                        _request.KeepOriginal ? "stays where it is." : "is removed from the mod with the rest.")) continue;
+                if (!GameHas(destination, variant.Label, provider, _request.Mode.IsNewMod() ? "is left out there."
+                        : Keeps ? "stays where it is." : "is removed from the mod with the rest.")) continue;
                 if (SwapContent(provider, destination) is not { } local) continue;
 
                 var container = Result.GetContainer(provider.Container.Address);
@@ -298,21 +413,40 @@ public sealed class AnimationConversionPlanner(
                     Warn("destination_replaced", $"{container.Label}: the mod's own {destination.GamePath} is replaced.");
                 if (GamePath.FindKey(files, destination.GamePath) is { } stale) files.Remove(stale);
                 files[destination.GamePath] = GamePath.ToLocal(local);
-                _plan.Changes.Add(new GearPlanChange("Game path", container.Label, GamePath.Normalize(provider.Key), destination.GamePath));
+                _plan.Changes.Add(new GearPlanChange(provider.RetargetedFrom == null ? "Game path" : "Retarget", container.Label,
+                    GamePath.Normalize(provider.Key), destination.GamePath));
             }
-            if (providers.Any(p => p.Path.IsFacial)) SwapFaceTimelines(variant);
+        }
 
-            if (!_request.KeepOriginal)
-                foreach (var provider in providers)
-                {
-                    // Unpaired parts (a start without a counterpart) leave together with the rest.
-                    var destinations = variant.Locations.GetValueOrDefault(provider.Path.Location);
-                    if (destinations == provider.Path.Location) continue;
-                    // A location that is also a destination was just rewritten; leave it.
-                    if (variant.Locations.Values.Contains(provider.Path.Location)) continue;
-                    var files = Result.GetContainer(provider.Container.Address).Files;
-                    if (files != null && GamePath.FindKey(files, provider.Key) is { } key) files.Remove(key);
-                }
+        /// <summary>
+        /// The animation stays where it is, converted there like at its destinations: the target
+        /// races get theirs beside the source race's, and everything gets the expression. Added to
+        /// this mod, the expression goes into an option group, so the animation still plays
+        /// without it; a new mod gets its own copy of all of it.
+        /// </summary>
+        private void PlanAtSource(List<Provider> sources)
+        {
+            var grouped = _request.Expression != null && _request.Mode.KeepsSource();
+            // In the group the face can be switched off, so the target races are given their
+            // animation without it, and the group plays it with the face.
+            foreach (var provider in sources.Where(p => p.RetargetedFrom != null)) PlaceRetargeted(provider, withExpression: !grouped);
+            if (grouped) PlanExpressionGroup(sources, _request.Expression!.Label);
+            else if (_request.Expression != null || _request.Mode.IsNewMod()) EditAtSource([.. sources.Where(p => p.RetargetedFrom == null)]);
+        }
+
+        /// <summary>Every location the swap writes, for any race: its destinations, and where it is when it stays there.</summary>
+        private List<PapPath> OutputLocations(List<Provider> providers, ImmutableArray<AnimationSwapVariant> variants)
+        {
+            var locations = new List<PapPath>();
+            foreach (var path in providers.Select(p => p.Path).DistinctBy(p => p.Location))
+            {
+                if (_request.StaysAtSource) locations.Add(path);
+                foreach (var variant in variants)
+                    if (variant.Locations.TryGetValue(path.Location, out var to) &&
+                        PapPath.TryParse($"chara/human/c{path.Race:D4}/animation/{to}.pap", out var destination))
+                        locations.Add(destination);
+            }
+            return [.. locations.DistinctBy(p => p.Location)];
         }
 
         /// <summary>
@@ -324,60 +458,12 @@ public sealed class AnimationConversionPlanner(
             var role    = variant.SourceRoles.GetValueOrDefault(provider.Path.Location);
             var missing = role == null ? $"counterpart for {provider.Path.Key}" : $"{role} animation of its own";
             var subject = role == null ? $"this mod's {provider.Path.Key}" : $"this mod's {role} animation";
-            var outcome = _request.KeepOriginal
-                ? "stays where it is instead of moving."
-                : "has nothing to convert to and is removed from the mod. Everything else converts normally.";
+            var outcome = Variants.Any(v => v.Locations.ContainsKey(provider.Path.Location))
+                ? "is left out there."
+                : Keeps
+                    ? "stays where it is instead of moving."
+                    : "has nothing to convert to and is removed from the mod. Everything else converts normally.";
             return $"{variant.Label} has no {missing}, so {subject} {outcome}";
-        }
-
-        /// <summary>
-        /// A new single-select group, named as asked, with one option per slot that places the
-        /// animation there, after an empty "-" that switches the group off. It outranks the mod's
-        /// other groups, so its choice wins where they overlap. The group is added beside what the
-        /// mod already has, which stays as it is: in this mod, or as the whole of a new one.
-        /// </summary>
-        private void PlanSwapGroup(List<Provider> providers, ImmutableArray<AnimationSwapVariant> variants)
-        {
-            if (_request.Mode == ConversionOutputMode.InPlace)
-            {
-                Block("group_in_place", OutputModeRules.GroupInPlace(_request.GroupName));
-                return;
-            }
-
-            var sources = OneSourcePerPath(providers);
-            if (_plan.HasBlockers) return;
-
-            var name = ModGroupBuilder.UniqueName(Result, _request.GroupName!);
-            var options = new JsonArray { ModGroupBuilder.Option(ModGroup.OffOptionName, string.Empty, new JsonObject()) };
-
-            var labels = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ModGroup.OffOptionName };
-            foreach (var variant in variants)
-            {
-                if (!labels.Add(variant.Label)) { Block("duplicate_option", $"Two options are named '{variant.Label}'."); return; }
-                _destinationLabel = variant.Label;
-                var files = new JsonObject();
-                foreach (var provider in sources)
-                {
-                    if (!variant.Locations.TryGetValue(provider.Path.Location, out var destinationLocation)) continue;
-                    var destination = FromLocation(provider.Path.Race, destinationLocation);
-                    if (destination == null || !GameHas(destination, variant.Label, provider, "is left out of that option.")) continue;
-                    if (SwapContent(provider, destination) is not { } local) continue;
-                    if (GamePath.FindKey(files, destination.GamePath) != null)
-                    {
-                        Block("target_conflict", $"{variant.Label}: two files map to {destination.GamePath}.");
-                        continue;
-                    }
-                    files[destination.GamePath] = GamePath.ToLocal(local);
-                    _plan.Changes.Add(new GearPlanChange("Option", $"{name} / {variant.Label}",
-                        GamePath.Normalize(provider.Key), destination.GamePath));
-                }
-                if (files.Count == 0) Warn("empty_option", $"The option '{variant.Label}' has no animation for any race the mod provides.");
-                options.Add(ModGroupBuilder.Option(variant.Label, string.Empty, files));
-            }
-
-            var defaultVariant = Math.Clamp(_request.DefaultVariant, 0, Math.Max(0, variants.Length - 1));
-            AddSingleGroup(name, "Choose which slot this animation replaces. Created by Universal Mod Converter.",
-                defaultVariant + 1, options); // past the "-" option
         }
 
         /// <summary>
@@ -430,8 +516,8 @@ public sealed class AnimationConversionPlanner(
             if (_noRaceFile.Add(destination.GamePath))
                 Warn("no_race_file",
                     $"{RaceNames.Describe(destination.Race)} has no {label} animation of its own ({destination.Key}) in the game " +
-                    $"and plays the one of a race it inherits from, so nothing is written there for it; this mod's " +
-                    $"{provider.Path.Key} for it {outcome}");
+                    "and plays the one of a race it inherits from, so nothing is written there for it" +
+                    (provider.RetargetedFrom == null ? $"; this mod's {provider.Path.Key} for it {outcome}" : "."));
             return false;
         }
 
@@ -439,7 +525,7 @@ public sealed class AnimationConversionPlanner(
         private string? SwapContent(Provider provider, PapPath destination)
         {
             if (_written.TryGetValue((provider.FullPath, destination.GamePath), out var known)) return known;
-            if (Local(provider.FullPath) is not { } bytes) return null;
+            if (Content(provider) is not { } bytes) return null;
 
             byte[] content;
             try
@@ -456,11 +542,13 @@ public sealed class AnimationConversionPlanner(
 
             var wanted = SwapLocal(provider, destination);
             string local;
-            if (_request.Mode.EditsSourceMod() && content.AsSpan().SequenceEqual(bytes) &&
+            if (provider.RetargetedFrom == null && _request.Mode.EditsSourceMod() && content.AsSpan().SequenceEqual(bytes) &&
                 string.Equals(GamePath.NormalizeLocal(wanted), GamePath.NormalizeLocal(provider.Local), StringComparison.Ordinal))
                 local = GamePath.ToLocal(provider.Local); // The slot keeps its own, unchanged file.
             else
-                local = Write(content, wanted, provider, $"renamed for {destination.Key}");
+                local = Write(content, wanted, provider, provider.RetargetedFrom == null
+                    ? $"renamed for {destination.Key}"
+                    : $"{RebuiltReason(provider)}, renamed for {destination.Key}");
             _written[(provider.FullPath, destination.GamePath)] = local;
             _plan.Outputs.Add(new AnimationOutput(provider.Container.Label, destination.GamePath, local, AnimationConversionPlan.Hash(content)));
             return local;
@@ -474,7 +562,9 @@ public sealed class AnimationConversionPlanner(
         /// </summary>
         private string SwapLocal(Provider provider, PapPath destination)
         {
-            if (Mirrored(provider.Local, provider.Path.GamePath, destination.GamePath) is { } mirrored) return mirrored;
+            // A target race's file is named after the source race's, which it is made from.
+            var origin = provider.RetargetedFrom is { } from ? provider.Path.WithRace(from) : provider.Path;
+            if (Mirrored(provider.Local, origin.GamePath, destination.GamePath) is { } mirrored) return mirrored;
 
             var folder = Path.GetDirectoryName(GamePath.ToLocal(provider.Local)) ?? string.Empty;
             if (_races > 1 || destination.IsFacial) folder = Path.Combine(folder, $"c{destination.Race:D4}");
@@ -686,78 +776,160 @@ public sealed class AnimationConversionPlanner(
 
         // ── Retargets ───────────────────────────────────────────────────────
 
+        /// <summary>
+        /// The target races get the source race's animation, rebuilt for them, where it is. The
+        /// source race keeps its own when adding to this mod, loses it converting in place, and
+        /// comes along into a new mod when asked (see <see cref="SourceRaceStays"/>).
+        /// </summary>
         private void PlanRetarget(List<Provider> providers)
         {
-            var targets = _request.TargetRaces.IsDefault ? [] : _request.TargetRaces.Where(r => r != _request.SourceRace).Distinct().ToList();
+            var targets = TargetRaces();
             if (targets.Count == 0) { Block("no_target_race", "Choose at least one race other than the source race."); return; }
-            if (_owner._retargeter is not { } retargeter) { Block("retarget_unavailable", "Retargeting is not available."); return; }
-            if (retargeter.UnavailableReason is { } reason) { Block("retarget_unavailable", reason); return; }
+            if (Retargeter() == null) return;
 
             foreach (var target in targets)
-            {
-                // The game asks for a race's own file only where it has one; a race without one
-                // plays the file of a race it inherits from, so a file written for it never loads.
-                var own = providers.Where(p => Game(p.Path.WithRace(target).GamePath) != null).ToList();
-                foreach (var missing in providers.Except(own).Select(p => p.Path.Key).Distinct())
-                    Warn("no_race_file",
-                        $"{RaceNames.Describe(target)} has no {missing} of its own in the game and plays the one of a race it " +
-                        "inherits from, so none is written for it.");
-                if (own.Count == 0 || Skeleton(target) is not { } targetSkeleton) continue;
-                foreach (var provider in own)
-                {
-                    if (Local(provider.FullPath) is not { } bytes) continue;
-                    var destination = provider.Path.WithRace(target);
-                    PapFile pap;
-                    try { pap = new PapFile(bytes); }
-                    catch (InvalidDataException ex) { Block("invalid_pap", $"{GamePath.Normalize(provider.Key)}: {ex.Message}"); continue; }
-
-                    // Bindings index the skeleton the file was authored for, which is not always
-                    // the race of the path it is placed at.
-                    var authored = pap.ModelType == 0 && GenderRaces.Playable.Contains(pap.ModelId) ? pap.ModelId : provider.Path.Race;
-                    if (authored != provider.Path.Race)
-                        Note("authored_race", $"{GamePath.Normalize(provider.Key)} was made for c{authored:D4}; that skeleton is used as the source.");
-                    if (Skeleton(authored) is not { } sourceSkeleton) continue;
-
-                    if (_written.TryGetValue((provider.FullPath, destination.GamePath), out var done))
-                    {
-                        MapRetargeted(provider, destination, done);
-                        continue;
-                    }
-
-                    byte[] content;
-                    if (authored == target)
-                        content = bytes;
-                    else
-                    {
-                        try
-                        {
-                            var retargeted = retargeter.Retarget(bytes, sourceSkeleton, targetSkeleton, target);
-                            content = retargeted.Bytes;
-                            foreach (var note in retargeted.Notes)
-                                Warn("retarget_note",
-                                    $"{destination.Key} ({RaceNames.Name(authored)} to {RaceNames.Name(target)}): {note}");
-                        }
-                        catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
-                        {
-                            Block("retarget_failed", $"{GamePath.Normalize(provider.Key)} → c{target:D4}: {ex.Message}");
-                            continue;
-                        }
-                    }
-
-                    if (WithExpression(content, destination) is not { } expressed) continue;
-                    content = expressed;
-                    var local = Write(content, RaceLocal(GamePath.ToLocal(provider.Local), provider.Path.Race, target), provider,
-                        authored == target
-                            ? "copied, already made for this race"
-                            : $"rebuilt for {RaceNames.Name(target)} from {RaceNames.Name(authored)}");
-                    _written[(provider.FullPath, destination.GamePath)] = local;
-                    _hashes[local] = AnimationConversionPlan.Hash(content);
-                    MapRetargeted(provider, destination, local);
-                }
-            }
+            foreach (var provider in providers)
+                PlaceRetargeted(RetargetedTo(provider, target), withExpression: true);
+            if (!SourceRaceStays) foreach (var provider in providers) RemoveKey(provider);
+            else if (_request.Mode.IsNewMod()) EditAtSource(providers);
             if (_plan.HasBlockers) return;
-            DescribeInheritance(providers, targets);
+            DescribeInheritance([.. providers.Select(p => p.Path).DistinctBy(p => p.Location)], targets);
         }
+
+        /// <summary>The retargeter, or null when retargeting cannot run, which blocks the plan.</summary>
+        private IAnimationRetargeter? Retargeter()
+        {
+            if (_owner._retargeter is not { } retargeter) { Block("retarget_unavailable", "Retargeting is not available."); return null; }
+            if (retargeter.UnavailableReason is { } reason) { Block("retarget_unavailable", reason); return null; }
+            return retargeter;
+        }
+
+        /// <summary><paramref name="provider"/>, a source race's file, as <paramref name="target"/>'s: see <see cref="Provider.RetargetedFrom"/>.</summary>
+        private static Provider RetargetedTo(Provider provider, ushort target)
+            => provider with { Path = provider.Path.WithRace(target), RetargetedFrom = provider.Path.Race };
+
+        /// <summary>
+        /// The animation a provider plays: its file, or for a target race, the source race's file
+        /// rebuilt for that race's skeleton, once. Null when it cannot be had, which is reported.
+        /// </summary>
+        private byte[]? Content(Provider provider)
+        {
+            if (provider.RetargetedFrom is not { } from) return Local(provider.FullPath);
+            var key = (provider.FullPath, provider.Path.Race);
+            if (!_rebuilt.TryGetValue(key, out var rebuilt)) _rebuilt[key] = rebuilt = Rebuild(provider, from, provider.Path.Race);
+            return rebuilt?.Bytes;
+        }
+
+        private (byte[] Bytes, ushort Authored)? Rebuild(Provider provider, ushort from, ushort target)
+        {
+            if (Local(provider.FullPath) is not { } bytes) return null;
+            ushort authored;
+            try
+            {
+                // Bindings index the skeleton the file was authored for, which is not always the
+                // race of the path it is placed at.
+                var pap = new PapFile(bytes);
+                authored = pap.ModelType == 0 && GenderRaces.Playable.Contains(pap.ModelId) ? pap.ModelId : from;
+            }
+            catch (InvalidDataException ex)
+            {
+                Block("invalid_pap", $"{GamePath.Normalize(provider.Key)}: {ex.Message}");
+                return null;
+            }
+            if (authored != from)
+                Note("authored_race", $"{GamePath.Normalize(provider.Key)} says it was made for {RaceNames.Describe(authored)}, " +
+                                      "so it is rebuilt from a skeleton of that race.");
+            if (authored == target) return (bytes, authored);
+
+            if (Retargeter() is not { } retargeter) return null;
+            try
+            {
+                var retargeted = retargeter.Retarget(new RetargetRequest(bytes, authored, target)
+                {
+                    ModSkeletons = ModSkeletons(),
+                    ParentRace = _owner._parentRace,
+                });
+                if (retargeted.Source is { } source && _sourceNoted.Add(provider.FullPath))
+                    Note("retarget_source", $"{GamePath.Normalize(provider.Key)} was made for {source}, which it is rebuilt from.");
+                foreach (var note in retargeted.Notes)
+                    Warn("retarget_note", $"{provider.Path.Key} ({RaceNames.Name(authored)} to {RaceNames.Name(target)}): {note}");
+                return (retargeted.Bytes, authored);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
+            {
+                Block("retarget_failed", $"{GamePath.Normalize(provider.Key)} → {RaceNames.Describe(target)}: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>Source files whose skeleton was already named.</summary>
+        private readonly HashSet<string> _sourceNoted = new(StringComparer.OrdinalIgnoreCase);
+
+        private ImmutableArray<ModSkeleton>? _modSkeletons;
+
+        /// <summary>
+        /// Every race's base skeleton the mod replaces, in any of its containers, the default
+        /// one first: the retargeter's first choice for the source, and the target race's
+        /// skeleton wherever the mod has one. Paths that lead nowhere are left out.
+        /// </summary>
+        private ImmutableArray<ModSkeleton> ModSkeletons()
+        {
+            if (_modSkeletons is { } known) return known;
+            var found = ImmutableArray.CreateBuilder<ModSkeleton>();
+            foreach (var container in _mod.Containers)
+            foreach (var (key, local) in container.FileEntries())
+            {
+                if (!PapPath.TryParseBaseSkeleton(key, out var race)) continue;
+                string full;
+                try { full = PathSafety.ResolveRelative(_root, GamePath.ToLocal(local)); }
+                catch (InvalidDataException) { continue; }
+                if (File.Exists(full) && Local(full) is { } bytes) found.Add(new ModSkeleton(race, container.Label, bytes));
+            }
+            _modSkeletons = found.ToImmutable();
+            return _modSkeletons.Value;
+        }
+
+        /// <summary>What was done to a target race's file, for the file list.</summary>
+        private string RebuiltReason(Provider provider)
+            => _rebuilt.GetValueOrDefault((provider.FullPath, provider.Path.Race)) is { } rebuilt && rebuilt.Authored != provider.Path.Race
+                ? $"rebuilt for {RaceNames.Name(provider.Path.Race)} from {RaceNames.Name(rebuilt.Authored)}"
+                : "copied, already made for this race";
+
+        /// <summary>
+        /// A target race's animation where the source race's is, in the same container. The game
+        /// asks for a race's own file only where it has one; a race without one plays the file of
+        /// a race it inherits from, so a file written for it would never load, and none is.
+        /// </summary>
+        private void PlaceRetargeted(Provider provider, bool withExpression)
+        {
+            var destination = provider.Path;
+            if (Game(destination.GamePath) == null)
+            {
+                Warn("no_race_file",
+                    $"{RaceNames.Describe(destination.Race)} has no {destination.Key} of its own in the game and plays the one of a race " +
+                    "it inherits from, so none is written for it.");
+                return;
+            }
+            if (!_written.TryGetValue((provider.FullPath, destination.GamePath), out var local))
+            {
+                if (Content(provider) is not { } content) return;
+                if (withExpression)
+                {
+                    if (WithExpression(content, destination) is not { } expressed) return;
+                    content = expressed;
+                }
+                local = Write(content, AtSourceLocal(provider), provider, RebuiltReason(provider));
+                _written[(provider.FullPath, destination.GamePath)] = local;
+                _hashes[local] = AnimationConversionPlan.Hash(content);
+            }
+            MapRetargeted(provider, destination, local);
+        }
+
+        /// <summary>The name of a provider's file where it is: its own, or for a target race, the source race's with the race swapped.</summary>
+        private static string AtSourceLocal(Provider provider)
+            => provider.RetargetedFrom is { } from
+                ? RaceLocal(GamePath.ToLocal(provider.Local), from, provider.Path.Race)
+                : GamePath.ToLocal(provider.Local);
 
         /// <summary>
         /// Attaching a face on its own: every animation keeps its game path and its timeline gets
@@ -767,12 +939,18 @@ public sealed class AnimationConversionPlanner(
         private void PlanExpression(List<Provider> providers)
         {
             if (_request.Expression == null) { Block("no_expression", "Choose the expression to attach."); return; }
-            if (_request.Mode.KeepsSource())
-            {
-                PlanExpressionGroup(providers, _request.Expression.Label);
-                return;
-            }
+            if (_request.Mode.KeepsSource()) PlanExpressionGroup(providers, _request.Expression.Label);
+            else EditAtSource(providers);
+        }
 
+        /// <summary>
+        /// The animation where it is, with the expression attached when there is one: converting
+        /// in place edits its file, and a new mod gets its own copy in every container that plays it.
+        /// </summary>
+        private void EditAtSource(List<Provider> providers)
+        {
+            var label = _request.Expression?.Label;
+            var reason = label == null ? "copied" : $"expression {label} attached";
             // One output file per distinct result. Every container, race and location that plays a
             // file with the same face shares its edited version; one that needs the file edited
             // differently (another race's face pack, another animation in it) gets its own copy,
@@ -792,10 +970,9 @@ public sealed class AnimationConversionPlanner(
                     {
                         // The same file, edited: the key keeps pointing at it.
                         local = _locals.Reserve(relative, relative);
-                        _plan.Files.Add(new PlannedFileOperation(LocalFileOperation.Write, null, local, content,
-                            $"expression {_request.Expression.Label} attached"));
+                        _plan.Files.Add(new PlannedFileOperation(LocalFileOperation.Write, null, local, content, reason));
                     }
-                    else local = Write(content, relative, provider, $"expression {_request.Expression.Label} attached");
+                    else local = Write(content, relative, provider, reason);
                     edited[(provider.FullPath, hash)] = local;
                 }
 
@@ -808,8 +985,9 @@ public sealed class AnimationConversionPlanner(
 
                 _written[(provider.FullPath, provider.Path.GamePath)] = local;
                 _plan.Outputs.Add(new AnimationOutput(provider.Container.Label, provider.Path.GamePath, local, hash));
-                _plan.Changes.Add(new GearPlanChange("Expression", provider.Container.Label,
-                    GamePath.Normalize(provider.Key), _request.Expression.Label));
+                _plan.Changes.Add(label == null
+                    ? new GearPlanChange("Game path", provider.Container.Label, GamePath.Normalize(provider.Key), provider.Path.GamePath)
+                    : new GearPlanChange("Expression", provider.Container.Label, GamePath.Normalize(provider.Key), label));
             }
         }
 
@@ -817,7 +995,8 @@ public sealed class AnimationConversionPlanner(
         /// Attaching a face beside the original: a new single-select group whose option plays the
         /// edited animations, after an empty "-" that plays the originals. The group outranks the
         /// mod's other groups, so its choice wins over the containers the originals live in, which
-        /// stay as they are; it starts on the face, since that is what was asked for.
+        /// stay as they are; it starts on the face, since that is what was asked for. Target races
+        /// of a retarget are in it too, with their rebuilt animation.
         /// </summary>
         private void PlanExpressionGroup(List<Provider> providers, string label)
         {
@@ -830,13 +1009,15 @@ public sealed class AnimationConversionPlanner(
             var edited = new Dictionary<(string File, string Hash), string>();
             foreach (var provider in sources)
             {
-                if (Local(provider.FullPath) is not { } bytes) continue;
+                // A target race without a file of its own gets none (see PlaceRetargeted).
+                if (provider.RetargetedFrom != null && Game(provider.Path.GamePath) == null) continue;
+                if (Content(provider) is not { } bytes) continue;
                 if (WithExpression(bytes, provider.Path) is not { } content) continue;
 
                 var hash = AnimationConversionPlan.Hash(content);
                 if (!edited.TryGetValue((provider.FullPath, hash), out var local))
-                    edited[(provider.FullPath, hash)] = local =
-                        Write(content, GamePath.ToLocal(provider.Local), provider, $"expression {label} attached");
+                    edited[(provider.FullPath, hash)] = local = Write(content, AtSourceLocal(provider), provider,
+                        provider.RetargetedFrom == null ? $"expression {label} attached" : $"{RebuiltReason(provider)}, expression {label} attached");
                 files[provider.Path.GamePath] = GamePath.ToLocal(local);
                 _plan.Outputs.Add(new AnimationOutput(scope, provider.Path.GamePath, local, hash));
                 _plan.Changes.Add(new GearPlanChange("Expression", scope, GamePath.Normalize(provider.Key), label));
@@ -941,13 +1122,14 @@ public sealed class AnimationConversionPlanner(
         }
 
         /// <summary>
-        /// Reports which other races will play a retargeted file: a race without its own file
-        /// plays the one of the first race up its skeleton parents that has one. Only races the
-        /// game has a file for get one written, so the game's files alone decide.
+        /// Reports which other races will play a retargeted file at each of the
+        /// <paramref name="locations"/> written: a race without its own file plays the one of the
+        /// first race up its skeleton parents that has one. Only races the game has a file for get
+        /// one written, so the game's files alone decide.
         /// </summary>
-        private void DescribeInheritance(List<Provider> providers, List<ushort> targets)
+        private void DescribeInheritance(List<PapPath> locations, List<ushort> targets)
         {
-            foreach (var location in providers.Select(p => p.Path).DistinctBy(p => p.Location))
+            foreach (var location in locations)
             {
                 bool Has(ushort race) => Game(location.WithRace(race).GamePath) != null;
                 foreach (var target in targets)
@@ -960,23 +1142,6 @@ public sealed class AnimationConversionPlanner(
                             $"so the game plays the {RaceNames.Name(target)} version for them too.");
                 }
             }
-        }
-
-        private byte[]? Skeleton(ushort race)
-        {
-            var path = PapPath.BaseSkeletonPath(race);
-            foreach (var container in _mod.Containers)
-            foreach (var (key, local) in container.FileEntries())
-            {
-                if (GamePath.Normalize(key) != path) continue;
-                if (!container.Address.IsDefault)
-                    Note("mod_skeleton",
-                        $"The skeleton for {RaceNames.Describe(race)} is taken from the option {container.Label}.");
-                return Local(PathSafety.ResolveRelative(_root, GamePath.ToLocal(local)));
-            }
-            if (Game(path) is { } bytes) return bytes;
-            Block("missing_skeleton", $"The skeleton {path} was not found.");
-            return null;
         }
 
         private static string RaceLocal(string local, ushort from, ushort to)

@@ -15,7 +15,7 @@ public sealed class BackgroundRunner
     private readonly ConcurrentQueue<Action> _pending = new();
     private readonly Stopwatch _elapsed = new();
 
-    /// <summary>Label of the running operation, e.g. "Planning…"; null when idle.</summary>
+    /// <summary>Label of the running operation, e.g. "Planning"; null when idle.</summary>
     public string? CurrentLabel { get; private set; }
 
     public bool IsBusy => CurrentLabel != null;

@@ -54,7 +54,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         var resources = ReadResources(root);
         var keys = new KeyRules(source, target, resources);
         var references = new References();
-        var assets = DiscoverAssets(root, resources.Files, source, references);
+        var assets = DiscoverAssets(root, resources.Files, CustomizationPaths.MovedRoots(source, target), references);
         if (assets.Count == 0)
             throw new InvalidDataException($"No {descriptor.DisplayName.ToLowerInvariant()} root matched " +
                                            $"c{sourceRace:D4}/{descriptor.Token(oldId)}.");
@@ -107,6 +107,83 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         PlanJson(task, root, descriptor, source, target, resources, materialDependencies, keys);
         PlanExtraSkeleton(task, root, mod, descriptor, source, target, resources);
         PlanDeformation(task, sourceRace, targetRace, source, resources);
+        task.OutputModels.AddRange(CollectOutputModels(task, root, mod, keys));
+    }
+
+    /// <summary>
+    /// The models the converted customization ships, for the Mesh groups tab: every model of the
+    /// source that the mod loads at a path the conversion moves, under the name it will have once
+    /// converted. Converting never adds, removes or reorders meshes, so the file as it is now
+    /// lists the same groups; only their material names change, as the planned patches say.
+    /// </summary>
+    private static List<GearOutputModel> CollectOutputModels(ConversionTask task, string root, PenumbraMod mod, KeyRules keys)
+    {
+        var models = task.AllAssetFiles.Where(f => f.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var targets = new Dictionary<string, (List<string> Keys, List<string> SourceKeys, List<string> Options)>(
+            StringComparer.OrdinalIgnoreCase);
+        var otherUses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var container in mod.Containers)
+        foreach (var (key, local) in container.FileEntries())
+        {
+            string full;
+            try { full = PathSafety.ResolveRelative(root, GamePath.ToLocal(local)); }
+            catch (InvalidDataException) { continue; }
+            if (!models.Contains(full)) continue;
+            // A path the conversion leaves where it is keeps loading the same file, for another item.
+            if (keys.Target(key) is not { } moved)
+            {
+                otherUses.Add(full);
+                continue;
+            }
+            if (!targets.TryGetValue(full, out var entry)) targets[full] = entry = ([], [], []);
+            entry.Keys.Add(GamePath.Normalize(moved));
+            entry.SourceKeys.Add(GamePath.Normalize(key));
+            if (!entry.Options.Contains(container.Label)) entry.Options.Add(container.Label);
+        }
+
+        var renames = task.PlannedRenames.ToDictionary(r => Path.GetFullPath(r.OldPath), r => Path.GetFullPath(r.NewPath),
+            StringComparer.OrdinalIgnoreCase);
+        var result = new List<GearOutputModel>();
+        foreach (var (full, (gamePaths, sourcePaths, options)) in targets.OrderBy(t => t.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            var replacements = MaterialReplacements(task, full);
+            IReadOnlyList<MdlMeshGroup> groups = [];
+            string? error = null;
+            try
+            {
+                groups = MdlMeshGroups.Describe(File.ReadAllBytes(full))
+                    .Select(g => replacements.TryGetValue(g.Material, out var material)
+                        ? g with { Material = material, IsSkin = ResourceReferences.IsSkinMaterial(material) }
+                        : g)
+                    .ToList();
+                if (otherUses.Contains(full))
+                    error = "This file is also used for other items in the mod, so it cannot be edited here.";
+            }
+            catch (UnsupportedMdlVersionException ex) when (ex.Version == MdlFile.Version5)
+            {
+                error = "MDL version 5 models cannot be edited. Re-export the model with a current tool.";
+            }
+            catch (Exception ex)
+            {
+                error = $"The model cannot be read: {ex.Message}";
+            }
+            var local = Path.GetRelativePath(root, renames.GetValueOrDefault(full, full));
+            result.Add(new GearOutputModel(local, [.. gamePaths.Distinct(StringComparer.Ordinal)], [.. options], null, groups,
+                error, full, [.. sourcePaths.Distinct(StringComparer.Ordinal)]));
+        }
+        return result;
+    }
+
+    /// <summary>The planned rewrites of the paths inside the model at <paramref name="file"/>.</summary>
+    private static Dictionary<string, string> MaterialReplacements(ConversionTask task, string file)
+    {
+        var patches = task.PlannedMdlChanges.FirstOrDefault(c => string.Equals(c.FilePath, file, StringComparison.OrdinalIgnoreCase))
+                          ?.PathReplacements
+                      ?? task.PlannedBinaryPatches.FirstOrDefault(p => string.Equals(p.FilePath, file, StringComparison.OrdinalIgnoreCase))
+                          ?.Patches
+                      ?? [];
+        return patches.ToDictionary(p => p.OldString, p => p.NewString, StringComparer.Ordinal);
     }
 
     private Dictionary<string, Dictionary<string, string>> PlanMaterialDependencies(ConversionTask task,
@@ -122,65 +199,77 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             {
                 var renamed = CustomizationPaths.RewriteOwnedReference(material, source, target);
                 if (renamed == material) continue;
-                // Prefer the folder the source actually loads (Hrothgar tails: one of five).
-                var sourcePaths = CustomizationPaths.MaterialPaths(source, material);
-                var ordered = keys.OrderSourceMaterialPaths(sourcePaths);
-                var sourcePath = ordered.FirstOrDefault(p => resources.Files.ContainsKey(p) || resources.FileSwaps.ContainsKey(p))
-                                 ?? ordered[0];
-                // Modded materials are already discovered and rewritten with their textures.
-                if (resources.Files.ContainsKey(sourcePath)) continue;
-                var resolved = sourcePath;
-                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                while (resources.FileSwaps.TryGetValue(resolved, out var swapped))
+                // Each clan of the target (Au Ra tails: Raen and Xaela) loads the material from
+                // its own root, and gets what the source's same clan loads. Clans loading the
+                // same source material share one copy.
+                var copies = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (sourceClan, targetClan) in CustomizationPaths.MaterialClans(source, target))
                 {
-                    if (!seen.Add(resolved)) throw new InvalidDataException($"Cyclic material swap: {sourcePath}");
-                    resolved = Normalize(swapped);
+                    // Prefer the folder the source actually loads (Hrothgar tails: one of five).
+                    var sourcePaths = CustomizationPaths.MaterialPaths(sourceClan, material);
+                    var ordered = keys.OrderSourceMaterialPaths(sourcePaths);
+                    var sourcePath = ordered.FirstOrDefault(p => resources.Files.ContainsKey(p) || resources.FileSwaps.ContainsKey(p))
+                                     ?? ordered[0];
+                    // Modded materials are already discovered and rewritten with their textures.
+                    if (resources.Files.ContainsKey(sourcePath)) continue;
+                    var targetPaths = CustomizationPaths.MaterialPaths(targetClan, renamed);
+                    if (!copies.TryGetValue(sourcePath, out var targetPath))
+                    {
+                        var resolved = sourcePath;
+                        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        while (resources.FileSwaps.TryGetValue(resolved, out var swapped))
+                        {
+                            if (!seen.Add(resolved)) throw new InvalidDataException($"Cyclic material swap: {sourcePath}");
+                            resolved = Normalize(swapped);
+                        }
+                        var bytes = resources.Files.TryGetValue(resolved, out var local)
+                            ? File.ReadAllBytes(local) : gameData?.GetRawFileBytes(resolved);
+                        if (bytes == null)
+                        {
+                            task.Diagnostics.Add(new PlanDiagnostic("missing_material_dependency",
+                                $"Material '{sourcePath}' required by '{Path.GetFileName(file)}' could not be read." +
+                                GearConversionExecutor.MergeHint, true));
+                            continue;
+                        }
+                        // Preserve vanilla texture references, shader constants and alpha behavior.
+                        // Moving only the MDL reference would silently substitute a target game's
+                        // material with the same name (or leave it missing altogether).
+                        var replacements = BinaryPathRewriter.ExtractPaths(bytes)
+                            .Where(p => resources.Files.ContainsKey(Normalize(p)) || resources.FileSwaps.ContainsKey(Normalize(p)))
+                            .ToDictionary(p => p, p => CustomizationPaths.RewriteOwnedReference(p, source, target), StringComparer.Ordinal);
+                        bytes = MtrlFile.RewritePaths(bytes, replacements);
+                        // One copy on disk; every variant folder the target may use points at it.
+                        targetPath = targetPaths[0];
+                        var destination = PathSafety.ResolveRelative(task.ModDirectory, targetPath);
+                        var prior = task.PlannedGeneratedFiles.FirstOrDefault(f => f.FilePath.Equals(destination, StringComparison.OrdinalIgnoreCase));
+                        if (prior != null && !prior.Data.AsSpan().SequenceEqual(bytes))
+                            throw new InvalidDataException($"Conflicting material dependencies for '{targetPath}'.");
+                        if (prior == null)
+                            task.PlannedGeneratedFiles.Add(new PlannedGeneratedFile(destination, targetPath, bytes.ToImmutableArray()));
+                        copies[sourcePath] = targetPath;
+                    }
+                    foreach (var path in targetPaths) additions[path] = targetPath;
                 }
-                var bytes = resources.Files.TryGetValue(resolved, out var local)
-                    ? File.ReadAllBytes(local) : gameData?.GetRawFileBytes(resolved);
-                if (bytes == null)
-                {
-                    task.Diagnostics.Add(new PlanDiagnostic("missing_material_dependency",
-                        $"Material '{sourcePath}' required by '{Path.GetFileName(file)}' could not be read." +
-                        GearConversionExecutor.MergeHint, true));
-                    continue;
-                }
-                // Preserve vanilla texture references, shader constants and alpha behavior.
-                // Moving only the MDL reference would silently substitute a target game's
-                // material with the same name (or leave it missing altogether).
-                var replacements = BinaryPathRewriter.ExtractPaths(bytes)
-                    .Where(p => resources.Files.ContainsKey(Normalize(p)) || resources.FileSwaps.ContainsKey(Normalize(p)))
-                    .ToDictionary(p => p, p => CustomizationPaths.RewriteOwnedReference(p, source, target), StringComparer.Ordinal);
-                bytes = MtrlFile.RewritePaths(bytes, replacements);
-                // One copy on disk; every variant folder the target may use points at it.
-                var targetPaths = CustomizationPaths.MaterialPaths(target, renamed);
-                var targetPath = targetPaths[0];
-                var destination = PathSafety.ResolveRelative(task.ModDirectory, targetPath);
-                var prior = task.PlannedGeneratedFiles.FirstOrDefault(f => f.FilePath.Equals(destination, StringComparison.OrdinalIgnoreCase));
-                if (prior != null && !prior.Data.AsSpan().SequenceEqual(bytes))
-                    throw new InvalidDataException($"Conflicting material dependencies for '{targetPath}'.");
-                if (prior == null)
-                    task.PlannedGeneratedFiles.Add(new PlannedGeneratedFile(destination, targetPath, bytes.ToImmutableArray()));
-                foreach (var path in targetPaths) additions[path] = targetPath;
             }
         }
         return result;
     }
 
+    /// <param name="sources">The roots the conversion moves (see <see cref="CustomizationPaths.MovedRoots"/>).</param>
     private static HashSet<string> DiscoverAssets(string root,
-        IReadOnlyDictionary<string, string> mappings, CustomizationPathEndpoint source, References references)
+        IReadOnlyDictionary<string, string> mappings, IReadOnlyList<CustomizationPathEndpoint> sources, References references)
     {
         var assets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var queue = new Queue<string>();
 
         foreach (var (gamePath, localPath) in mappings)
-            if (CustomizationPaths.Contains(gamePath, source)) Add(localPath);
+            if (Moves(gamePath)) Add(localPath);
 
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
         {
-            if (CustomizationPaths.Contains(file, source)) Add(file);
+            if (Moves(file)) Add(file);
             if (!StructuredExtensions.Contains(Path.GetExtension(file))) continue;
-            if (references.Of(file).Any(path => CustomizationPaths.Contains(path, source))) Add(file);
+            if (references.Of(file).Any(Moves)) Add(file);
         }
 
         while (queue.Count > 0)
@@ -198,6 +287,8 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             PathSafety.EnsureContained(root, full, true);
             if (assets.Add(full)) queue.Enqueue(full);
         }
+
+        bool Moves(string path) => sources.Any(source => CustomizationPaths.Contains(path, source));
     }
 
     /// <summary>
@@ -293,6 +384,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         var sourceNames = GenderRaces.Names(source.GenderRace);
         var targetNames = GenderRaces.Names(target.GenderRace);
         var occupied = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        var dropped = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var jsonFile in PenumbraMod.DefinitionFiles(root).Where(File.Exists))
         {
@@ -312,6 +404,11 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             task.Diagnostics.Add(new PlanDiagnostic("target_conflict",
                 $"The mod already redirects {occupied.Count} of the target's path(s) itself, such as {occupied.First()}; " +
                 "converting would replace them. Choose another target, or remove those from the mod first.", true));
+
+        if (dropped.Count > 0)
+            task.Diagnostics.Add(new PlanDiagnostic("xaela_material_dropped",
+                $"The target has no Xaela material, so the source's {dropped.Count} Xaela path(s), such as {dropped.First()}, " +
+                "are removed: nothing loads them once the tail's model has moved.", false));
 
         void Walk(JsonNode? node, string path, List<JsonFieldChange> changes)
         {
@@ -342,11 +439,19 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                     {
                         var produced = new HashSet<string>(dict.Select(p => Normalize(p.Key)), StringComparer.OrdinalIgnoreCase);
                         // Keys this conversion leaves where they are, which a moved key must not land on.
-                        var staying = dict.Where(p => keys.Target(p.Key) == null).Select(p => Normalize(p.Key))
+                        var staying = dict.Where(p => keys.Target(p.Key) == null && !keys.IsDropped(p.Key))
+                            .Select(p => Normalize(p.Key))
                             .ToHashSet(StringComparer.OrdinalIgnoreCase);
                         var variantAdditions = new JsonObject();
                         foreach (var (dictKey, dictValue) in dict.ToList())
                         {
+                            if (keys.IsDropped(dictKey))
+                            {
+                                dropped.Add(Normalize(dictKey));
+                                changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[key]", OldValue = dictKey, ChangeType = "path_key_remove" });
+                                continue;
+                            }
+
                             var newKey = keys.Target(dictKey);
                             if (newKey != null)
                             {
@@ -569,10 +674,20 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         private readonly CustomizationPathEndpoint _target;
         private readonly HashSet<string> _skipped = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>The source's Xaela material root when the target has none to move it to.</summary>
+        private readonly CustomizationPathEndpoint? _droppedXaela;
+
+        /// <summary>The target's Xaela material root when the source has none of its own, so Xaela share the target's material.</summary>
+        private readonly CustomizationPathEndpoint? _sharedXaela;
+
         public KeyRules(CustomizationPathEndpoint source, CustomizationPathEndpoint target, ModResourceIndex resources)
         {
             _source = source;
             _target = target;
+            var sourceXaela = CustomizationPaths.XaelaMaterialEndpoint(source);
+            var targetXaela = CustomizationPaths.XaelaMaterialEndpoint(target);
+            _droppedXaela = targetXaela == null ? sourceXaela : null;
+            _sharedXaela = sourceXaela == null ? targetXaela : null;
             // Hrothgar tails keep the same material in up to five variant folders. A target
             // with a single folder receives one of them: the tail's own number when present.
             if (!CustomizationPaths.IsHrothgarTail(source) || CustomizationPaths.IsHrothgarTail(target)) return;
@@ -602,6 +717,12 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         public bool IsSkipped(string key) => _skipped.Contains(Normalize(key));
 
         /// <summary>
+        /// Whether this key is removed: an Au Ra tail's Xaela material paths, when the target has
+        /// no Xaela root. They only ever load with the tail's model, which moves away.
+        /// </summary>
+        public bool IsDropped(string key) => _droppedXaela is { } xaela && CustomizationPaths.Contains(key, xaela);
+
+        /// <summary>
         /// Whether this key is added rather than moved: material keys under a root other
         /// customizations also load.
         /// </summary>
@@ -612,11 +733,17 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         public bool IsSharedMaterialFile(string localPath) => IsShared(localPath);
 
-        /// <summary>A Hrothgar tail target may load any of v0001-v0005; the other folders get the same file.</summary>
+        /// <summary>
+        /// A Hrothgar tail target may load any of v0001-v0005; the other folders get the same file.
+        /// Xaela load an Au Ra tail's material from a root of their own, which gets the same file
+        /// too unless the source's own Xaela material moves there.
+        /// </summary>
         public IEnumerable<string> ExtraTargetVariants(string newKey)
         {
-            if (!CustomizationPaths.IsHrothgarTail(_target) || !newKey.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase))
-                yield break;
+            if (!newKey.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase)) yield break;
+            if (_sharedXaela is { } xaela && CustomizationPaths.Contains(newKey, _target))
+                yield return CustomizationPaths.Rewrite(newKey, _target, xaela);
+            if (!CustomizationPaths.IsHrothgarTail(_target)) yield break;
             var match = MaterialVariant().Match(newKey);
             if (!match.Success) yield break;
             var current = int.Parse(match.Groups["v"].Value);

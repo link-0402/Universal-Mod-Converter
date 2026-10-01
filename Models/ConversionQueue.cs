@@ -35,10 +35,11 @@ public sealed class QueuedConversion
     public string Description { get; set; } = string.Empty;
 
     /// <summary>
-    /// "Only add an expression" on an animation several options of the mod have their own version
-    /// of: those versions. Added to this mod, the expression goes into an option group, which can
-    /// hold only one of them; when none was chosen before the entry was added (it was then going
-    /// into a new mod or converted in place), the plan row offers these.
+    /// An expression attached where the animation is ("Only add an expression", or an idle kept in
+    /// its slot) on an animation several options of the mod have their own version of: those
+    /// versions. Added to this mod, the expression goes into an option group, which can hold only
+    /// one of them; when none was chosen before the entry was added (it was then going into a new
+    /// mod or converted in place), the plan row offers these.
     /// </summary>
     public ImmutableArray<AnimationProvider> SourceChoices { get; init; } = [];
 
