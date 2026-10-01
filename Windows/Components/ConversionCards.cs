@@ -569,7 +569,7 @@ internal sealed class ConversionCards(ConverterSession session)
         {
             Widgets.Spinner(Theme.Accent);
             ImGui.SameLine();
-            Widgets.Muted("Reading the options players can choose");
+            Widgets.Muted("Loading the options players can choose");
             return;
         }
 
