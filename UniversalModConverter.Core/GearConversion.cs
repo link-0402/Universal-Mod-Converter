@@ -694,7 +694,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                     _plan.Changes.Add(new GearPlanChange("Game path", original.Label, key,
                         moves ? target
                         : KeepsSource ? $"{target} (added; the original stays)"
-                        : $"{target} (source kept: still used elsewhere)"));
+                        : $"{target} (the source path stays as well: another file loads it, or its name does not tie it to this slot)"));
                 }
 
                 foreach (var (key, value) in original.SwapEntries())
