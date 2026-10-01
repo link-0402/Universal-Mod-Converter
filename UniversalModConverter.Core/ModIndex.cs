@@ -9,12 +9,40 @@ public sealed class ModIndex
 {
     private readonly string _modDirectory;
     private readonly Dictionary<string, IReadOnlyList<string>> _materialTextures = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IReadOnlyList<string>> _modelMaterials = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _local = new(StringComparer.Ordinal);
 
     public ModIndex(PenumbraMod mod, string modDirectory)
     {
         _modDirectory = modDirectory;
         Redirects = RedirectsOf(mod).ToList();
         Redirected = Redirects.Select(r => r.GamePath).ToHashSet(StringComparer.Ordinal);
+        foreach (var redirect in Redirects)
+            if (redirect.Local != null) _local.TryAdd(redirect.GamePath, redirect.Local);
+    }
+
+    /// <summary>The local file behind a redirected game path; null for a file swap or a path the mod does not redirect.</summary>
+    public string? LocalOf(string gamePath) => _local.GetValueOrDefault(gamePath);
+
+    /// <summary>
+    /// The material names, as the model writes them (complete paths or short names), that the
+    /// model at <paramref name="local"/> loads; none when the file is missing, unreadable, or not
+    /// inside the mod folder.
+    /// </summary>
+    public IReadOnlyList<string> ModelMaterials(string local)
+    {
+        if (_modelMaterials.TryGetValue(local, out var known)) return known;
+        IReadOnlyList<string> materials = [];
+        try
+        {
+            var full = PathSafety.ResolveRelative(_modDirectory, GamePath.ToLocal(local));
+            if (File.Exists(full)) materials = ResourceReferences.ReadMdlMaterials(File.ReadAllBytes(full));
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // A model we cannot read loads nothing we can name.
+        }
+        return _modelMaterials[local] = materials;
     }
 
     /// <summary>One redirect of one container; <see cref="Local"/> is null for a file swap.</summary>

@@ -346,9 +346,14 @@ public static partial class CustomizationPaths
     /// materials from the shared t0001 root in one of the variant folders v0001-v0005.
     /// For an Au Ra tail's Xaela material root, the material carries that root's name
     /// (/mt_c1401t0003_a.mtrl loads t0103/material/v0001/mt_c1401t0103_a.mtrl).
+    /// A model may name its material by a complete game path instead (the same test gear
+    /// conversion uses); that path is the material, with no folder added to it.
     /// </summary>
     public static string[] MaterialPaths(CustomizationPathEndpoint endpoint, string materialName)
     {
+        var named = materialName.Replace('\\', '/').TrimStart('/');
+        if (named.Contains('/')) return CompletePaths(endpoint, named);
+
         var root = GetMaterialEndpoint(endpoint);
         var directory = CustomizationKinds.Get(root.Kind).Root(root.GenderRace, root.ModelId) + "/material";
         var name = materialName.TrimStart('/');
@@ -358,6 +363,24 @@ public static partial class CustomizationPaths
         return variants.Length == 0
             ? [$"{directory}/{name}"]
             : variants.Select(v => $"{directory}/v{v:D4}/{name}").ToArray();
+    }
+
+    [GeneratedRegex(@"(?<pre>/material/v)\d{4}(?=/)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex VariantFolderRegex();
+
+    /// <summary>
+    /// The paths a material the model names by its complete game path resolves to. An Au Ra
+    /// Xaela root loads the same material from its own root, so the path moves to it; a
+    /// Hrothgar tail loads it from any variant folder, the named one first.
+    /// </summary>
+    private static string[] CompletePaths(CustomizationPathEndpoint endpoint, string path)
+    {
+        if (Owner(endpoint) is var owner && owner != endpoint)
+            path = Rewrite(path, owner, endpoint);
+        var variants = MaterialVariants(endpoint);
+        if (variants.Length < 2 || !VariantFolderRegex().IsMatch(path)) return [path];
+        return variants.Select(v => VariantFolderRegex().Replace(path, m => m.Groups["pre"].Value + v.ToString("D4"), 1))
+            .Prepend(path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
     /// <summary>Material folder variants used by a customization kind (none for face and ears).</summary>

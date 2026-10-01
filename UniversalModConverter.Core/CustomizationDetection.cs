@@ -26,7 +26,7 @@ public static class CustomizationDetection
             set.Add(redirect.GamePath);
         }
 
-        return keys.Where(root => !IsBorrowedTextureRoot(index, root.Key, root.Value))
+        return keys.Where(root => !IsBorrowedRoot(index, root.Key, root.Value))
             .Select(root => root.Key)
             .OrderBy(root => root.Kind).ThenBy(root => root.GenderRace).ThenBy(root => root.ModelId)
             .ToList();
@@ -60,10 +60,16 @@ public static class CustomizationDetection
 
     /// <summary>
     /// What converting this root touches, for the user: the kinds of files the mod redirects under
-    /// it, plus textures its materials load that the mod also replaces (see <see cref="ModContents.Of(ModIndex, Func{string, bool})"/>).
+    /// it, the materials its models load that the mod keeps under another root (a hair's shared
+    /// material root), and the textures those materials load (see <see cref="ModContents.Of(ModIndex, Func{string, bool})"/>).
     /// </summary>
     public static AssetContents Affected(ModIndex index, CustomizationPathEndpoint endpoint)
-        => ModContents.Of(index, path => CustomizationPaths.Owns(path, endpoint));
+    {
+        var loaded = endpoint.Kind == AssetKind.Body
+            ? new HashSet<string>(StringComparer.Ordinal)
+            : MaterialsOfModels(index, path => CustomizationPaths.Owns(path, endpoint)).ToHashSet(StringComparer.Ordinal);
+        return ModContents.Of(index, path => CustomizationPaths.Owns(path, endpoint) || loaded.Contains(path));
+    }
 
     /// <summary>What kinds of files the mod redirects under this root, and nothing else.</summary>
     public static AssetContents Contents(PenumbraMod mod, CustomizationPathEndpoint endpoint)
@@ -82,9 +88,16 @@ public static class CustomizationDetection
         return contents;
     }
 
-    private static bool IsBorrowedTextureRoot(ModIndex index, CustomizationPathEndpoint endpoint, HashSet<string> keys)
+    /// <summary>
+    /// Whether everything the mod holds under this root is loaded through another root: textures
+    /// that other roots' materials load, and materials (with their textures) that other roots'
+    /// models load, such as the shared material root a Miqo'te hair loads from the Midlander one.
+    /// A root holding anything else, or anything nothing else loads, is the user's to convert.
+    /// </summary>
+    private static bool IsBorrowedRoot(ModIndex index, CustomizationPathEndpoint endpoint, HashSet<string> keys)
     {
-        if (keys.Any(k => !k.EndsWith(".tex", StringComparison.Ordinal))) return false;
+        if (keys.Any(k => !k.EndsWith(".tex", StringComparison.Ordinal) && !k.EndsWith(".mtrl", StringComparison.Ordinal)))
+            return false;
         var borrowed = new HashSet<string>(StringComparer.Ordinal);
         foreach (var redirect in index.Redirects)
         {
@@ -92,6 +105,37 @@ public static class CustomizationDetection
                 CustomizationPaths.Owns(redirect.GamePath, endpoint)) continue;
             borrowed.UnionWith(index.MaterialTextures(redirect.Local));
         }
+        // Gear models load skin materials by short name; only a customization's own models count.
+        if (endpoint.Kind != AssetKind.Body)
+            foreach (var material in MaterialsOfModels(index, path => !CustomizationPaths.Owns(path, endpoint)))
+            {
+                borrowed.Add(material);
+                if (index.LocalOf(material) is { } local) borrowed.UnionWith(index.MaterialTextures(local));
+            }
         return keys.All(borrowed.Contains);
+    }
+
+    /// <summary>
+    /// The materials the mod redirects that the customization models <paramref name="models"/>
+    /// accepts load, resolved as the game does: a complete path as it is, a short name in the
+    /// model's own material root (see <see cref="CustomizationPaths.MaterialPaths"/>).
+    /// </summary>
+    private static IEnumerable<string> MaterialsOfModels(ModIndex index, Func<string, bool> models)
+    {
+        foreach (var redirect in index.Redirects)
+        {
+            if (redirect.Local == null || !redirect.GamePath.EndsWith(".mdl", StringComparison.Ordinal) ||
+                !models(redirect.GamePath)) continue;
+            var owners = CustomizationPaths.FindEndpoints(redirect.GamePath)
+                .Select(CustomizationPaths.Owner).Where(e => e.Kind != AssetKind.Body).Distinct().ToList();
+            if (owners.Count == 0) continue;
+            foreach (var reference in index.ModelMaterials(redirect.Local))
+            foreach (var owner in owners)
+            foreach (var path in CustomizationPaths.MaterialPaths(owner, reference))
+            {
+                var key = GamePath.Normalize(path);
+                if (index.Redirected.Contains(key)) yield return key;
+            }
+        }
     }
 }

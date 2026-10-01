@@ -27,6 +27,7 @@ internal static class GearConversionTests
         ("v4 in place: IMC group, swaps, missing files", InPlaceV4ImcGroupAndSwaps),
         ("In place refuses to overwrite existing target paths", InPlaceTargetConflict),
         ("Customization detection skips roots that only hold borrowed textures", CustomizationBorrowedTextures),
+        ("Customization detection skips a shared material root a model loads", CustomizationSharedMaterialRoot),
         ("Skin textures are a root of their own and fan out to other races", SkinTextureRoots),
         ("Cross-slot new mod: output models list and mesh-group removal", CrossSlotMeshRemoval),
         ("A run leaves body parts out the way each of its conversions would alone", RunMeshDefaults),
@@ -291,6 +292,72 @@ internal static class GearConversionTests
         // Face 1 only supplies a texture face 2's material loads; face 3's texture is its own retexture.
         Assert.Equal("Face c0801 #2, Face c0801 #3",
             string.Join(", ", roots.Select(r => $"{r.Kind} c{r.GenderRace:D4} #{r.ModelId}")));
+    }
+
+    /// <summary>
+    /// A Miqo'te hair loads its material from the Midlander root, which the mod fills with that
+    /// material and its textures. The Midlander root is the Miqo'te model's dependency, not a
+    /// root of its own, whether the model names the material by complete path or by short name.
+    /// </summary>
+    private static void CustomizationSharedMaterialRoot()
+    {
+        const string material = "chara/human/c0201/obj/hair/h0144/material/v0001/mt_c0201h0144_hir_b.mtrl";
+        const string norm = "chara/human/c0201/obj/hair/h0144/texture/c0201h0144_hir_b_norm.tex";
+        const string mask = "chara/human/c0201/obj/hair/h0144/texture/c0201h0144_hir_b_mask.tex";
+        const string miqote = "chara/human/c0801/obj/hair/h0144/model/c0801h0144_hir.mdl";
+        const string midlander = "chara/human/c0201/obj/hair/h0144/model/c0201h0144_hir.mdl";
+
+        (string Roots, string Affected) Detect(string modelMaterial, bool miqoteModel, bool midlanderModel = false)
+        {
+            using var mod = new TempDir();
+            var files = new List<string>
+            {
+                $"\"{material}\":\"m\\\\hair.mtrl\"", $"\"{norm}\":\"m\\\\norm.tex\"", $"\"{mask}\":\"m\\\\mask.tex\"",
+            };
+            if (miqoteModel) files.Add($"\"{miqote}\":\"m\\\\miqote.mdl\"");
+            if (midlanderModel) files.Add($"\"{midlander}\":\"m\\\\midlander.mdl\"");
+            mod.Json("meta.json", "{\"FileVersion\":4,\"Identifier\":\"" + G1 + "\",\"Name\":\"Hair\",\"Author\":\"me\"," +
+                                  "\"DefaultData\":{\"Files\":{" + string.Join(",", files) + "}}}");
+            mod.File("m/miqote.mdl", TestAssets.CreateMdl(material: modelMaterial));
+            mod.File("m/midlander.mdl", TestAssets.CreateMdl(material: modelMaterial));
+            mod.File("m/hair.mtrl", Mtrl(norm, mask));
+            foreach (var texture in new[] { "m/norm.tex", "m/mask.tex" })
+                mod.File(texture, Encoding.ASCII.GetBytes(texture));
+
+            var loaded = PenumbraMod.Load(mod.Path);
+            var roots = CustomizationDetection.FindRoots(loaded, mod.Path);
+            return (string.Join(", ", roots.Select(r => $"{r.Kind} c{r.GenderRace:D4} #{r.ModelId}")),
+                string.Join("; ", roots.Select(r => CustomizationDetection.Affected(loaded, mod.Path, r))));
+        }
+
+        foreach (var name in new[] { material, "/" + material, "/mt_c0201h0144_hir_b.mtrl" })
+        {
+            var (roots, affected) = Detect(name, miqoteModel: true);
+            Assert.Equal("Hair c0801 #144", roots);
+            // Converting the model brings the material and its textures along, so the tags say so.
+            Assert.Equal("Model, Material, Texture", affected);
+        }
+
+        // Nothing loads the material: a retexture of the shared root stays a root of its own.
+        Assert.Equal("Hair c0201 #144", Detect(material, miqoteModel: false).Roots);
+        // A Midlander model of its own is a root too; the material then belongs to both.
+        Assert.Equal("Hair c0201 #144, Hair c0801 #144", Detect(material, miqoteModel: true, midlanderModel: true).Roots);
+
+        // Gear models load skin materials by short name; that never hides a skin root.
+        using var skin = new TempDir();
+        const string body = "chara/human/c0201/obj/body/b0001/material/v0001/mt_c0201b0001_a.mtrl";
+        const string skinTexture = "chara/human/c0201/obj/body/b0001/texture/--c0201b0001_base.tex";
+        skin.Json("meta.json", $$$"""
+            {"FileVersion":4,"Identifier":"{{{G1}}}","Name":"Skin","Author":"me",
+             "DefaultData":{"Files":{
+               "chara/equipment/e0100/model/c0201e0100_top.mdl":"m\\top.mdl",
+               "{{{body}}}":"m\\skin.mtrl","{{{skinTexture}}}":"m\\skin.tex"} } }
+            """);
+        skin.File("m/top.mdl", TestAssets.CreateMdl(material: "/mt_c0201b0001_a.mtrl"));
+        skin.File("m/skin.mtrl", Mtrl(skinTexture));
+        skin.File("m/skin.tex", [1]);
+        Assert.Equal("Body c0201 #1", string.Join(", ", CustomizationDetection.FindRoots(PenumbraMod.Load(skin.Path), skin.Path)
+            .Select(r => $"{r.Kind} c{r.GenderRace:D4} #{r.ModelId}")));
     }
 
     /// <summary>

@@ -7,6 +7,7 @@ internal static class CustomizationRuleTests
     [
         ("Shared material roots (hair 101-200, Hrothgar t0001)", SharedRoots),
         ("Hrothgar tail materials use t0001 and five variant folders", HrothgarMaterialPaths),
+        ("A material named by complete game path is used as it is", CompleteMaterialPaths),
         ("Hrothgar tail to other race tail", HrothgarToOtherTail),
         ("Other race tail to Hrothgar tail", OtherToHrothgarTail),
         ("Hrothgar tail to Hrothgar tail keeps shared materials", HrothgarToHrothgarTail),
@@ -42,6 +43,38 @@ internal static class CustomizationRuleTests
         Assert.Equal("chara/human/c1501/obj/tail/t0001/material/v0003/mt_c1501t0001_til_a.mtrl", paths[2]);
         Assert.Equal("chara/human/c0801/obj/tail/t0002/material/v0001/mt_c0801t0002_a.mtrl",
             CustomizationPaths.MaterialPath(Tail(801, 2), "/mt_c0801t0002_a.mtrl"));
+    }
+
+    /// <summary>
+    /// A model can name its material by complete game path instead of a short /mt_….mtrl name.
+    /// No folder is added to such a path, whichever kind of customization loads it.
+    /// </summary>
+    private static void CompleteMaterialPaths()
+    {
+        const string midlander = "chara/human/c0201/obj/hair/h0144/material/v0001/mt_c0201h0144_hir_b.mtrl";
+        Assert.Equal(midlander, CustomizationPaths.MaterialPath(Hair(801, 144), midlander));
+        Assert.Equal(midlander, CustomizationPaths.MaterialPath(Hair(801, 144), "/" + midlander));
+        Assert.Equal(midlander, CustomizationPaths.MaterialPath(Hair(801, 144), midlander.Replace('/', '\\')));
+        // The short name still resolves through the shared root.
+        Assert.Equal(midlander, CustomizationPaths.MaterialPath(Hair(801, 144), "/mt_c0201h0144_hir_b.mtrl"));
+
+        const string face = "chara/human/c0801/obj/face/f0002/material/mt_c0801f0002_fac_a.mtrl";
+        Assert.Equal(face, CustomizationPaths.MaterialPath(new(AssetKind.Face, 801, 2), face));
+        const string ear = "chara/human/c1801/obj/zear/z0003/material/mt_c1801z0003_a.mtrl";
+        Assert.Equal(ear, CustomizationPaths.MaterialPath(new(AssetKind.VieraEar, 1801, 3), ear));
+
+        // A Hrothgar tail may load any variant folder; the one the model names comes first.
+        var hrothgar = CustomizationPaths.MaterialPaths(Tail(1501, 3),
+            "chara/human/c1501/obj/tail/t0001/material/v0002/mt_c1501t0001_til_a.mtrl");
+        Assert.Equal(5, hrothgar.Length);
+        Assert.Equal("chara/human/c1501/obj/tail/t0001/material/v0002/mt_c1501t0001_til_a.mtrl", hrothgar[0]);
+        Assert.True(hrothgar.Contains("chara/human/c1501/obj/tail/t0001/material/v0005/mt_c1501t0001_til_a.mtrl"));
+
+        // An Au Ra tail: Raen load it as named, Xaela the same material from their own root.
+        const string raen = "chara/human/c1401/obj/tail/t0003/material/v0001/mt_c1401t0003_a.mtrl";
+        Assert.Equal(raen, CustomizationPaths.MaterialPath(Tail(1401, 3), raen));
+        Assert.Equal("chara/human/c1401/obj/tail/t0103/material/v0001/mt_c1401t0103_a.mtrl",
+            CustomizationPaths.MaterialPath(Tail(1401, 103), raen));
     }
 
     private static void HrothgarToOtherTail()
