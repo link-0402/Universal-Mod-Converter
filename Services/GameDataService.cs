@@ -529,6 +529,11 @@ public sealed class GameDataService : IGameFileProvider
             foreach (var (token, keys) in gearKeys)
                 contents[token] = ModContents.Of(index, keys.Contains);
 
+            // A set the mod holds only because another item's model loads its material by complete path
+            // is that item's dependency; converting the item brings it along.
+            foreach (var (token, keys) in gearKeys)
+                if (GearDetection.IsBorrowed(index, keys)) found.Remove(token);
+
             animations = Animations.Scan(mod);
         }
         catch (Exception ex)
