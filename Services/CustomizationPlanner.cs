@@ -464,6 +464,10 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                     string.Equals(Json.GetString(obj["Type"]), "Est", StringComparison.OrdinalIgnoreCase) &&
                     obj["Manipulation"] is JsonObject est)
                     AddEstChanges(est, path + ".Manipulation", changes);
+                if (Json.GetString(obj["Type"]) is { } shapeType &&
+                    (shapeType.Equals("Shp", StringComparison.OrdinalIgnoreCase) || shapeType.Equals("Atr", StringComparison.OrdinalIgnoreCase)) &&
+                    obj["Manipulation"] is JsonObject shape)
+                    AddShapeChanges(shape, path + ".Manipulation", changes);
 
                 foreach (var (key, value) in obj.ToList())
                 {
@@ -527,6 +531,25 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                 if (replacement != text)
                     changes.Add(new JsonFieldChange { JsonPath = path, OldValue = text, NewValue = replacement, ChangeType = "path_string" });
             }
+        }
+
+        // Shape (Shp) and attribute (Atr) switches name a hair or face by slot and ID, and the race it is
+        // for by GenderRaceCondition. One for this very ID is the converted item's own and moves with it;
+        // one without an ID applies to every hair or face of its race, which this conversion is not about.
+        void AddShapeChanges(JsonObject shape, string path, List<JsonFieldChange> changes)
+        {
+            var slot = source.Kind switch { AssetKind.Hair => "Hair", AssetKind.Face => "Face", _ => null };
+            if (slot == null || !string.Equals(Json.GetString(shape["Slot"]), slot, StringComparison.OrdinalIgnoreCase)) return;
+            if (!Json.TryGetInt(shape["Id"], out var id) || id != source.ModelId) return;
+            var hasRace = Json.TryGetInt(shape["GenderRaceCondition"], out var race) && race != 0;
+            if (hasRace && race != source.GenderRace) return;
+
+            if (source.ModelId != target.ModelId)
+                changes.Add(new JsonFieldChange { JsonPath = path + ".Id", OldValue = source.ModelId.ToString(), NewValue = target.ModelId.ToString(),
+                    ChangeType = shape["Id"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
+            if (hasRace && source.GenderRace != target.GenderRace)
+                changes.Add(new JsonFieldChange { JsonPath = path + ".GenderRaceCondition", OldValue = source.GenderRace.ToString(), NewValue = target.GenderRace.ToString(),
+                    ChangeType = shape["GenderRaceCondition"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
         }
 
         void AddEstChanges(JsonObject est, string path, List<JsonFieldChange> changes)
