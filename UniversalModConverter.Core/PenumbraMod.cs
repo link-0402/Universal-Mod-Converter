@@ -37,6 +37,9 @@ public sealed class PenumbraMod
     {
         AllowTrailingCommas = true,
         CommentHandling = JsonCommentHandling.Skip,
+        // A JsonObject only notices a property written twice when it is first used, far from the file;
+        // refusing it while parsing says which file is wrong.
+        AllowDuplicateProperties = false,
     };
 
     private static readonly JsonWriterOptions WriteOptions = new()

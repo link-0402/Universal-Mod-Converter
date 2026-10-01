@@ -28,6 +28,7 @@ internal static class GearConversionTests
         ("In place refuses to overwrite existing target paths", InPlaceTargetConflict),
         ("Customization detection skips roots that only hold borrowed textures", CustomizationBorrowedTextures),
         ("Customization detection skips a shared material root a model loads", CustomizationSharedMaterialRoot),
+        ("Malformed paths and files are refused with an InvalidDataException", MalformedInputIsRefused),
         ("Skin textures are a root of their own and fan out to other races", SkinTextureRoots),
         ("Cross-slot new mod: output models list and mesh-group removal", CrossSlotMeshRemoval),
         ("A run leaves body parts out the way each of its conversions would alone", RunMeshDefaults),
@@ -299,6 +300,20 @@ internal static class GearConversionTests
     /// material and its textures. The Midlander root is the Miqo'te model's dependency, not a
     /// root of its own, whether the model names the material by complete path or by short name.
     /// </summary>
+    private static void MalformedInputIsRefused()
+    {
+        using var mod = new TempDir();
+        // A NUL in a mod-local path cannot name a file; callers that skip such paths catch InvalidDataException.
+        Assert.Throws<InvalidDataException>(() => PathSafety.ResolveRelative(mod.Path, "a b.tex"));
+        // Digits of another script are no race code, so the path is not an animation path.
+        Assert.True(!PapPath.TryParse("chara/human/c١٢٣٤/animation/a0001/bt_common/emote/pose01_loop.pap", out _),
+            "Arabic-Indic digits are no race");
+        Assert.True(PapPath.TryParse("chara/human/c0101/animation/a0001/bt_common/emote/pose01_loop.pap", out var path) && path.Race == 101);
+        // A property written twice in meta.json is reported as a bad mod, not as a crash.
+        mod.File("meta.json", Encoding.UTF8.GetBytes("""{"FileVersion":4,"Name":"A","Name":"B"}"""));
+        Assert.Throws<InvalidDataException>(() => PenumbraMod.Load(mod.Path));
+    }
+
     private static void CustomizationSharedMaterialRoot()
     {
         const string material = "chara/human/c0201/obj/hair/h0144/material/v0001/mt_c0201h0144_hir_b.mtrl";

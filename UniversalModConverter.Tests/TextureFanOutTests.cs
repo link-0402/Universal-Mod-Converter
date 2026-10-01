@@ -21,7 +21,24 @@ internal static class TextureFanOutTests
         ("An unreadable material is reported once, not once per target", UnreadableMaterialOnce),
         ("A written plan lets go of the contents it carried", ReleasesContents),
         ("Hair textures go to the shared root the game loads them from", HairSharedRoot),
+        ("A body variant only its own race has is not offered to other races", SkinVariantTargets),
     ];
+
+    private static void SkinVariantTargets()
+    {
+        using var mod = new TempDir();
+        const string xaela = "chara/human/c1401/obj/body/b0101/texture/c1401b0101_base.tex";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Xaela skin","DefaultData":{"Files":{"{{{xaela}}}":"skin.tex"} } }
+            """);
+        mod.File("skin.tex", [1]);
+        var plan = new TextureFanOutPlanner(new FakeGame()).Plan(mod.Path,
+            Request(new CustomizationPathEndpoint(AssetKind.Body, 1401, 101), TextureFanOutLayout.AddPathsToOptions, false, Skin(201)));
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "invalid_target" && d.IsBlocker && d.Message.Contains("b0101")
+                                             || d.Code == "invalid_target" && d.IsBlocker && d.Message.Contains("0101")),
+            string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.True(plan.Result.Default.Files!.Count == 1, "no path for another race's body is written");
+    }
 
     /// <summary>
     /// Hair 101-200 loads its textures from the Midlander root of the same ID. A target that

@@ -39,8 +39,10 @@ public sealed partial record PapPath(ushort Race, string Set, string Directory, 
         path = null!;
         var match = PathRegex().Match(Core.GamePath.Normalize(gamePath));
         if (!match.Success || match.Groups["key"].Value.Split('/').Any(s => s is "" or "." or "..")) return false;
-        path = new PapPath(ushort.Parse(match.Groups["race"].Value), match.Groups["set"].Value,
-            match.Groups["dir"].Value, match.Groups["key"].Value);
+        // \d also matches digits of other scripts, which no race code is written in.
+        if (!ushort.TryParse(match.Groups["race"].Value, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var race)) return false;
+        path = new PapPath(race, match.Groups["set"].Value, match.Groups["dir"].Value, match.Groups["key"].Value);
         return true;
     }
 
