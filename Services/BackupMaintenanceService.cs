@@ -57,7 +57,7 @@ public sealed class BackupMaintenanceService(
 
         // A backup written before the root moved, or under a Penumbra directory that is not
         // the current one, is still ours to clean up.
-        foreach (var record in configuration.History)
+        foreach (var record in history.Snapshot())
         {
             Add(Parent(record.RecoveryPath));
             Add(Parent(record.RevertedOutputPath));
@@ -89,7 +89,8 @@ public sealed class BackupMaintenanceService(
         // the only untouched copy of their mod. That includes one waiting behind later in-place
         // conversions of the same mod, which have to be reverted first.
         var protectedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var record in configuration.History.Where(history.CanStillRevert))
+        var records = history.Snapshot();
+        foreach (var record in records.Where(history.CanStillRevert))
             if (!string.IsNullOrEmpty(record.RecoveryPath))
                 protectedPaths.Add(Path.GetFullPath(record.RecoveryPath).TrimEnd('\\', '/'));
 
@@ -110,7 +111,7 @@ public sealed class BackupMaintenanceService(
         if (deleted.Count == 0) return SweepResult.Empty;
         log.Information("[UMC] Removed {0} expired backup folder(s), {1}.", deleted.Count, Describe(bytes));
 
-        var pruned = configuration.History
+        var pruned = records
             .Where(record => Matches(record.RecoveryPath, deleted) || Matches(record.RevertedOutputPath, deleted))
             .Select(record => record.Id)
             .ToList();

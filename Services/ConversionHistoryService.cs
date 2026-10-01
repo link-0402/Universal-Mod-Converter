@@ -19,6 +19,19 @@ public sealed class ConversionHistoryService(Configuration configuration)
 
     public IReadOnlyList<ConversionRecord> Records => configuration.History;
 
+    /// <summary>
+    /// A copy of the records, for a worker thread: the framework thread adds and drops records
+    /// while the list itself is enumerated, which would throw.
+    /// </summary>
+    public ConversionRecord[] Snapshot() => configuration.History.ToArray();
+
+    /// <summary>
+    /// Records a revert has begun moving but <see cref="MarkReverted"/> has not recorded yet. Their
+    /// backup is already on its way back to the mod folder, which must not make the backups of the
+    /// older conversions beneath them look unreachable to a sweep running in between.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> _reverting = new();
+
     public ConversionRecord Record(ConversionTask task, string description, string sourceModName)
     {
         var record = new ConversionRecord
@@ -54,7 +67,7 @@ public sealed class ConversionHistoryService(Configuration configuration)
                   "so this conversion can no longer be undone."
                 : "The backup of the original is missing, so this conversion can no longer be undone.";
         // Reverting an older conversion of this mod would silently discard every later one.
-        var latest = configuration.History.FirstOrDefault(r => IsLiveInPlace(r, record.SourceModDirectory));
+        var latest = Snapshot().FirstOrDefault(r => IsLiveInPlace(r, record.SourceModDirectory));
         return latest == record ? null : "A later in-place conversion of this mod must be reverted first.";
     }
 
@@ -71,10 +84,10 @@ public sealed class ConversionHistoryService(Configuration configuration)
             return false;
 
         // History is newest first: every later conversion of this mod must be revertable too.
-        return configuration.History
+        return Snapshot()
             .TakeWhile(r => r != record)
             .Where(r => IsLiveInPlace(r, record.SourceModDirectory))
-            .All(HasBackup);
+            .All(r => HasBackup(r) || _reverting.ContainsKey(r.Id));
     }
 
     private static bool IsLiveInPlace(ConversionRecord record, string sourceModDirectory)
@@ -103,6 +116,7 @@ public sealed class ConversionHistoryService(Configuration configuration)
         if (!ModConverterService.SameVolume(parked, parent))
             return new RevertResult(false, ModConverterService.BackupOnOtherDrive(Path.GetDirectoryName(parked)!), null, null);
         var moved    = false;
+        _reverting[record.Id] = 0;
         try
         {
             Directory.Move(published, parked);
@@ -125,6 +139,7 @@ public sealed class ConversionHistoryService(Configuration configuration)
             // Put the converted output back if the original could not take its place.
             if (moved && !Directory.Exists(published))
                 try { Directory.Move(parked, published); } catch { /* reported below */ }
+            _reverting.TryRemove(record.Id, out _);
             log($"[ERROR] Revert failed: {ex.Message}");
             return new RevertResult(false, $"Revert failed: {ex.Message}", null, null);
         }
@@ -132,6 +147,7 @@ public sealed class ConversionHistoryService(Configuration configuration)
 
     public void MarkReverted(ConversionRecord record, RevertResult result)
     {
+        _reverting.TryRemove(record.Id, out _);
         if (!result.Success) return;
         record.RevertedUtc        = DateTime.UtcNow;
         record.RevertedOutputPath = result.ParkedPath;
