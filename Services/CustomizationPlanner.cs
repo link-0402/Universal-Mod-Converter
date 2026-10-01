@@ -62,10 +62,18 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             try { optionFiles.Add((Normalize(key), PathSafety.ResolveRelative(root, GamePath.ToLocal(local)))); }
             catch (InvalidDataException) { /* a path outside the mod folder is no file of the mod's */ }
         }
-        var assets = DiscoverAssets(root, resources.Files, optionFiles, CustomizationPaths.MovedRoots(source, target), references);
+        var movedRoots = CustomizationPaths.MovedRoots(source, target);
+        var missing = new List<string>();
+        var assets = DiscoverAssets(root, resources.Files, optionFiles, movedRoots, references, missing);
+        foreach (var file in missing.Distinct(StringComparer.OrdinalIgnoreCase))
+            task.Diagnostics.Add(new PlanDiagnostic("missing_local_file",
+                $"The mod redirects a game path under this root to '{Path.GetRelativePath(root, file)}', which does not exist; it is skipped.",
+                false));
         if (assets.Count == 0)
-            throw new InvalidDataException($"No {descriptor.DisplayName.ToLowerInvariant()} root matched " +
-                                           $"c{sourceRace:D4}/{descriptor.Token(oldId)}.");
+            throw new InvalidDataException(resources.FileSwaps.Keys.Any(key => movedRoots.Any(moved => CustomizationPaths.Contains(key, moved)))
+                ? $"This {descriptor.DisplayName.ToLowerInvariant()} root only holds file swaps, which cannot be converted. " +
+                  "Convert the mod it swaps to instead."
+                : $"No {descriptor.DisplayName.ToLowerInvariant()} root matched c{sourceRace:D4}/{descriptor.Token(oldId)}.");
 
         task.AllAssetFiles.Clear();
         task.AllAssetFiles.AddRange(assets);
@@ -266,7 +274,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
     /// <param name="sources">The roots the conversion moves (see <see cref="CustomizationPaths.MovedRoots"/>).</param>
     private static HashSet<string> DiscoverAssets(string root,
         IReadOnlyDictionary<string, string> mappings, IReadOnlyList<(string GamePath, string Local)> optionFiles,
-        IReadOnlyList<CustomizationPathEndpoint> sources, References references)
+        IReadOnlyList<CustomizationPathEndpoint> sources, References references, ICollection<string> missing)
     {
         var assets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var queue = new Queue<string>();
@@ -296,7 +304,9 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         void Add(string path)
         {
             var full = Path.GetFullPath(path);
-            PathSafety.EnsureContained(root, full, true);
+            PathSafety.EnsureContained(root, full);
+            // A game path the mod redirects to a file it does not have is said, not a reason to refuse the plan.
+            if (!File.Exists(full)) { missing.Add(full); return; }
             if (assets.Add(full)) queue.Enqueue(full);
         }
 

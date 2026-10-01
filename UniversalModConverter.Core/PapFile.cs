@@ -220,6 +220,13 @@ public static class PapTimeline
     public static bool IsSafeMotionName(string name) => name.Length is > 0 and < 256 &&
         name.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-' or '.');
 
+    /// <summary>
+    /// A face pack's name: motion names, one per folder level (<c>emot/upset</c>, <c>resident/face</c>),
+    /// none of them empty or a dot that would step out of the folder.
+    /// </summary>
+    public static bool IsSafePackName(string name) => name.Length is > 0 and < 256 &&
+        name.Split('/').All(part => part is not ("." or "..") && IsSafeMotionName(part));
+
     /// <summary>Every string referenced by every embedded timeline, in file order.</summary>
     public static List<TimelineString> ReadStrings(byte[] pap)
     {

@@ -180,22 +180,26 @@ public sealed class TmbTimeline
     public IEnumerable<string> Motions
         => _items.Where(i => i.Magic is "C009" or "C010" && i.String is { Present: true }).Select(i => i.String!.Text);
 
-    /// <summary>The facial animations the timeline plays (C010 names starting with <c>cfx</c>).</summary>
+    /// <summary>
+    /// The facial animations the timeline plays: names starting with <c>cfx</c>, which the game
+    /// plays from a C010 and some timelines from a C009 as well.
+    /// </summary>
     public IEnumerable<string> Faces
-        => _items.Where(i => i.Magic == "C010" && i.String is { Present: true } s && s.Text.StartsWith("cfx", StringComparison.Ordinal))
+        => _items.Where(i => i.Magic is "C009" or "C010" && i.String is { Present: true } s && s.Text.StartsWith("cfx", StringComparison.Ordinal))
             .Select(i => i.String!.Text);
 
     /// <summary>
     /// The face pack (TMPP) the timeline has the game load, by name: <c>smile</c> for the
-    /// character's <c>f000x/nonresident/smile.pap</c>. Null when it asks for none.
+    /// character's <c>f000x/nonresident/smile.pap</c>, <c>emot/upset</c> for one in a subfolder.
+    /// Null when it asks for none.
     /// </summary>
     public string? FacePack
     {
-        get => _items.FirstOrDefault(i => i.Magic == "TMPP")?.String is { Present: true } s ? s.Text : null;
+        get => _items.FirstOrDefault(i => i.Magic == "TMPP")?.String is { Present: true, Text.Length: > 0 } s ? s.Text : null;
         set
         {
             if (value == null) throw new ArgumentNullException(nameof(value));
-            if (!PapTimeline.IsSafeMotionName(value)) throw new InvalidDataException($"'{value}' is not a valid face pack name.");
+            if (!PapTimeline.IsSafePackName(value)) throw new InvalidDataException($"'{value}' is not a valid face pack name.");
             var pack = _items.FirstOrDefault(i => i.Magic == "TMPP");
             if (pack == null)
             {
