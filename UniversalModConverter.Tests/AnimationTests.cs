@@ -13,6 +13,7 @@ internal static class AnimationTests
         ("PAP header, entries and Havok replacement", PapRoundTrip),
         ("PAP entry and timeline motion renames", PapRenames),
         ("Timelines are rebuilt in the game's layout, with faces added", TimelineEditing),
+        ("A face played by a C009 counts, and a face pack may sit in a folder", TimelineFaceNames),
         ("Animation game paths and idle slots", PathsAndSlots),
         ("Retarget keeps rest poses and scales translation", RetargetRestAndScale),
         ("Retarget transfers rotation and folds dropped bones", RetargetRotationAndDroppedBones),
@@ -197,6 +198,20 @@ internal static class AnimationTests
     /// Adding a face gives the body's track a C010 lasting as long as the body, and a pack
     /// header placed where the game keeps it.
     /// </summary>
+    private static void TimelineFaceNames()
+    {
+        // The game plays a face from a C010; some timelines play it from a C009, and it is a face all the same.
+        Assert.Equal(["cfxf_smile"], TmbTimeline.Parse(Timeline("cfxf_smile")).Faces);
+        Assert.True(!TmbTimeline.Parse(Timeline("cbem_joy")).Faces.Any(), "a body animation plays no face");
+
+        // The game's packs sit in folders too (f0002/nonresident/emot/upset.pap).
+        var timeline = TmbTimeline.Parse(Timeline("cbem_joy"));
+        timeline.FacePack = "emot/upset";
+        Assert.Equal("emot/upset", TmbTimeline.Parse(timeline.ToArray()).FacePack);
+        foreach (var bad in new[] { "", "/upset", "emot/", "emot//upset", "../upset", "emot/../upset", "a b" })
+            Assert.Throws<InvalidDataException>(() => timeline.FacePack = bad);
+    }
+
     private static void TimelineEditing()
     {
         const string jpose02 =

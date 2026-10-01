@@ -92,11 +92,13 @@ internal sealed class SkeletonHierarchyService(
     private string? ResolveExtraSkeletonPath(HumanPbd pbd, CustomizationPathEndpoint source,
         ModResourceIndex resources, ISet<string> warnings)
     {
-        if (source.Kind == AssetKind.VieraEar)
-            return ExtraSkeletonPath(source.GenderRace, AssetKind.Face, 1);
-        if (source.Kind is not (AssetKind.Hair or AssetKind.Face)) return null;
+        if (source.Kind is not (AssetKind.Hair or AssetKind.Face or AssetKind.VieraEar)) return null;
 
-        var estPath = source.Kind == AssetKind.Hair
+        // Viera ears hang off the race's face skeleton. The game has no skeleton f0001 for them: the
+        // face table maps the faces to skeletons 2-5, so ask it for face 1 like any face.
+        var kind = source.Kind == AssetKind.VieraEar ? AssetKind.Face : source.Kind;
+        var modelId = source.Kind == AssetKind.VieraEar ? (ushort)1 : source.ModelId;
+        var estPath = kind == AssetKind.Hair
             ? "chara/xls/charadb/hairskeletontemplate.est"
             : "chara/xls/charadb/faceskeletontemplate.est";
         byte[]? estBytes = null;
@@ -118,11 +120,11 @@ internal sealed class SkeletonHierarchyService(
         {
             ushort skeletonId = 0;
             var overridden = resources.EstOverrides.TryGetValue(
-                new EstOverrideKey(source.Kind, current, source.ModelId), out skeletonId);
+                new EstOverrideKey(kind, current, modelId), out skeletonId);
             try
             {
                 if (!overridden && estBytes != null)
-                    _ = ExtraSkeletonTable.TryGet(estBytes, current, source.ModelId, out skeletonId);
+                    _ = ExtraSkeletonTable.TryGet(estBytes, current, modelId, out skeletonId);
             }
             catch (Exception ex)
             {
@@ -130,7 +132,7 @@ internal sealed class SkeletonHierarchyService(
                 estBytes = null;
             }
 
-            if (skeletonId != 0) return ExtraSkeletonPath(current, source.Kind, skeletonId);
+            if (skeletonId != 0) return ExtraSkeletonPath(current, kind, skeletonId);
             race = pbd.GetParentRace(current);
         }
         return null;

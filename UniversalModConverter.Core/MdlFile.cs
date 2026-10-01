@@ -479,9 +479,13 @@ public sealed class MdlFile
         for (var l = 0; l < Lods.Length; l++)
         {
             var lod = Lods[l];
+            // An empty mesh has the start index of the next real one; the real one owns the shapes there,
+            // so removing only the empty one must not take the real mesh's shapes with it.
             removedStarts[l] = Enumerable.Range(lod.MeshIndex, lod.MeshCount)
-                .Where(i => i < Meshes.Length && remove.Contains(i))
-                .Select(i => Meshes[i].StartIndex)
+                .Where(i => i < Meshes.Length)
+                .GroupBy(i => Meshes[i].StartIndex)
+                .Where(group => remove.Contains(group.OrderByDescending(i => Meshes[i].IndexCount > 0).First()))
+                .Select(group => group.Key)
                 .ToHashSet();
         }
         var droppedShapeMeshes = new HashSet<int>();
