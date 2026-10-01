@@ -76,6 +76,7 @@ public sealed partial class ConverterSession
         OutputMode      = plugin.Configuration.OutputMode;
         TextureLayout   = plugin.Configuration.TextureLayout;
         TextureAsNewMod = plugin.Configuration.TextureAsNewMod;
+        NewModOnlyConverted = plugin.Configuration.NewModOnlyConverted;
         HideModdedTargets = plugin.Configuration.HideModdedTargets;
         Modded          = new ModdedTargets(plugin.PenumbraIpc,
             folder => Mods.FirstOrDefault(m => string.Equals(m.Folder, folder, StringComparison.OrdinalIgnoreCase))?.Name,
@@ -246,6 +247,33 @@ public sealed partial class ConverterSession
         // fallback: it applies again as soon as the plan can use it.
         : OutputMode == ConversionOutputMode.AddToMod && AddToModBlockReason != null ? ConversionOutputMode.NewMod
         : OutputMode;
+
+    /// <summary>
+    /// Whether a new mod made from gear or animation conversions holds only what they convert,
+    /// rather than a copy of the whole mod with them converted in it.
+    /// </summary>
+    public bool NewModOnlyConverted { get; private set; }
+
+    /// <summary>
+    /// Why a new mod is always a copy of the whole mod, so the choice of
+    /// <see cref="NewModOnlyConverted"/> does not apply, or null. A customization is converted
+    /// in a copy of its mod, and a fan-out has output choices of its own.
+    /// </summary>
+    public string? NewModOnlyConvertedBlockReason
+        => UsesTextureOutput || OutputContents.HasFlag(PlanContents.Customization)
+            ? $"A new mod from a {OutputCustomizationName ?? "customization"} conversion is always a copy of the whole mod."
+            : null;
+
+    /// <summary>Whether the new mod is a copy of the whole mod, converted the way converting in place would.</summary>
+    public bool NewModKeepsWholeMod
+        => EffectiveOutputMode.IsNewMod() && !NewModOnlyConverted && NewModOnlyConvertedBlockReason == null;
+
+    /// <summary>
+    /// The mode the planners see: <see cref="EffectiveOutputMode"/>, except that a new mod
+    /// keeping the whole mod is planned like converting in place (see <see cref="ConversionTask.PlanMode"/>).
+    /// What a conversion does to the source follows this, not where it is written.
+    /// </summary>
+    public ConversionOutputMode PlanOutputMode => NewModKeepsWholeMod ? ConversionOutputMode.InPlace : EffectiveOutputMode;
 
     public string NewModName { get; private set; } = string.Empty;
     private bool _newModNameIsDefault = true;
@@ -731,6 +759,15 @@ public sealed partial class ConverterSession
         MarkPlanDirty(); // The gear plan depends on the output mode.
     }
 
+    public void SetNewModOnlyConverted(bool onlyConverted)
+    {
+        if (onlyConverted == NewModOnlyConverted) return;
+        NewModOnlyConverted = onlyConverted;
+        Config.NewModOnlyConverted = onlyConverted;
+        Config.Save();
+        MarkPlanDirty(); // Keeping the whole mod plans the conversions as in place.
+    }
+
     public void SetTextureLayout(TextureFanOutLayout layout)
     {
         if (layout == TextureLayout) return;
@@ -868,13 +905,19 @@ public sealed partial class ConverterSession
             // a single conversion supports, customization and mesh editing included.
             task = enabled[0].Task.CloneInputs();
             task.OutputMode = EffectiveOutputMode;
+            task.KeepsWholeMod = NewModKeepsWholeMod;
             // Like the output mode, the layout is chosen for the plan, not per entry.
             if (task.TextureRequest is { } fanOut) task.TextureRequest = fanOut with { Layout = TextureLayout };
             description = enabled[0].Description;
         }
         else
         {
-            task = new ConversionTask { ModDirectory = ModDirectory, OutputMode = EffectiveOutputMode };
+            task = new ConversionTask
+            {
+                ModDirectory  = ModDirectory,
+                OutputMode    = EffectiveOutputMode,
+                KeepsWholeMod = NewModKeepsWholeMod,
+            };
             // Planning runs off the framework thread, so it works on copies; the queue's own
             // entries get the results once it is done.
             task.Entries.AddRange(enabled.Select(e => e.ForPlanning()));

@@ -11,6 +11,19 @@ public class ConversionTask
     /// <summary>Whether the plan creates a new mod or edits the source mod in place.</summary>
     public ConversionOutputMode OutputMode { get; set; } = ConversionOutputMode.NewMod;
 
+    /// <summary>
+    /// A new mod only: it is a copy of the whole mod, converted the way converting in place
+    /// would, instead of holding only what the plan converts. Gear and animations only; hair,
+    /// face, tail, ear and skin conversions and texture fan-outs always copy the whole mod.
+    /// </summary>
+    public bool KeepsWholeMod { get; set; }
+
+    /// <summary>
+    /// The mode the planners plan with: <see cref="OutputMode"/>, except that a new mod keeping
+    /// the whole mod is planned like converting in place, and only written elsewhere.
+    /// </summary>
+    public ConversionOutputMode PlanMode => KeepsWholeMod && OutputMode.IsNewMod() ? ConversionOutputMode.InPlace : OutputMode;
+
     /// <summary>The complete gear conversion plan; null for customization conversions.</summary>
     public GearConversionPlan? GearPlan { get; set; }
 
@@ -163,6 +176,7 @@ public class ConversionTask
         {
             Kind                    = Kind,
             OutputMode              = OutputMode,
+            KeepsWholeMod           = KeepsWholeMod,
             AnimationRequest        = AnimationRequest,
             TextureRequest          = TextureRequest,
             TargetCustomizationKind = TargetCustomizationKind,

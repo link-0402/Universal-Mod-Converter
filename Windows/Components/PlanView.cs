@@ -168,7 +168,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         }
 
         ImGui.SameLine();
-        Widgets.Badge(OutputModeBadge(task.OutputMode), Theme.Muted);
+        Widgets.Badge(task.KeepsWholeMod ? "New mod, whole copy" : OutputModeBadge(task.OutputMode), Theme.Muted);
         if (task.TexturePlan is { } texture)
         {
             ImGui.SameLine();

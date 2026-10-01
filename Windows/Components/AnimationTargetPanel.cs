@@ -495,7 +495,8 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
     {
         ImGui.TableNextColumn();
         using var id = ImRaii.PushId("source");
-        var mode = session.EffectiveOutputMode;
+        // A new mod keeping the whole mod is converted as in place, so it moves the animation too.
+        var mode = session.PlanOutputMode;
         var kept = session.AnimationSourceRaceStays;
         using (ImRaii.Disabled(!mode.IsNewMod()))
         {
@@ -505,6 +506,10 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         {
             ConversionOutputMode.AddToMod => $"{RaceNames.Describe(race)}, the race it is retargeted from. Adding to this mod always " +
                                              "keeps its animation.",
+            ConversionOutputMode.InPlace when session.NewModKeepsWholeMod
+                                          => $"{RaceNames.Describe(race)}, the race it is retargeted from. A new mod copying the " +
+                                             "whole mod moves the animation from it to the ticked races, as converting in place " +
+                                             "would; tick \"Only what's converted\" to choose.",
             ConversionOutputMode.InPlace  => $"{RaceNames.Describe(race)}, the race it is retargeted from. Converting in place moves " +
                                              "the animation from it to the ticked races; add to this mod to keep it too.",
             _                             => $"{RaceNames.Describe(race)}, the race it is retargeted from. Ticked, the new mod holds " +
