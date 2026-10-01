@@ -32,7 +32,7 @@ Open the window with `/umc` (settings: `/umcconfig` or the cog icon).
 1. **Pick a mod** in the browser on the left, or enter a folder path under **Other folder**.
 2. **From/To:** pick the source item, hair, face, tail, ear, skin or animation, and its target.
 3. **Add selection to conversion plan.** Repeat for anything else to convert in the same pass.
-4. **Output:**:
+4. **Output:**
    - **Create a new mod**, **Add to this mod** to put the result beside the original, or **Convert in place** to replace it. 
    - With **Only what's converted** ticked (the default), a new mod holds only the converted items or animations. Untick it to copy the whole mod instead, everything else included, with the conversions made in it as converting in place would. Hair, face, tail, ear and skin conversions always copy the whole mod with that part converted.
    - Retextures instead offer **Add paths on existing options** or **Create new groups for new paths**, optionally with **Create as a new mod** to write them to a copy of the whole mod; the original always keeps working.
@@ -40,10 +40,10 @@ Open the window with `/umc` (settings: `/umcconfig` or the cog icon).
    - Retargeting lists the source race ticked: a new mod holds its animation too unless you untick it, adding to this mod always keeps it, and converting in place moves the animation from it to the ticked races.
    - An expression added to this mod gets an option group of its own, so the animation can still be played without it.
    - Hovering an option explains it, and the text under the selected one says what it does with what you planned.
-6. **Review:** the plan previews automatically.**Mesh groups** lets you leave parts of a model out, for every gear conversion in the plan and for hair, face, tail and ear conversions, with a live preview on your character (Glamourer can put the original gear item on for you). Body parts of a model that changes slots start switched off.
-7. Click **Create new mod**, **Add to this mod** or **Convert in place** based on the selection above. The result is verified and loaded in Penumbra.
+6. **Review:** the plan previews automatically. **Mesh groups** lets you leave parts of a model out, for every gear conversion in the plan and for hair, face, tail and ear conversions, with a live preview on your character (Glamourer can put the original gear item on for you). Body parts of a model that changes slots start switched off.
+7. Click **Create a new mod**, **Add to this mod** or **Convert in place** based on the selection above. The result is verified and loaded in Penumbra.
 
-Nothing converts until it's added to the **conversion plan**; Preview and Apply both work on the whole plan, so one apply is one revertable entry in **History**.
+Nothing converts until it's added to the **conversion plan**; the plan is previewed and applied as a whole, so one apply is one revertable entry in **History**.
 **Merge modpacks** (top right) is a separate flow for combining two modpacks, such as separate mods containing only textures and only models. I'd recommend using this before attempting to swap such mods.
 During gear conversion you can tick off parts of the mesh you'd like to remove. When converting to a different slot, body parts will automatically be removed. Note that this cannot automatically add body meshes for the new output slot.
 

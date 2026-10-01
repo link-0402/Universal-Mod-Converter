@@ -198,7 +198,7 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                     targets.Add(target);
             }
             if (targets.Count == 0 && !_plan.HasBlockers)
-                Block("no_targets", "Tick at least one race or face to add the paths for.");
+                Block("no_targets", "Tick at least one race or ID to add the paths for.");
             var ordered = targets.OrderBy(t => t.GenderRace).ThenBy(t => t.Kind).ThenBy(t => t.ModelId).ToList();
 
             // Hair and Hrothgar tails load their files from a shared root, so a target that loads from

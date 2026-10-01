@@ -168,7 +168,7 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         if (contents.HasFlag(PlanContents.AnimationExpression))
             parts.Add("The expression is attached to the animation itself, which then always plays with it.");
         parts.Add("The original is kept as a backup, so the conversion can be reverted from the result or the History " +
-                  "tab until that backup expires.");
+                  "tab.");
         return string.Join(" ", parts);
     }
 
@@ -239,7 +239,7 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
                              (asNewMod
                                  ? "This mod is not modified."
                                  : "The mod as it is now is kept as a backup, so this can be reverted from the " +
-                                   "result or the History tab until that backup expires."));
+                                   "result or the History tab."));
 
         if (asNewMod) DrawNewModName();
     }
@@ -259,7 +259,7 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         var mode       = session.EffectiveOutputMode;
         var applyLabel = mode switch
         {
-            ConversionOutputMode.NewMod   => "Create new mod",
+            ConversionOutputMode.NewMod   => "Create a new mod",
             ConversionOutputMode.AddToMod => "Add to this mod",
             _                             => "Convert in place",
         };
@@ -280,26 +280,26 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
             ConversionOutputMode.AddToMod when session.UsesTextureOutput && session.TextureLayout == TextureFanOutLayout.NewGroups
                 => ("Add new option groups to this mod?",
                     $"'{session.ModName}' will get new option groups for every ticked race. The mod as it is now is " +
-                    "kept as a backup and can be restored with Revert until that backup expires.",
+                    "kept as a backup and can be restored with Revert.",
                     "Add"),
             ConversionOutputMode.AddToMod when session.UsesTextureOutput
                 => ("Add the paths to this mod?",
                     $"'{session.ModName}' will get the paths for every ticked race or face, beside the source's. The " +
-                    "mod as it is now is kept as a backup and can be restored with Revert until that backup expires.",
+                    "mod as it is now is kept as a backup and can be restored with Revert.",
                     "Add"),
             ConversionOutputMode.AddToMod when session.AddsExpressionGroup
                 => ("Add the expression to this mod?",
                     $"'{session.ModName}' gets the option group '{AnimationConversionPlanner.ExpressionGroupName}', which " +
                     "plays the animation with the expression; its \"-\" option plays it without. The mod as it is now " +
-                    "is kept as a backup and can be restored with Revert until that backup expires.",
+                    "is kept as a backup and can be restored with Revert.",
                     "Add"),
             ConversionOutputMode.AddToMod => ("Add the converted item to this mod?",
                 $"'{session.ModName}' will be modified, but the original item keeps working. The mod as it is " +
-                "now is kept as a backup and can be restored with Revert until that backup expires.",
+                "now is kept as a backup and can be restored with Revert.",
                 "Add"),
             _ => ("Convert this mod in place?",
                 $"'{session.ModName}' will be modified directly. The original is kept as a backup and can be " +
-                "restored with Revert until the backup expires; see Settings for how long they are kept.",
+                "restored with Revert.",
                 "Convert"),
         };
         confirm.Request(title, what, verb, session.Apply);
