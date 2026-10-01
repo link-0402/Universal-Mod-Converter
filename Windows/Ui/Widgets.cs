@@ -265,12 +265,18 @@ internal static class Widgets
     public static void Clipped(int count, float rowHeight, Action<int> drawRow)
     {
         var clipper = ImGui.ImGuiListClipper();
-        clipper.Begin(count, rowHeight);
-        while (clipper.Step())
-            for (var i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
-                drawRow(i);
-        clipper.End();
-        clipper.Destroy();
+        try
+        {
+            clipper.Begin(count, rowHeight);
+            while (clipper.Step())
+                for (var i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+                    drawRow(i);
+            clipper.End();
+        }
+        finally
+        {
+            clipper.Destroy();
+        }
     }
 
     /// <summary>Begins a bordered, padded panel. Always pair with <see cref="EndCard"/>.</summary>
