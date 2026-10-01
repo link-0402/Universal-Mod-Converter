@@ -43,11 +43,6 @@ public static class OutputModeRules
     public static string ReplacesOriginal(AssetKind kind)
         => $"{CustomizationKinds.Get(kind).DisplayName} conversions replace the original; create a new mod to keep it.";
 
-    /// <summary>A new option group goes beside what the mod already has; there is nothing to convert in place.</summary>
-    public static string GroupInPlace(string? groupName)
-        => $"{(string.IsNullOrWhiteSpace(groupName) ? "The option group" : $"'{groupName.Trim()}'")} is added beside what the " +
-           "mod already has, so there is nothing to convert in place. Add it to this mod or create a new mod.";
-
     /// <summary>A texture fan-out keeps its source and only adds paths.</summary>
     public const string FanOutInPlace = "A fan-out keeps its source; it adds to this mod or to a new one.";
 }
@@ -65,6 +60,18 @@ public static class ConversionOutputModes
 
     /// <summary>Leaves the source item working instead of moving it to the target.</summary>
     public static bool KeepsSource(this ConversionOutputMode mode) => mode == ConversionOutputMode.AddToMod;
+
+    /// <summary>
+    /// Whether a retarget's source race keeps its animation: adding to the mod always keeps it,
+    /// converting in place moves it to the target races, and a new mod holds it when
+    /// <paramref name="asked"/>.
+    /// </summary>
+    public static bool KeepsSourceRace(this ConversionOutputMode mode, bool asked) => mode switch
+    {
+        ConversionOutputMode.AddToMod => true,
+        ConversionOutputMode.InPlace  => false,
+        _                             => asked,
+    };
 }
 
 /// <summary>What kinds of files a mod replaces under a root, for telling the user what a conversion touches.</summary>

@@ -33,7 +33,7 @@ internal sealed class ModBrowserPanel(ConverterSession session)
     {
         var buttonWidth = ImGui.GetFrameHeight();
         ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - buttonWidth - ImGui.GetStyle().ItemSpacing.X);
-        ImGui.InputTextWithHint("##ModFilter", $"Filter {session.Mods.Count} mods…", ref _filter, 128);
+        ImGui.InputTextWithHint("##ModFilter", $"Filter {session.Mods.Count} mods", ref _filter, 128);
         ImGui.SameLine();
         if (Widgets.IconButton("##RefreshMods", FontAwesomeIcon.SyncAlt, "Reload the mod list from Penumbra"))
             session.RefreshMods();
@@ -83,7 +83,7 @@ internal sealed class ModBrowserPanel(ConverterSession session)
     {
         var buttonWidth = ImGui.GetFrameHeight();
         ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - buttonWidth - ImGui.GetStyle().ItemSpacing.X);
-        var submitted = ImGui.InputTextWithHint("##ManualPath", "Path to a mod folder…", ref _manualPath, 512,
+        var submitted = ImGui.InputTextWithHint("##ManualPath", "Path to a mod folder", ref _manualPath, 512,
             ImGuiInputTextFlags.EnterReturnsTrue);
         ImGui.SameLine();
         var reason = session.IsBusy ? "Wait for the current operation to finish."

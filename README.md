@@ -7,7 +7,7 @@ A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](ht
 - **Gear and facewear:** retarget an item to any other wearable item, including a different slot. Weapons are not supported.
 - **Hair, faces, tails, Viera ears and skins:** retarget to another ID and/or race, reshaped for the target. Tails and Viera ears can convert into each other.
 - **Retextures:** add a mod's textures (and face or skin materials) for other races and IDs at once (the other faces of a race, for example), either beside the original in its existing options or in new option groups per race. This covers skins, faces, and any hair, tail or ear mod that only replaces textures. A skin has no slots, so it only lists the races that have a skin of their own (Elezen and Miqo'te wear the Midlander one, for example).
-- **Animations:** move an idle to another idle slot, move an emote's animations to another emote, move a facial expression to another expression, retarget body animations to other races, and attach a facial expression from the game's list or another mod.
+- **Animations:** play an idle in any idle slots you tick, optionally retargeted to other races and with a facial expression; move an emote's animations to another emote, move a facial expression to another expression, retarget body animations to other races, and attach a facial expression from the game's list or another mod. Retargeting finds the skeleton an animation was made for among the game's and your installed skeleton mods (IVCS, YAS or larger ones), so the animation mod doesn't need to include it, and rebuilds it for the smallest standard skeleton of the target race (the game's, IVCS or IVCS + YAS) that has every bone it moves.
 - **Merge modpacks:** combine two modpacks into one new mod, with an explicit choice of which one wins where they overlap.
 - **Batch conversions:** queue up several conversions and apply or revert them together as one result.
 - **Safe by default:** everything is previewed before anything is written, and every conversion can be reverted.
@@ -36,10 +36,11 @@ Open the window with `/umc` (settings: `/umcconfig` or the cog icon).
    - **Create a new mod**, **Add to this mod** to put the result beside the original, or **Convert in place** to replace it. 
    - A new mod holds only the converted items or animations; hair, face, tail, ear and skin conversions instead copy the whole mod with that part converted.
    - Retextures instead offer **Add paths on existing options** or **Create new groups for new paths**, optionally with **Create as a new mod** to write them to a copy of the whole mod; the original always keeps working.
-   - An animation option group (a variant per slot) is added to this mod or created as a new mod, never converted in place.
+   - An idle plays in every slot you tick; its current slot keeps it only while ticked, so converting in place with it unticked moves the idle away.
+   - Retargeting lists the source race ticked: a new mod holds its animation too unless you untick it, adding to this mod always keeps it, and converting in place moves the animation from it to the ticked races.
    - An expression added to this mod gets an option group of its own, so the animation can still be played without it.
    - Hovering an option explains it, and the text under the selected one says what it does with what you planned.
-6. **Review:** the plan previews automatically.**Mesh groups** lets you leave parts of a gear model out, for every gear conversion in the plan, with a live preview on your character (Glamourer can put the original item on for you). Body parts of a model that changes slots start switched off.
+6. **Review:** the plan previews automatically.**Mesh groups** lets you leave parts of a model out, for every gear conversion in the plan and for hair, face, tail and ear conversions, with a live preview on your character (Glamourer can put the original gear item on for you). Body parts of a model that changes slots start switched off.
 7. Click **Create new mod**, **Add to this mod** or **Convert in place** based on the selection above. The result is verified and loaded in Penumbra.
 
 Nothing converts until it's added to the **conversion plan**; Preview and Apply both work on the whole plan, so one apply is one revertable entry in **History**.

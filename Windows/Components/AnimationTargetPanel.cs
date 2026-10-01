@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using UniversalModConverter.Core;
@@ -10,33 +11,35 @@ using Dalamud.Interface.Utility.Raii;
 
 namespace UniversalModConverter.Windows.Components;
 
-/// <summary>The "To" card for animations: swap an idle or emote, or retarget to other races.</summary>
+/// <summary>
+/// The "To" card for animations: the slots an idle plays in, swapping an emote or expression, and
+/// retargeting to other races.
+/// </summary>
 internal sealed class AnimationTargetPanel(ConverterSession session)
 {
     private string _emoteFilter = string.Empty;
-    private string _groupName = string.Empty;
     private string _expressionFilter = string.Empty;
     private string _expressionModFilter = string.Empty;
     private string _expressionSwapFilter = string.Empty;
 
     public void Draw(AnimationSource source)
     {
+        if (source.Kind == AnimationSourceKind.Idle)
+        {
+            DrawIdle(source);
+            return;
+        }
+
         var operation = session.AnimationOperation;
         var facial = source.Kind == AnimationSourceKind.Expression;
         using (ImRaii.Disabled(!session.CanSwapAnimation))
         {
-            var label = source.Kind switch
-            {
-                AnimationSourceKind.Emote      => "Swap to another emote",
-                AnimationSourceKind.Expression => "Swap to another expression",
-                _                              => "Swap to another slot",
-            };
-            if (ImGui.RadioButton(label, operation == AnimationOperation.Swap))
+            if (ImGui.RadioButton(facial ? "Swap to another expression" : "Swap to another emote", operation == AnimationOperation.Swap))
                 session.SetAnimationOperation(AnimationOperation.Swap);
         }
         Widgets.Tooltip(!session.CanSwapAnimation ? "Only idles, emotes and expressions can be swapped."
             : facial ? "Play this face for another expression of the emote list, with its pace and options."
-            : "Play this animation from another slot or emote, for the same race.");
+            : "Play this animation for another emote, for the same race.");
         using (ImRaii.Disabled(facial))
         {
             ImGui.SameLine(0, 20f * Theme.Scale);
@@ -75,15 +78,89 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         ImGui.Spacing();
 
         if (operation == AnimationOperation.Retarget) DrawRetarget(source);
-        else if (source.Kind == AnimationSourceKind.Idle) DrawIdleSwap(source);
         else DrawEmoteSwap(source);
+    }
+
+    // ── Idles ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// An idle plays in every ticked slot, its current one only while that stays ticked.
+    /// Retargeting and a facial expression apply wherever it plays, so they are boxes of their own.
+    /// </summary>
+    private void DrawIdle(AnimationSource source)
+    {
+        var retarget = session.AnimationAlsoRetargets;
+        if (ImGui.Checkbox("Retarget to other races", ref retarget)) session.SetAnimationAlsoRetargets(retarget);
+        Widgets.Tooltip("Also rebuild the animation for other races' skeletons, rescaled to their proportions, in every slot " +
+                        "it plays in. Only races the game has a file of their own for there are listed: the others play " +
+                        "their parent race's (the game's race tree) and never load one of their own.");
+        ImGui.SameLine(0, 20f * Theme.Scale);
+        var attach = session.AttachExpression;
+        if (ImGui.Checkbox("Attach a facial expression", ref attach)) session.SetAttachExpression(attach);
+        Widgets.Tooltip("The animation plays with the face of a game emote or of another mod, in every slot it plays in.");
+        if (attach) DrawExpressionPicker();
+        if (session.NeedsAnimationSourceContainer) DrawSourceContainer(source);
+        ImGui.Spacing();
+
+        var slots = session.AnimationSlots;
+        if (slots.Count == 0)
+        {
+            Widgets.MutedWrapped("The game's slots for this idle could not be found.");
+            return;
+        }
+
+        // Side by side, both lists get the height the card has left.
+        using var table = ImRaii.Table("##IdleTargets", retarget ? 2 : 1, ImGuiTableFlags.SizingStretchSame);
+        if (!table.Success) return;
+        ImGui.TableNextColumn();
+        DrawIdleSlots(source, slots);
+        if (!retarget) return;
+        ImGui.TableNextColumn();
+        DrawRetargetSource(source);
+        DrawTargetRaces(source, 1);
+    }
+
+    private void DrawIdleSlots(AnimationSource source, IReadOnlyList<IdleSlot> slots)
+    {
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("Output slots");
+        Widgets.Tooltip("Tick every slot the animation should play in. Its current slot keeps it only while ticked: " +
+                        "unticked, converting in place moves it away, while adding to this mod leaves it there as it is.");
+
+        var missing = slots.Count(s => s.Index != source.SlotIndex && !session.CanSwapToIdleSlot(source, s));
+        using var list = ImRaii.Child("##Slots", new Vector2(-1, -1), true);
+        if (!list.Success) return;
+        var hidden = 0;
+        foreach (var slot in slots)
+        {
+            var current = slot.Index == source.SlotIndex;
+            var ticked = session.AnimationOutputSlots.Contains(slot.Index);
+            if (!current && !ticked && !session.CanSwapToIdleSlot(source, slot)) continue;
+            var modded = session.ModdedIdleSlot(source, slot);
+            // The current slot stays for orientation, whoever changes it.
+            if (!current && !session.ShowsTarget(modded, ticked))
+            {
+                hidden++;
+                continue;
+            }
+            using var id = ImRaii.PushId(slot.Index);
+            using (ImRaii.PushColor(ImGuiCol.Text, Theme.Danger, modded != null))
+            {
+                if (ImGui.Checkbox(current ? $"{slot.Label} (current)" : slot.Label, ref ticked))
+                    session.SetAnimationOutputSlot(slot.Index, ticked);
+            }
+            var keys = slot.StartKey == null ? $"{slot.LoopKey} (no start animation)" : $"{slot.LoopKey} and {slot.StartKey}";
+            Widgets.Tooltip(current ? $"{keys}\nWhere the animation plays now." : keys, modded);
+        }
+        if (hidden > 0) Widgets.Muted($"{hidden} modded {(hidden == 1 ? "slot" : "slots")} hidden.");
+        if (missing > 0) NotListed(source, missing, missing == 1 ? "slot is" : "slots are");
     }
 
     // ── Expressions ─────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Where the face comes from. Compact on purpose: it sits above the swap and retarget
-    /// controls, whose own lists need the height.
+    /// Where the face comes from. Compact on purpose: it sits above the slot, emote and race
+    /// lists, which need the height.
     /// </summary>
     private void DrawExpressionPicker()
     {
@@ -102,19 +179,19 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         var expressions = session.AnimationExpressions;
         if (expressions == null)
         {
-            Loading("Reading the expression list…");
+            Loading("Reading the expression list");
             return;
         }
 
         var chosen = expressions.FirstOrDefault(e => e.Id == session.ExpressionEmote);
         ImGui.SetNextItemWidth(-1);
-        using var combo = ImRaii.Combo("##ExpressionEmote", chosen == null ? "Choose an expression…" : $"/{chosen.Name}",
+        using var combo = ImRaii.Combo("##ExpressionEmote", chosen == null ? "Choose an expression" : $"/{chosen.Name}",
             ImGuiComboFlags.HeightLarge);
         Widgets.Tooltip("The expressions of the game's emote list. Each race gets the face the game plays for it.");
         if (!combo.Success) return;
 
         ImGui.SetNextItemWidth(-1);
-        ImGui.InputTextWithHint("##ExpressionFilter", "Filter expressions…", ref _expressionFilter, 64);
+        ImGui.InputTextWithHint("##ExpressionFilter", "Filter expressions", ref _expressionFilter, 64);
         var filter = _expressionFilter.Trim();
         foreach (var expression in expressions.Where(e => filter.Length == 0 || e.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)))
         {
@@ -130,12 +207,12 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         var current = mods.FirstOrDefault(m => string.Equals(m.Directory, session.ExpressionModDirectory,
             StringComparison.OrdinalIgnoreCase));
         ImGui.SetNextItemWidth(-1);
-        using (var combo = ImRaii.Combo("##ExpressionMod", current?.Name ?? "Choose a mod…", ImGuiComboFlags.HeightLarge))
+        using (var combo = ImRaii.Combo("##ExpressionMod", current?.Name ?? "Choose a mod", ImGuiComboFlags.HeightLarge))
         {
             if (combo.Success)
             {
                 ImGui.SetNextItemWidth(-1);
-                ImGui.InputTextWithHint("##ExpressionModFilter", "Filter mods…", ref _expressionModFilter, 64);
+                ImGui.InputTextWithHint("##ExpressionModFilter", "Filter mods", ref _expressionModFilter, 64);
                 var filter = _expressionModFilter.Trim();
                 // Two mods may share a name; the folder tells their rows apart.
                 foreach (var mod in mods.Where(m => filter.Length == 0 || m.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)))
@@ -152,7 +229,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         var expressions = session.ModExpressions;
         if (expressions == null)
         {
-            Loading("Looking for facial animations in that mod…");
+            Loading("Looking for facial animations in that mod");
             return;
         }
         if (expressions.Count == 0)
@@ -162,7 +239,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         }
 
         ImGui.SetNextItemWidth(-1);
-        using var files = ImRaii.Combo("##ExpressionFile", session.ExpressionModFile?.Label ?? "Choose an expression…");
+        using var files = ImRaii.Combo("##ExpressionFile", session.ExpressionModFile?.Label ?? "Choose an expression");
         if (!files.Success) return;
         for (var index = 0; index < expressions.Count; index++)
         {
@@ -172,85 +249,10 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         }
     }
 
-    // ── Idle slots ──────────────────────────────────────────────────────────
-
-    private void DrawIdleSwap(AnimationSource source)
-    {
-        var slots = session.AnimationSlots;
-        if (slots.Count == 0)
-        {
-            Widgets.MutedWrapped("The game's slots for this idle could not be found.");
-            return;
-        }
-
-        var group = session.AnimationAsGroup;
-        if (ImGui.RadioButton("Replace one slot", !group)) session.SetAnimationAsGroup(false);
-        Widgets.Tooltip("Move the animation into the chosen slot.");
-        ImGui.SameLine(0, 20f * Theme.Scale);
-        if (ImGui.RadioButton("Option group with a variant per slot", group)) session.SetAnimationAsGroup(true);
-        Widgets.Tooltip("Create a Penumbra option group whose options place the animation in each chosen slot, " +
-                        "so the slot can be picked in Penumbra at any time. Its first option, \"-\", places it nowhere. " +
-                        "The mod's own copy keeps playing in the current slot as long as this mod is enabled.");
-
-        if (group)
-        {
-            if (_groupName != session.AnimationGroupName) _groupName = session.AnimationGroupName;
-            ImGui.SetNextItemWidth(-1);
-            if (ImGui.InputTextWithHint("##GroupName", "Name of the option group", ref _groupName, 128))
-                session.SetAnimationGroupName(_groupName);
-            if (session.NeedsAnimationSourceContainer) DrawSourceContainer(source);
-            if (ImGui.SmallButton("All")) session.SetAnimationGroupSlots(slots.Select(s => s.Index));
-            ImGui.SameLine();
-            if (ImGui.SmallButton("None")) session.SetAnimationGroupSlots([]);
-            ImGui.SameLine();
-            Widgets.Muted($"{session.AnimationGroupSlots.Count} of {slots.Count(s => session.CanSwapToIdleSlot(source, s))} slots");
-        }
-        else if (session.EffectiveOutputMode == ConversionOutputMode.InPlace)  // Implied by AddToMod; not kept in a new mod.
-        {
-            var keep = session.AnimationKeepOriginal;
-            if (ImGui.Checkbox("Keep it in the current slot too", ref keep)) session.SetAnimationKeepOriginal(keep);
-            Widgets.Tooltip("Copy instead of move: both slots play this animation.");
-        }
-
-        var missing = slots.Count(s => s.Index != source.SlotIndex && !session.CanSwapToIdleSlot(source, s));
-        if (missing > 0) NotListed(source, missing, missing == 1 ? "slot is" : "slots are");
-
-        using var grid = ImRaii.Child("##Slots", new Vector2(-1, -1), true);
-        if (!grid.Success) return;
-        var shown = false;
-        foreach (var slot in slots)
-        {
-            var modded = session.ModdedIdleSlot(source, slot);
-            // The current slot stays for orientation, whoever changes it.
-            var chosen = slot.Index == source.SlotIndex ||
-                         (group ? session.AnimationGroupSlots.Contains(slot.Index) : slot.Index == session.AnimationTargetSlot);
-            if (!chosen && !session.CanSwapToIdleSlot(source, slot)) continue;
-            if (!session.ShowsTarget(modded, chosen)) continue;
-            shown = true;
-            using var id = ImRaii.PushId(slot.Index);
-            var label = slot.Index == source.SlotIndex ? $"{slot.Label} (current)" : slot.Label;
-            using (ImRaii.PushColor(ImGuiCol.Text, Theme.Danger, modded != null))
-            {
-                if (group)
-                {
-                    var included = session.AnimationGroupSlots.Contains(slot.Index);
-                    if (ImGui.Checkbox(label, ref included)) session.SetAnimationGroupSlot(slot.Index, included);
-                }
-                else
-                {
-                    using var disabled = ImRaii.Disabled(slot.Index == source.SlotIndex);
-                    if (ImGui.Selectable(label, slot.Index == session.AnimationTargetSlot)) session.SetAnimationTargetSlot(slot.Index);
-                }
-            }
-            Widgets.Tooltip(slot.StartKey == null ? $"{slot.LoopKey} (no start animation)" : $"{slot.LoopKey} and {slot.StartKey}", modded);
-        }
-        if (!shown) Widgets.Muted("Every slot is already modded.");
-    }
-
     /// <summary>
-    /// The version a new option group uses (a slot group, or an expression added to this mod), when
-    /// several options of the mod have their own: one group can hold only one file per animation.
-    /// Nothing is preselected, so the choice is always deliberate.
+    /// The version the option group of an expression added to this mod uses, when several options
+    /// of the mod have their own: one group can hold only one file per animation. Nothing is
+    /// preselected, so the choice is always deliberate.
     /// </summary>
     private void DrawSourceContainer(AnimationSource source)
     {
@@ -259,7 +261,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         Widgets.ColoredWrapped(Theme.Warning, "Take it from");
         ImGui.SameLine();
         ImGui.SetNextItemWidth(-1);
-        using (var combo = ImRaii.Combo("##SourceContainer", chosen?.Label ?? "Choose an option…", ImGuiComboFlags.HeightLarge))
+        using (var combo = ImRaii.Combo("##SourceContainer", chosen?.Label ?? "Choose an option", ImGuiComboFlags.HeightLarge))
         {
             if (combo.Success)
                 foreach (var provider in source.Providers)
@@ -279,12 +281,12 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         var emotes = session.AnimationEmotes;
         if (emotes == null)
         {
-            Loading("Reading the emote list…");
+            Loading("Reading the emote list");
             return;
         }
 
         ImGui.SetNextItemWidth(-1);
-        ImGui.InputTextWithHint("##EmoteFilter", "Filter emotes…", ref _emoteFilter, 64);
+        ImGui.InputTextWithHint("##EmoteFilter", "Filter emotes", ref _emoteFilter, 64);
         if (emotes.FirstOrDefault(e => e.Id == session.AnimationTargetEmote) is { } chosen)
         {
             ImGui.TextColored(Theme.Success, $"/{chosen.Name}");
@@ -331,12 +333,12 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         var expressions = session.AnimationExpressions;
         if (expressions == null)
         {
-            Loading("Reading the expression list…");
+            Loading("Reading the expression list");
             return;
         }
 
         ImGui.SetNextItemWidth(-1);
-        ImGui.InputTextWithHint("##ExpressionSwapFilter", "Filter expressions…", ref _expressionSwapFilter, 64);
+        ImGui.InputTextWithHint("##ExpressionSwapFilter", "Filter expressions", ref _expressionSwapFilter, 64);
         if (expressions.FirstOrDefault(e => e.Id == session.AnimationTargetEmote) is { } chosen)
         {
             ImGui.TextColored(Theme.Success, $"/{chosen.Name}");
@@ -414,9 +416,19 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
 
     private void DrawRetarget(AnimationSource source)
     {
+        DrawRetargetSource(source);
+        Widgets.MutedWrapped("To: only races the game has this animation for are listed. The others play their parent race's " +
+                             "(the game's race tree) and never load one of their own; the preview lists which of them each new " +
+                             "file also covers.");
+        DrawTargetRaces(source, 2);
+    }
+
+    /// <summary>The race whose files are rebuilt, on one line.</summary>
+    private void DrawRetargetSource(AnimationSource source)
+    {
         ImGui.AlignTextToFramePadding();
         ImGui.TextUnformatted("From");
-        ImGui.SameLine(60f * Theme.Scale);
+        ImGui.SameLine();
         ImGui.SetNextItemWidth(-1);
         using (var combo = ImRaii.Combo("##SourceRace", ConverterSession.RaceLabel(session.AnimationSourceRace)))
         {
@@ -426,48 +438,77 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
                         session.SetAnimationSourceRace(race);
         }
         Widgets.Tooltip("The race whose files are rebuilt. Only races this mod provides the animation for are listed.");
+    }
 
-        Widgets.MutedWrapped("To: only races the game has this animation for are listed. The others play their parent race's " +
-                             "(the game's race tree) and never load one of their own; the preview lists which of them each new " +
-                             "file also covers.");
+    /// <summary>
+    /// The races the retarget writes, in <paramref name="columns"/> columns filling the rest of the
+    /// card: the source race first, then those to rebuild the animation for.
+    /// </summary>
+    private void DrawTargetRaces(AnimationSource source, int columns)
+    {
         // Only races with a file of their own can be given one; ticked ones stay so they can be unticked.
+        var sourceRace = session.AnimationSourceRace;
         var retargetable = session.RetargetRaces(source);
-        var races = GenderRaces.Playable
-            .Where(r => r == session.AnimationSourceRace || retargetable.Contains(r) || session.AnimationTargetRaces.Contains(r))
+        var targets = GenderRaces.Playable
+            .Where(r => r != sourceRace && (retargetable.Contains(r) || session.AnimationTargetRaces.Contains(r)))
             .ToList();
         using var grid = ImRaii.Child("##Races", new Vector2(-1, -1), true);
         if (!grid.Success) return;
-        if (races.All(r => r == session.AnimationSourceRace))
+        if (targets.Count == 0)
         {
             Widgets.MutedWrapped("The game has this animation for no other race: every other race plays the one of a race " +
                                  "it inherits from, so there is no race to retarget it to.");
             return;
         }
-        using var table = ImRaii.Table("##RaceTable", 2, ImGuiTableFlags.SizingStretchSame);
+        using var table = ImRaii.Table("##RaceTable", columns, ImGuiTableFlags.SizingStretchSame);
         if (!table.Success) return;
-        foreach (var race in races)
+        DrawSourceRace(sourceRace);
+        foreach (var race in targets)
         {
             var included = session.AnimationTargetRaces.Contains(race);
-            var isSource = race == session.AnimationSourceRace;
             var provided = source.Races.Contains(race);
-            var modded   = isSource ? null : session.ModdedRetargetRace(source, race);
+            var modded   = session.ModdedRetargetRace(source, race);
             if (!session.ShowsTarget(modded, included)) continue;
             ImGui.TableNextColumn();
             using var id = ImRaii.PushId(race);
-            using (ImRaii.Disabled(isSource))
             using (ImRaii.PushColor(ImGuiCol.Text, Theme.Danger, modded != null))
             {
                 if (ImGui.Checkbox(ConverterSession.RaceLabel(race), ref included)) session.SetAnimationTargetRace(race, included);
             }
-            Widgets.Tooltip(isSource ? "This is the source race."
-                : provided
-                    ? $"{RaceNames.Describe(race)}. The mod already has this animation for this race; it would be replaced."
-                    : RaceNames.Describe(race), modded);
-            if (provided && !isSource)
+            Widgets.Tooltip(provided
+                ? $"{RaceNames.Describe(race)}. The mod already has this animation for this race; it would be replaced."
+                : RaceNames.Describe(race), modded);
+            if (provided)
             {
                 ImGui.SameLine();
                 Widgets.Badge("in mod", Theme.Warning);
             }
         }
+    }
+
+    /// <summary>
+    /// The source race, ticked while the output keeps its animation. Only a new mod leaves that
+    /// to the user: adding to this mod always keeps it, and converting in place always moves it
+    /// to the ticked races.
+    /// </summary>
+    private void DrawSourceRace(ushort race)
+    {
+        ImGui.TableNextColumn();
+        using var id = ImRaii.PushId("source");
+        var mode = session.EffectiveOutputMode;
+        var kept = session.AnimationSourceRaceStays;
+        using (ImRaii.Disabled(!mode.IsNewMod()))
+        {
+            if (ImGui.Checkbox($"{ConverterSession.RaceLabel(race)} (source)", ref kept)) session.SetAnimationIncludesSourceRace(kept);
+        }
+        Widgets.Tooltip(mode switch
+        {
+            ConversionOutputMode.AddToMod => $"{RaceNames.Describe(race)}, the race it is retargeted from. Adding to this mod always " +
+                                             "keeps its animation.",
+            ConversionOutputMode.InPlace  => $"{RaceNames.Describe(race)}, the race it is retargeted from. Converting in place moves " +
+                                             "the animation from it to the ticked races; add to this mod to keep it too.",
+            _                             => $"{RaceNames.Describe(race)}, the race it is retargeted from. Ticked, the new mod holds " +
+                                             "its animation too; untick it to leave it out.",
+        });
     }
 }

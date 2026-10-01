@@ -137,13 +137,73 @@ public static partial class CustomizationPaths
     public static bool Contains(string value, CustomizationPathEndpoint endpoint)
         => FindEndpoints(value).Contains(endpoint);
 
+    /// <summary>Whether <paramref name="value"/> names a path under any of the customization's roots (see <see cref="Owner"/>).</summary>
+    public static bool Owns(string value, CustomizationPathEndpoint endpoint)
+        => FindEndpoints(value).Any(found => found == endpoint || Owner(found) == endpoint);
+
+    /// <summary>
+    /// Au Ra tails load their model from tN for both clans, but their material from tN for Raen
+    /// and from t(N+100) for Xaela, a root that holds nothing else.
+    /// </summary>
+    private const ushort XaelaTailOffset = 100;
+
+    public static bool IsAuRaTail(CustomizationPathEndpoint endpoint)
+        => endpoint.Kind == AssetKind.Tail && endpoint.GenderRace is 1301 or 1401;
+
+    /// <summary>The Xaela material root of an Au Ra tail (t0103 for tail 3), or null for any other root.</summary>
+    public static CustomizationPathEndpoint? XaelaMaterialEndpoint(CustomizationPathEndpoint endpoint)
+        => IsAuRaTail(endpoint) && endpoint.ModelId is > 0 and < XaelaTailOffset
+            ? endpoint with { ModelId = (ushort)(endpoint.ModelId + XaelaTailOffset) }
+            : null;
+
+    /// <summary>
+    /// The customization a root belongs to: itself, except that an Au Ra tail's Xaela material
+    /// root (t0103) belongs to the tail whose model loads it (t0003).
+    /// </summary>
+    public static CustomizationPathEndpoint Owner(CustomizationPathEndpoint endpoint)
+        => IsAuRaTail(endpoint) && endpoint.ModelId is > XaelaTailOffset and < 2 * XaelaTailOffset
+            ? endpoint with { ModelId = (ushort)(endpoint.ModelId - XaelaTailOffset) }
+            : endpoint;
+
+    /// <summary>
+    /// The source roots a conversion moves: the customization itself, and an Au Ra tail's Xaela
+    /// material root when the target has one to receive it. Without one (another race, or Viera
+    /// ears) nothing loads the Xaela material any more, so it stays behind.
+    /// </summary>
+    public static IReadOnlyList<CustomizationPathEndpoint> MovedRoots(CustomizationPathEndpoint source,
+        CustomizationPathEndpoint target)
+        => XaelaMaterialEndpoint(source) is { } xaela && XaelaMaterialEndpoint(target) != null
+            ? [source, xaela]
+            : [source];
+
+    /// <summary>
+    /// Where each clan of the target loads its material from, paired with the root the source's
+    /// same clan loads it from. An Au Ra tail target also has Xaela; a source without a Xaela root
+    /// of its own gives Xaela its only material.
+    /// </summary>
+    public static IReadOnlyList<(CustomizationPathEndpoint Source, CustomizationPathEndpoint Target)> MaterialClans(
+        CustomizationPathEndpoint source, CustomizationPathEndpoint target)
+        => XaelaMaterialEndpoint(target) is { } xaela
+            ? [(source, target), (XaelaMaterialEndpoint(source) ?? source, xaela)]
+            : [(source, target)];
+
     /// <summary>
     /// Rewrites only canonical customization roots matching <paramref name="source"/>.
     /// A race or model token elsewhere in the value is deliberately left untouched.
     /// Material paths are resolved through their material root (shared hair roots, the
     /// shared Hrothgar tail root) and receive the target's material folder layout.
+    /// An Au Ra tail's Xaela material root moves to the target's when it has one.
     /// </summary>
     public static string Rewrite(string value, CustomizationPathEndpoint source,
+        CustomizationPathEndpoint target)
+    {
+        var rewritten = RewriteRoot(value, source, target);
+        return XaelaMaterialEndpoint(source) is { } sourceXaela && XaelaMaterialEndpoint(target) is { } targetXaela
+            ? RewriteRoot(rewritten, sourceXaela, targetXaela)
+            : rewritten;
+    }
+
+    private static string RewriteRoot(string value, CustomizationPathEndpoint source,
         CustomizationPathEndpoint target)
     {
         if (!CustomizationKinds.CanConvert(source.Kind, target.Kind))
@@ -201,7 +261,16 @@ public static partial class CustomizationPaths
     public static string RewriteOwnedReference(string value, CustomizationPathEndpoint source,
         CustomizationPathEndpoint target)
     {
-        var rewritten = Rewrite(value, source, target);
+        var rewritten = RewriteOwnedRoot(value, source, target);
+        return XaelaMaterialEndpoint(source) is { } sourceXaela && XaelaMaterialEndpoint(target) is { } targetXaela
+            ? RewriteOwnedRoot(rewritten, sourceXaela, targetXaela)
+            : rewritten;
+    }
+
+    private static string RewriteOwnedRoot(string value, CustomizationPathEndpoint source,
+        CustomizationPathEndpoint target)
+    {
+        var rewritten = RewriteRoot(value, source, target);
         if (!string.Equals(rewritten, value, StringComparison.Ordinal)) return rewritten;
 
         if (source.Kind == AssetKind.Hair && target.Kind == AssetKind.Hair &&
@@ -220,6 +289,10 @@ public static partial class CustomizationPaths
             ? RewriteSharedRootIdentity(rewritten, source, target)
             : rewritten;
     }
+
+    /// <summary>The combined race/model identity resource filenames repeat, e.g. c1401t0003.</summary>
+    private static string Identity(CustomizationPathEndpoint endpoint)
+        => $"c{endpoint.GenderRace:D4}{CustomizationKinds.Get(endpoint.Kind).Prefix}{endpoint.ModelId:D4}";
 
     private static string RewriteIdentity(string value, string oldCombined, string newCombined,
         CustomizationPathEndpoint source, CustomizationPathEndpoint target)
@@ -271,12 +344,16 @@ public static partial class CustomizationPaths
     /// <summary>
     /// Every game path a model's material name can resolve to. Hrothgar tails load their
     /// materials from the shared t0001 root in one of the variant folders v0001-v0005.
+    /// For an Au Ra tail's Xaela material root, the material carries that root's name
+    /// (/mt_c1401t0003_a.mtrl loads t0103/material/v0001/mt_c1401t0103_a.mtrl).
     /// </summary>
     public static string[] MaterialPaths(CustomizationPathEndpoint endpoint, string materialName)
     {
         var root = GetMaterialEndpoint(endpoint);
         var directory = CustomizationKinds.Get(root.Kind).Root(root.GenderRace, root.ModelId) + "/material";
         var name = materialName.TrimStart('/');
+        if (Owner(endpoint) is var owner && owner != endpoint)
+            name = RewriteIdentity(name, Identity(owner), Identity(endpoint), owner, endpoint);
         var variants = MaterialVariants(endpoint);
         return variants.Length == 0
             ? [$"{directory}/{name}"]

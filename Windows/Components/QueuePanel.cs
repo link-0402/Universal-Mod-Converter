@@ -110,7 +110,7 @@ internal sealed class QueuePanel(ConverterSession session)
         ImGui.SameLine();
         var room = ImGui.GetContentRegionAvail().X - ImGui.GetFrameHeight() - ImGui.GetStyle().ItemSpacing.X * 2;
         ImGui.SetNextItemWidth(Math.Max(ImGui.GetFrameHeight() * 4, Math.Min(220f * Theme.Scale, room)));
-        using (var combo = ImRaii.Combo("##TakeFrom", "Take it from…", ImGuiComboFlags.HeightLarge))
+        using (var combo = ImRaii.Combo("##TakeFrom", "Take it from", ImGuiComboFlags.HeightLarge))
         {
             if (combo.Success)
                 foreach (var provider in entry.SourceChoices)

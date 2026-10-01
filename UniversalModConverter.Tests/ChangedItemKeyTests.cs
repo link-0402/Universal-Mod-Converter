@@ -21,6 +21,8 @@ internal static class ChangedItemKeyTests
         Assert.Equal(new ChangedCustomization(AssetKind.Face, 1401, 1), Parse("Customization: Au Ra Female Face 1"));
         Assert.Equal(new ChangedCustomization(AssetKind.Face, 1401, 1), Parse("Customization: Au Ra Female Face (Iris) 1"));
         Assert.Equal(new ChangedCustomization(AssetKind.Tail, 801, 3), Parse("Customization: Miqo'te Female Tail 3"));
+        // An Au Ra tail's Xaela material root counts as the tail itself.
+        Assert.Equal(new ChangedCustomization(AssetKind.Tail, 1401, 3), Parse("Customization: Au Ra Female Tail 103"));
         Assert.Equal(new ChangedCustomization(AssetKind.VieraEar, 1801, 1), Parse("Customization: Viera Female Ear 1"));
         Assert.Equal(new ChangedCustomization(AssetKind.Hair, 1501, 201), Parse("Customization: Hrothgar Male Hair (Skeleton) 201"));
         Assert.Equal(new ChangedCustomization(AssetKind.Hair, 1101, 12), Parse("Customization: Lalafell Male Hair 12"));

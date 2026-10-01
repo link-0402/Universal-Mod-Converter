@@ -113,11 +113,11 @@ public class ConversionTask
     /// </summary>
     public List<string> AllAssetFiles { get; } = new();
 
-    /// <summary>Gear only: the target models the output will ship, with their mesh groups.</summary>
+    /// <summary>Gear and customizations: the target models the output will ship, with their mesh groups.</summary>
     public List<GearOutputModel> OutputModels { get; } = new();
 
     /// <summary>
-    /// Gear only: mesh groups the user removed, by output-model local path. Chosen after the
+    /// Mesh groups the user removed, by output-model local path. Chosen after the
     /// preview and applied to the staged output, so changing it does not invalidate the plan.
     /// </summary>
     public Dictionary<string, MeshRemoval> MeshRemovals { get; } = new(System.StringComparer.OrdinalIgnoreCase);

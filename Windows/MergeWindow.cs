@@ -123,7 +123,7 @@ public sealed class MergeWindow : Window, IDisposable
         }
 
         ImGui.SetNextItemWidth(-1);
-        using var combo = ImRaii.Combo(id, current.Length == 0 ? "Choose a modpack…" : _merge.ModName(current),
+        using var combo = ImRaii.Combo(id, current.Length == 0 ? "Choose a modpack" : _merge.ModName(current),
             ImGuiComboFlags.HeightLarge);
         if (!combo.Success) return;
 
@@ -284,7 +284,7 @@ public sealed class MergeWindow : Window, IDisposable
                                                   "from their folders and are left out:");
             foreach (var missing in plan.MissingFiles.Take(20))
                 Widgets.MutedWrapped("  " + missing);
-            if (plan.MissingFiles.Count > 20) Widgets.Muted($"  …and {plan.MissingFiles.Count - 20} more.");
+            if (plan.MissingFiles.Count > 20) Widgets.Muted($"  and {plan.MissingFiles.Count - 20} more.");
         }
 
         ImGui.Spacing();

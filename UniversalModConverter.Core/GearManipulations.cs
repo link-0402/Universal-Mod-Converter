@@ -226,6 +226,6 @@ public static class GearManipulations
             .Where(m.ContainsKey)
             .Select(k => $"{k}={(Json.GetString(m[k]) ?? m[k]?.ToJsonString())}");
         var entry = m["Entry"]?.ToJsonString() ?? string.Empty;
-        return $"{type}[{string.Join(", ", fields)}] {(entry.Length > 60 ? entry[..60] + "…" : entry)}";
+        return $"{type}[{string.Join(", ", fields)}] {(entry.Length > 60 ? entry[..60] + "..." : entry)}";
     }
 }

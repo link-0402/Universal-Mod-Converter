@@ -8,7 +8,8 @@ public static class CustomizationDetection
         => FindRoots(new ModIndex(mod, modDirectory));
 
     /// <summary>
-    /// Returns every customization root the mod redirects game paths under. A root whose
+    /// Returns every customization root the mod redirects game paths under, an Au Ra tail's
+    /// Xaela material root counting as part of its tail (see <see cref="CustomizationPaths.Owner"/>). A root whose
     /// only mod content is textures that the mod's materials of another root load (a face 2
     /// material using a replaced face 1 mask, for example) is a dependency of that root,
     /// not a part of its own, and is left out.
@@ -17,9 +18,10 @@ public static class CustomizationDetection
     {
         var keys = new Dictionary<CustomizationPathEndpoint, HashSet<string>>();
         foreach (var redirect in index.Redirects)
-        foreach (var endpoint in CustomizationPaths.FindEndpoints(redirect.GamePath))
+        foreach (var found in CustomizationPaths.FindEndpoints(redirect.GamePath))
         {
-            if (!CustomizationKinds.Get(endpoint.Kind).SupportsRace(endpoint.GenderRace)) continue;
+            if (!CustomizationKinds.Get(found.Kind).SupportsRace(found.GenderRace)) continue;
+            var endpoint = CustomizationPaths.Owner(found);
             if (!keys.TryGetValue(endpoint, out var set)) keys[endpoint] = set = new(StringComparer.Ordinal);
             set.Add(redirect.GamePath);
         }
@@ -61,7 +63,7 @@ public static class CustomizationDetection
     /// it, plus textures its materials load that the mod also replaces (see <see cref="ModContents.Of(ModIndex, Func{string, bool})"/>).
     /// </summary>
     public static AssetContents Affected(ModIndex index, CustomizationPathEndpoint endpoint)
-        => ModContents.Of(index, path => CustomizationPaths.Contains(path, endpoint));
+        => ModContents.Of(index, path => CustomizationPaths.Owns(path, endpoint));
 
     /// <summary>What kinds of files the mod redirects under this root, and nothing else.</summary>
     public static AssetContents Contents(PenumbraMod mod, CustomizationPathEndpoint endpoint)
@@ -75,7 +77,7 @@ public static class CustomizationDetection
     {
         var contents = AssetContents.None;
         foreach (var redirect in redirects)
-            if (CustomizationPaths.Contains(redirect.GamePath, endpoint))
+            if (CustomizationPaths.Owns(redirect.GamePath, endpoint))
                 contents |= AssetContentsExtensions.Of(redirect.GamePath);
         return contents;
     }
@@ -87,7 +89,7 @@ public static class CustomizationDetection
         foreach (var redirect in index.Redirects)
         {
             if (redirect.Local == null || !redirect.GamePath.EndsWith(".mtrl", StringComparison.Ordinal) ||
-                CustomizationPaths.Contains(redirect.GamePath, endpoint)) continue;
+                CustomizationPaths.Owns(redirect.GamePath, endpoint)) continue;
             borrowed.UnionWith(index.MaterialTextures(redirect.Local));
         }
         return keys.All(borrowed.Contains);

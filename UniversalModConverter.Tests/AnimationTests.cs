@@ -17,9 +17,12 @@ internal static class AnimationTests
         ("Retarget keeps rest poses and scales translation", RetargetRestAndScale),
         ("Retarget transfers rotation and folds dropped bones", RetargetRotationAndDroppedBones),
         ("Idle swap in place renames and moves the file", IdleSwapInPlace),
-        ("Idle swap into an option group (new mod)", IdleSwapGroup),
-        ("An animation inside an option gets a new slot group beside it", IdleSwapGroupInOption),
-        ("Adding a slot group to the mod keeps the original where it is", IdleSwapGroupKeepsOriginal),
+        ("An idle goes to several slots at once, moved or kept where it is", IdleSeveralSlots),
+        ("A new mod holds the idle in every slot it plays in", IdleSeveralSlotsNewMod),
+        ("An animation inside an option goes to its new slots in that option", IdleSlotsInOption),
+        ("Adding slots to the mod keeps the original, and each option its own version", IdleSlotsKeepOriginal),
+        ("A swap retargets on the way: the target races get it in every slot", IdleSlotsRetargeted),
+        ("An expression where the idle is gets a group that switches it for every race", IdleExpressionAtSource),
         ("Swapped files follow game-path layouts and reuse unchanged files", SwapLocalNames),
         ("A swap writes nothing for a race without the destination of its own", SwapSkipsRaceWithoutFile),
         ("Swap pairs the animation the action timeline plays", SwapFromDefaultIdle),
@@ -30,10 +33,11 @@ internal static class AnimationTests
         ("An expression added for a new mod stays in every option that plays the file", ExpressionNewModKeepsEveryOption),
         ("An expression added to this mod goes into an option group beside the original", ExpressionAddedAsGroup),
         ("A new mod of an animation leaves the mod's IMC groups behind", AnimationNewModDropsImcGroups),
-        ("A slot group gets a name of its own, and a key written in any case moves", SlotGroupNameAndKeyCase),
+        ("A key written in any case moves", SwapKeyCase),
         ("Every animation conversion of a run removes its own unused files", RunRemovesEveryOrphan),
         ("A face from another mod is checked for every race it plays on", ModFacePerRace),
-        ("Retarget adds target races and reports inheritance", RetargetPlan),
+        ("Retarget adds target races, moves them in place and reports inheritance", RetargetPlan),
+        ("Retarget hands the mod's skeletons over and names the source once", RetargetHandsOverSkeletons),
     ];
 
     private const string Loop3 = "chara/human/c0101/animation/a0001/bt_common/emote/pose03_loop.pap";
@@ -426,25 +430,14 @@ internal static class AnimationTests
         Assert.True(File.Exists(Path.Combine(mod.Path, "joy.pap")), "the original stays for \"-\"");
     }
 
-    /// <summary>
-    /// Penumbra tells groups apart by name, so a slot group named like one the mod has gets a
-    /// number. And a mod that writes its keys in another case still has the moved one removed.
-    /// </summary>
-    private static void SlotGroupNameAndKeyCase()
+    /// <summary>A mod that writes its keys in another case still has the moved one removed.</summary>
+    private static void SwapKeyCase()
     {
         using var mod = new TempDir();
         var shouting = "Chara/Human" + Loop3["chara/human".Length..];
-        Definition(mod, $$$"""{"Files":{"{{{shouting}}}":"anim\\loop.pap","{{{Start3}}}":"anim\\start.pap"}}""",
-            """[{"Type":"Single","Name":"Idle slot","Options":[{"Name":"A"}]}]""");
+        Definition(mod, $$$"""{"Files":{"{{{shouting}}}":"anim\\loop.pap","{{{Start3}}}":"anim\\start.pap"}}""");
         mod.File("anim/loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
         mod.File("anim/start.pap", BuildPap([("cbem_pose03_1st", 0)]));
-
-        var group = Planner(Game()).Plan(mod.Path, SlotRequest(ConversionOutputMode.AddToMod, ("Standing idle 5", Loop5, Start5)) with
-        {
-            GroupName = "Idle slot",
-        });
-        Assert.True(!group.HasBlockers, string.Join(" ", group.Diagnostics.Select(d => d.Message)));
-        Assert.Equal(new[] { "Idle slot", "Idle slot (2)" }, group.Result.Groups.Select(g => g.Name).ToArray());
 
         var moved = Planner(Game()).Plan(mod.Path, SlotRequest(ConversionOutputMode.InPlace, ("Standing idle 5", Loop5, Start5)));
         Assert.True(!moved.HasBlockers, string.Join(" ", moved.Diagnostics.Select(d => d.Message)));
@@ -690,7 +683,46 @@ internal static class AnimationTests
         Assert.Equal(new[] { Idle0 }, PenumbraMod.Load(mod.Path).Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
     }
 
-    private static void IdleSwapGroup()
+    /// <summary>
+    /// Converting in place, an idle goes to every slot it is given and leaves its own, unless it
+    /// stays there too. A part one slot has no counterpart for still goes where there is one.
+    /// </summary>
+    private static void IdleSeveralSlots()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"anim\\loop.pap","{{{Start3}}}":"anim\\start.pap"}}""");
+        mod.File("anim/loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        mod.File("anim/start.pap", BuildPap([("cbem_pose03_1st", 0)]));
+        var request = SlotRequest(ConversionOutputMode.InPlace, ("Standing idle (default)", Idle0, null), ("Standing idle 5", Loop5, Start5));
+
+        var moved = Planner(Game()).Plan(mod.Path, request);
+        Assert.True(!moved.HasBlockers, string.Join(" ", moved.Diagnostics.Select(d => d.Message)));
+        var files = moved.Result.Default.FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => GamePath.NormalizeLocal(e.Local));
+        Assert.Equal(new[] { Idle0, Loop5, Start5 }.Order().ToArray(), files.Keys.Order().ToArray());
+        string Played(string gamePath) => new PapFile(moved.Files.Single(f => f.Operation == LocalFileOperation.Write &&
+            GamePath.NormalizeLocal(f.Destination) == files[gamePath]).Content!).Entries.Single().Name;
+        Assert.Equal("cbnm_id0", Played(Idle0));
+        Assert.Equal("cbem_pose05_1lp", Played(Loop5));
+        Assert.Equal("cbem_pose05_1st", Played(Start5));
+        var unpaired = moved.Diagnostics.Single(d => d.Code == "unpaired");
+        Assert.True(unpaired.Message.Contains("Standing idle (default) has no start animation of its own") &&
+                    unpaired.Message.Contains("left out there"), unpaired.Message);
+        Assert.Equal(new[] { "anim/loop.pap", "anim/start.pap" }, moved.Files.Where(f => f.Operation == LocalFileOperation.Delete)
+            .Select(f => f.Destination.Replace('\\', '/')).Order().ToArray());
+
+        var kept = Planner(Game()).Plan(mod.Path, request with { StaysAtSource = true });
+        Assert.True(!kept.HasBlockers, string.Join(" ", kept.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { Idle0, Loop3, Start3, Loop5, Start5 }.Order().ToArray(),
+            kept.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
+        Assert.True(kept.Files.All(f => f.Operation != LocalFileOperation.Delete), "the idle stays in its own slot");
+        Assert.Equal(3, kept.Files.Count(f => f.Operation == LocalFileOperation.Write));
+    }
+
+    /// <summary>
+    /// A new mod holds the idle in every slot it plays in: renamed for each, and a copy where it
+    /// is when it stays there too. Nothing else of the mod comes along.
+    /// </summary>
+    private static void IdleSeveralSlotsNewMod()
     {
         using var mod = new TempDir();
         using var output = new TempDir(create: false);
@@ -699,31 +731,23 @@ internal static class AnimationTests
              "DefaultData":{"Files":{"{{{Loop3}}}":"anim\\loop.pap","chara/other.tex":"x.tex"} } }
             """);
         mod.File("anim/loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
-        var game = Game();
 
-        var request = SlotRequest(ConversionOutputMode.NewMod,
-            ("Standing idle (default)", Idle0, null), ("Standing idle 3", Loop3, Start3), ("Standing idle 5", Loop5, Start5)) with
+        var request = SlotRequest(ConversionOutputMode.NewMod, ("Standing idle (default)", Idle0, null), ("Standing idle 5", Loop5, Start5)) with
         {
-            GroupName = "Idle slot",
-            DefaultVariant = 1,
+            StaysAtSource = true,
         };
-        var plan = Planner(game).Plan(mod.Path, request);
+        var plan = Planner(Game()).Plan(mod.Path, request);
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
         GearConversionExecutor.WriteNewMod(plan, mod.Path, output.Path, "Idle (slots)");
 
         var result = PenumbraMod.Load(output.Path);
-        Assert.True(result.Default.FileEntries().All(e => !PapPath.TryParse(e.Key, out _)), "The group provides the animation.");
-        var group = result.Groups.Single();
-        Assert.Equal("Idle slot", group.Name);
-        // Past the empty "-" that switches the group off.
-        Assert.Equal(2, Json.GetInt(group.Node["DefaultSettings"], -1));
-        Assert.Equal(["-", "Standing idle (default)", "Standing idle 3", "Standing idle 5"],
-            group.Options.Select(o => Json.GetString(o["Name"])));
-        Assert.True(group.Options.All(o => Guid.TryParse(Json.GetString(o["Id"]), out _)), "Penumbra 1.7 options carry IDs.");
-        Assert.Equal(0, group.Containers[0].FileEntries().Count());
-        var names = group.Containers.Skip(1).Select(c => c.FileEntries().Single())
-            .Select(e => new PapFile(File.ReadAllBytes(Path.Combine(output.Path, e.Local))).Entries[0].Name).ToList();
-        Assert.Equal(["cbnm_id0", "cbem_pose03_1lp", "cbem_pose05_1lp"], names);
+        Assert.Equal(0, result.Groups.Count);
+        var files = result.Default.FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
+        Assert.Equal(new[] { Idle0, Loop3, Loop5 }.Order().ToArray(), files.Keys.Order().ToArray());
+        string Played(string gamePath) => new PapFile(File.ReadAllBytes(Path.Combine(output.Path, files[gamePath]))).Entries.Single().Name;
+        Assert.Equal("cbnm_id0", Played(Idle0));
+        Assert.Equal("cbem_pose03_1lp", Played(Loop3));
+        Assert.Equal("cbem_pose05_1lp", Played(Loop5));
         Assert.True(plan.Diagnostics.All(d => !d.Message.Contains("cbna_add_dmg_f")),
             "The hit reaction the game keeps beside its default idle is not worth a warning.");
         Assert.Equal(0, AnimationConversionVerifier.Verify(output.Path, plan).Count);
@@ -744,7 +768,7 @@ internal static class AnimationTests
         var request = SlotRequest(ConversionOutputMode.AddToMod,
             ("Standing idle (default)", Idle0, null), ("Standing idle 3", Loop3, Start3), ("Standing idle 5", Loop5, Start5)) with
         {
-            GroupName = "Idle slot",
+            KeepOriginal = true,
         };
         var plan = Planner(Game()).Plan(mod.Path, request);
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
@@ -761,85 +785,184 @@ internal static class AnimationTests
     }
 
     /// <summary>
-    /// A slot group for an animation that lives in an option is a new group beside it, named as
-    /// asked, with options named after the slots and "-" to switch it off. The option keeps its
-    /// own animation and files. Converting in place is refused: nothing is converted, a group is
-    /// added.
+    /// An idle inside an option goes to its new slots in that option, beside everything else the
+    /// option holds; the group keeps its shape and IDs. Converting in place moves it there.
     /// </summary>
-    private static void IdleSwapGroupInOption()
+    private static void IdleSlotsInOption()
     {
         using var mod = new TempDir();
         Definition(mod, """{"Files":{}}""",
             $$$"""[{"Name":"Style","Type":"Single","Priority":3,"DefaultSettings":1,"Options":[{"Name":"Off"},{"Id":"keep-me","Name":"A","Files":{"{{{Loop3}}}":"a.pap","chara/other.tex":"other.tex"} } ] } ]""");
         mod.File("a.pap", BuildPap([("cbem_pose03_1lp", 0)]));
         mod.File("other.tex", [1]);
-        var request = SlotRequest(ConversionOutputMode.AddToMod,
-            ("Standing idle 3", Loop3, null), ("Standing idle 5", Loop5, null)) with { GroupName = "Slot" };
+        var request = SlotRequest(ConversionOutputMode.AddToMod, ("Standing idle (default)", Idle0, null), ("Standing idle 5", Loop5, null)) with
+        {
+            KeepOriginal = true,
+        };
         var plan = Planner(Game()).Plan(mod.Path, request);
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
 
-        Assert.Equal(new[] { "Style", "Slot" }, plan.Result.Groups.Select(g => g.Name).ToArray());
-        var style = plan.Result.Groups[0];
+        var style = plan.Result.Groups.Single();
         Assert.Equal(new[] { "Off", "A" }, style.Options.Select(o => Json.GetString(o["Name"])).ToArray());
         Assert.Equal("keep-me", Json.GetString(style.Options.ElementAt(1)["Id"]));
-        Assert.Equal(new[] { Loop3, "chara/other.tex" },
+        Assert.Equal(0, style.Containers[0].FileEntries().Count());
+        Assert.Equal(new[] { Idle0, Loop3, Loop5, "chara/other.tex" }.Order().ToArray(),
             style.Containers[1].FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
 
-        var slot = plan.Result.Groups[1];
-        Assert.Equal(new[] { "-", "Standing idle 3", "Standing idle 5" }, slot.Options.Select(o => Json.GetString(o["Name"])).ToArray());
-        Assert.Equal(1, Json.GetInt(slot.Node["DefaultSettings"], -1));
-        Assert.Equal(4, Json.GetInt(slot.Node["Priority"], 0));
-        Assert.Equal(0, slot.Containers[0].FileEntries().Count());
-        Assert.Equal(new[] { Loop5 }, slot.Containers[2].FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
-
-        var inPlace = Planner(Game()).Plan(mod.Path, request with { Mode = ConversionOutputMode.InPlace });
-        Assert.True(inPlace.Diagnostics.Any(d => d.Code == "group_in_place" && d.IsBlocker), "a slot group is never converted in place");
-
-        // A plain replacement still works inside the option, and leaves the group's shape alone.
-        plan = Planner(Game()).Plan(mod.Path,
-            SlotRequest(ConversionOutputMode.InPlace, ("Standing idle 5", Loop5, null)));
+        plan = Planner(Game()).Plan(mod.Path, request with { Mode = ConversionOutputMode.InPlace, KeepOriginal = false });
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
         Assert.Equal(2, plan.Result.Groups.Single().Containers.Count);
-        Assert.True(plan.Result.Groups.Single().Containers[1].FileEntries().Any(e => GamePath.Normalize(e.Key) == Loop5));
+        Assert.Equal(new[] { Idle0, Loop5, "chara/other.tex" }.Order().ToArray(),
+            plan.Result.Groups.Single().Containers[1].FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
     }
 
     /// <summary>
-    /// Added to the mod, the slot group sits beside the original: the source stays where it is,
-    /// in Default or its option, and the new group can be left at "-". One group cannot hold
-    /// a location that several options fill with different files.
+    /// Added to the mod, the idle plays in its new slot and keeps its own, in Default or in its
+    /// options; options with a version of their own each place theirs, so they still choose.
     /// </summary>
-    private static void IdleSwapGroupKeepsOriginal()
+    private static void IdleSlotsKeepOriginal()
     {
         using var mod = new TempDir();
         Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"a.pap"}}""");
         mod.File("a.pap", BuildPap([("cbem_pose03_1lp", 0)]));
-        var request = SlotRequest(ConversionOutputMode.AddToMod,
-            ("Standing idle 3", Loop3, null), ("Standing idle 5", Loop5, null)) with
-        {
-            GroupName = "Slot (smile)",
-        };
+        var request = SlotRequest(ConversionOutputMode.AddToMod, ("Standing idle 5", Loop5, null)) with { KeepOriginal = true };
         var plan = Planner(Game()).Plan(mod.Path, request);
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
-        Assert.Equal(new[] { Loop3 }, plan.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
-        var slot = plan.Result.Groups.Single();
-        Assert.Equal("Slot (smile)", slot.Name);
-        Assert.Equal(new[] { "-", "Standing idle 3", "Standing idle 5" }, slot.Options.Select(o => Json.GetString(o["Name"])).ToArray());
-        Assert.Equal(1, Json.GetInt(slot.Node["DefaultSettings"], -1));
+        Assert.Equal(new[] { Loop3, Loop5 }.Order().ToArray(),
+            plan.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
         GearConversionExecutor.ApplyInPlace(plan, mod.Path);
         Assert.True(File.Exists(Path.Combine(mod.Path, "a.pap")), "the original file stays");
 
         Definition(mod, """{"Files":{}}""",
             $$$"""[{"Name":"Style","Type":"Single","Options":[{"Name":"A","Files":{"{{{Loop3}}}":"a.pap"} },{"Name":"B","Files":{"{{{Loop3}}}":"b.pap"} } ] } ]""");
-        var b = BuildPap([("cbem_pose03_1lp", 0)], havokSize: 24); // told apart from a.pap by its size
-        mod.File("b.pap", b);
+        mod.File("b.pap", BuildPap([("cbem_pose03_1lp", 0)], havokSize: 24)); // told apart from a.pap by its size
         plan = Planner(Game()).Plan(mod.Path, request);
-        Assert.True(plan.Diagnostics.Any(d => d.Code == "several_sources" && d.IsBlocker), "two different files for one slot block");
-
-        // Told which option to take it from, the group uses that option's version.
-        plan = Planner(Game()).Plan(mod.Path, request with { SourceContainer = new ContainerAddress(0, 1) });
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
-        var slot3 = plan.Result.Groups.Single(g => g.Name == "Slot (smile)").Containers[1].FileEntries().Single().Local;
-        Assert.True(plan.Files.Single(f => f.Destination == slot3).Content!.SequenceEqual(b), "option B's version is used");
+        var style = plan.Result.Groups.Single();
+        foreach (var (option, source) in new[] { (0, "a.pap"), (1, "b.pap") })
+        {
+            var files = style.Containers[option].FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
+            Assert.Equal(source, files[Loop3]);
+            var placed = plan.Files.Single(f => f.Operation == LocalFileOperation.Write &&
+                                                GamePath.NormalizeLocal(f.Destination) == GamePath.NormalizeLocal(files[Loop5]));
+            Assert.Equal(source, placed.Source);
+        }
+    }
+
+    /// <summary>
+    /// Retargeting on the way, the target races get the source race's idle, rebuilt once for
+    /// each, in every slot it goes to and where it stays; a race the game has no file of its own
+    /// for in one of them gets none there. A new mod holds the source race's idle too unless told
+    /// not to, and converting in place moves it from the source race to the target races.
+    /// </summary>
+    private static void IdleSlotsRetargeted()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"c0101\\loop.pap"}}""");
+        mod.File("c0101/loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
+        var game = Game();
+        game.Files[PapPath.BaseSkeletonPath(101)] = [1];
+        game.Files[PapPath.BaseSkeletonPath(301)] = [3];
+        game.Files[PapPath.BaseSkeletonPath(1101)] = [2];
+        static string Race(string path, ushort race) => path.Replace("c0101", $"c{race:D4}");
+        // Lalafell males have both slots of their own; Highlander males only slot 5.
+        game.Files[Race(Loop3, 1101)] = BuildPap([("cbem_pose03_1lp", 0)], model: 1101);
+        game.Files[Race(Loop5, 1101)] = BuildPap([("cbem_pose05_1lp", 0)], model: 1101);
+        game.Files[Race(Loop5, 301)] = BuildPap([("cbem_pose05_1lp", 0)], model: 301);
+        var retargeter = new FakeRetargeter();
+        ushort? Parent(ushort race) => race switch { 1201 => 1101, 1101 => 101, 101 => null, _ => 101 };
+        var request = SlotRequest(ConversionOutputMode.NewMod, ("Standing idle 5", Loop5, Start5)) with
+        {
+            StaysAtSource = true,
+            SourceRace = 101,
+            TargetRaces = [1101, 301],
+        };
+        var plan = new AnimationConversionPlanner(game, Parent, retargeter).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(2, retargeter.Calls);
+
+        var files = plan.Result.Default.FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => GamePath.NormalizeLocal(e.Local));
+        Assert.Equal(new[] { Loop3, Loop5, Race(Loop3, 1101), Race(Loop5, 1101), Race(Loop5, 301) }.Order().ToArray(),
+            files.Keys.Order().ToArray());
+        Assert.Equal(@"c1101\loop.pap", files[Race(Loop3, 1101)]);
+        PapFile Written(string gamePath) => new(plan.Files.Single(f => f.Operation == LocalFileOperation.Write &&
+            GamePath.NormalizeLocal(f.Destination) == files[gamePath]).Content!);
+        Assert.Equal((ushort)1101, Written(Race(Loop3, 1101)).ModelId);
+        Assert.Equal((ushort)1101, Written(Race(Loop5, 1101)).ModelId);
+        Assert.Equal("cbem_pose05_1lp", Written(Race(Loop5, 1101)).Entries.Single().Name);
+        Assert.Equal((ushort)301, Written(Race(Loop5, 301)).ModelId);
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "no_race_file" && d.Message.Contains("Highlander")),
+            "a race without the source slot of its own gets none there, and is told");
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "inherited_by" && d.Message.Contains("Lalafell Female")),
+            "Lalafell female inherits the new Lalafell male files.");
+
+        string[] Keys(AnimationConversionPlan result) => [.. result.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order()];
+        var others = new[] { Race(Loop3, 1101), Race(Loop5, 1101), Race(Loop5, 301) }.Order().ToArray();
+        // Left out of the new mod, the source race gets nothing, wherever the others go.
+        var without = new AnimationConversionPlanner(game, Parent, new FakeRetargeter()).Plan(mod.Path, request with { IncludeSourceRace = false });
+        Assert.True(!without.HasBlockers, string.Join(" ", without.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(others, Keys(without));
+
+        // Converting in place moves it to the target races, whatever the request says; the source file goes.
+        var moved = new AnimationConversionPlanner(game, Parent, new FakeRetargeter()).Plan(mod.Path, request with { Mode = ConversionOutputMode.InPlace });
+        Assert.True(!moved.HasBlockers, string.Join(" ", moved.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(others, Keys(moved));
+        Assert.Equal(new[] { "c0101/loop.pap" },
+            moved.Files.Where(f => f.Operation == LocalFileOperation.Delete).Select(f => f.Destination.Replace('\\', '/')).ToArray());
+
+        // Added to this mod, it keeps its own and gets the new slot too, whatever the request says.
+        var added = new AnimationConversionPlanner(game, Parent, new FakeRetargeter()).Plan(mod.Path,
+            request with { Mode = ConversionOutputMode.AddToMod, KeepOriginal = true, IncludeSourceRace = false });
+        Assert.True(!added.HasBlockers, string.Join(" ", added.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { Loop3, Loop5 }.Concat(others).Order().ToArray(), Keys(added));
+    }
+
+    /// <summary>
+    /// Added to this mod, an expression where the idle is goes into an option group, which holds
+    /// the target races of a retarget too; they also get their rebuilt idle without the face
+    /// beside the source race's, so "-" plays all of it without. Its new slots get the face.
+    /// </summary>
+    private static void IdleExpressionAtSource()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"c0101\\loop.pap"}}""");
+        mod.File("c0101/loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
+        var game = Game();
+        game.Files["chara/human/c0101/animation/f0002/nonresident/smile.pap"] = BuildPap([("cfxf_smile", 1)]);
+        game.Files[PapPath.BaseSkeletonPath(101)] = [1];
+        game.Files[PapPath.BaseSkeletonPath(1101)] = [2];
+        var lala3 = Loop3.Replace("c0101", "c1101");
+        var lala5 = Loop5.Replace("c0101", "c1101");
+        game.Files[lala3] = BuildPap([("cbem_pose03_1lp", 0)], model: 1101);
+        game.Files[lala5] = BuildPap([("cbem_pose05_1lp", 0)], model: 1101);
+        var request = SlotRequest(ConversionOutputMode.AddToMod, ("Standing idle 5", Loop5, Start5)) with
+        {
+            StaysAtSource = true,
+            KeepOriginal = true,
+            SourceRace = 101,
+            TargetRaces = [1101],
+            Expression = new ExpressionDonor("/Smile", Pose: "smile"),
+        };
+        var plan = new AnimationConversionPlanner(game, race => race == 1101 ? (ushort)101 : null, new FakeRetargeter())
+            .Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        string[] Faces(string local) => [.. TmbTimeline.Parse(new PapFile(plan.Files.Single(f => f.Operation == LocalFileOperation.Write &&
+            GamePath.NormalizeLocal(f.Destination) == GamePath.NormalizeLocal(local)).Content!).Timeline(0)).Faces];
+
+        var files = plan.Result.Default.FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
+        Assert.Equal(new[] { Loop3, Loop5, lala3, lala5 }.Order().ToArray(), files.Keys.Order().ToArray());
+        Assert.Equal(@"c0101\loop.pap", files[Loop3]);
+        Assert.Equal(0, Faces(files[lala3]).Length);
+        Assert.Equal(["cfxf_smile"], Faces(files[Loop5]));
+        Assert.Equal(["cfxf_smile"], Faces(files[lala5]));
+
+        var group = plan.Result.Groups.Single(g => g.Name == AnimationConversionPlanner.ExpressionGroupName);
+        Assert.Equal(0, group.Containers[0].FileEntries().Count());
+        var faced = group.Containers[1].FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
+        Assert.Equal(new[] { Loop3, lala3 }.Order().ToArray(), faced.Keys.Order().ToArray());
+        Assert.True(faced.Values.All(local => Faces(local).SequenceEqual(["cfxf_smile"])), "the group plays the face for both races");
+        Assert.True(!string.Equals(GamePath.NormalizeLocal(faced[lala3]), GamePath.NormalizeLocal(files[lala3]), StringComparison.Ordinal),
+            "the Lalafell idle with the face is a file of its own");
     }
 
     private static void SwapSkipsRaceWithoutFile()
@@ -859,13 +982,14 @@ internal static class AnimationTests
         var write = plan.Files.Single(f => f.Operation == LocalFileOperation.Write);
         Assert.Equal("cbem_pose05_1lp", new PapFile(write.Content!).Entries[0].Name);
 
-        // In an option group the race is left out of the option, which stays for the races that have it.
-        var group = new AnimationConversionPlanner(Game(), _ => null, null).Plan(mod.Path,
-            SlotRequest(ConversionOutputMode.NewMod, ("Standing idle 5", Loop5, Start5)) with { GroupName = "Slot" });
-        Assert.True(!group.HasBlockers, string.Join(" ", group.Diagnostics.Select(d => d.Message)));
-        Assert.True(group.Diagnostics.Any(d => d.Code == "no_race_file" && d.Message.Contains("left out")), "explained in the group too");
-        Assert.Equal(new[] { Loop5 },
-            group.Result.Groups.Single(g => g.Name == "Slot").Containers[1].FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
+        // A new mod leaves the race out of every slot it has no file of its own in.
+        var several = new AnimationConversionPlanner(Game(), _ => null, null).Plan(mod.Path,
+            SlotRequest(ConversionOutputMode.NewMod, ("Standing idle (default)", Idle0, null), ("Standing idle 5", Loop5, Start5)));
+        Assert.True(!several.HasBlockers, string.Join(" ", several.Diagnostics.Select(d => d.Message)));
+        Assert.True(several.Diagnostics.Count(d => d.Code == "no_race_file" && d.Message.Contains("left out")) == 2,
+            "explained for each slot");
+        Assert.Equal(new[] { Idle0, Loop5 }.Order().ToArray(),
+            several.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
     }
 
     private static void SwapFromDefaultIdle()
@@ -913,16 +1037,72 @@ internal static class AnimationTests
         // Named, not coded: the message is for someone reading the plan, not the file paths.
         Assert.True(plan.Diagnostics.Any(d => d.Code == "inherited_by" && d.Message.Contains("Lalafell Female")),
             "Lalafell female inherits the new Lalafell male file.");
-        GearConversionExecutor.ApplyInPlace(plan, mod.Path);
-
-        var files = PenumbraMod.Load(mod.Path).Default.FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
-        var target = Loop3.Replace("c0101", "c1101");
-        Assert.Equal(new[] { Loop3, target }, files.Keys.Order().ToArray());
-        Assert.Equal(@"c1101\loop.pap", files[target]);
-        Assert.Equal((ushort)1101, new PapFile(File.ReadAllBytes(Path.Combine(mod.Path, files[target]))).ModelId);
-
         var unavailable = new AnimationConversionPlanner(game, Parent, new FakeRetargeter { Reason = "no" }).Plan(mod.Path, request);
         Assert.True(unavailable.Diagnostics.Any(d => d.IsBlocker && d.Code == "retarget_unavailable"));
+
+        // A new mod holds the source race's animation too, unless told not to.
+        var target = Loop3.Replace("c0101", "c1101");
+        string[] Keys(AnimationConversionPlan result) => [.. result.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order()];
+        var copied = new AnimationConversionPlanner(game, Parent, new FakeRetargeter()).Plan(mod.Path, request with { Mode = ConversionOutputMode.NewMod });
+        Assert.True(!copied.HasBlockers, string.Join(" ", copied.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { Loop3, target }, Keys(copied));
+        var alone = new AnimationConversionPlanner(game, Parent, new FakeRetargeter()).Plan(mod.Path,
+            request with { Mode = ConversionOutputMode.NewMod, IncludeSourceRace = false });
+        Assert.Equal(new[] { target }, Keys(alone));
+
+        // Added to this mod, the source race keeps its own whatever the request says.
+        var added = new AnimationConversionPlanner(game, Parent, new FakeRetargeter()).Plan(mod.Path,
+            request with { Mode = ConversionOutputMode.AddToMod, IncludeSourceRace = false });
+        Assert.Equal(new[] { Loop3, target }, Keys(added));
+
+        // Converting in place moves the animation from the source race to the target races.
+        GearConversionExecutor.ApplyInPlace(plan, mod.Path);
+        var files = PenumbraMod.Load(mod.Path).Default.FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
+        Assert.Equal(new[] { target }, files.Keys.ToArray());
+        Assert.Equal(@"c1101\loop.pap", files[target]);
+        Assert.Equal((ushort)1101, new PapFile(File.ReadAllBytes(Path.Combine(mod.Path, files[target]))).ModelId);
+        Assert.True(!File.Exists(Path.Combine(mod.Path, "c0101", "loop.pap")), "the source race's file goes with it");
+    }
+
+    /// <summary>
+    /// Finding skeletons is the retargeter's job: the planner needs none of the game's, hands over
+    /// every base skeleton the mod replaces, in any option (one whose file is missing left out),
+    /// and names the skeleton a file was made for once, however many races it is rebuilt for.
+    /// </summary>
+    private static void RetargetHandsOverSkeletons()
+    {
+        using var mod = new TempDir();
+        var midlander = PapPath.BaseSkeletonPath(101);
+        var lalafell = PapPath.BaseSkeletonPath(1101);
+        var highlander = PapPath.BaseSkeletonPath(301);
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"c0101\\loop.pap","{{{midlander}}}":"skl\\c0101.sklb"}}""",
+            $$$"""[{"Name":"Skeleton","Type":"Single","Options":[{"Name":"Small","Files":{"{{{lalafell}}}":"skl\\c1101.sklb","{{{highlander}}}":"skl\\gone.sklb"}}]}]""");
+        mod.File("c0101/loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
+        mod.File("skl/c0101.sklb", [1]);
+        mod.File("skl/c1101.sklb", [11]);
+        var game = Game();
+        game.Files[Loop3.Replace("c0101", "c1101")] = BuildPap([("cbem_pose03_1lp", 0)], model: 1101);
+        game.Files[Loop3.Replace("c0101", "c1201")] = BuildPap([("cbem_pose03_1lp", 0)], model: 1201);
+        var retargeter = new FakeRetargeter { Source = "the Midlander Male skeleton from IVCS (168 bones)" };
+        var request = new AnimationConversionRequest([PapPath.TryParse(Loop3, out var p) ? p.Location : ""],
+            AnimationOperation.Retarget, ConversionOutputMode.NewMod, "test")
+        {
+            SourceRace = 101,
+            TargetRaces = [1101, 1201],
+        };
+        ushort? Parent(ushort race) => race switch { 1201 => 1101, 1101 => 101, _ => null };
+        var plan = new AnimationConversionPlanner(game, Parent, retargeter).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+
+        Assert.Equal(new ushort[] { 1101, 1201 }, retargeter.Requests.Select(r => r.TargetRace).Order().ToArray());
+        foreach (var sent in retargeter.Requests)
+        {
+            Assert.Equal((ushort)101, sent.SourceRace);
+            Assert.Equal(new[] { ("Default", (ushort)101, (byte)1), ("Skeleton / Small", (ushort)1101, (byte)11) },
+                sent.ModSkeletons.Select(s => (s.Label, s.Race, s.Bytes[0])).ToArray());
+            Assert.Equal((ushort?)1101, sent.ParentRace(1201));
+        }
+        Assert.Equal(1, plan.Diagnostics.Count(d => d.Code == "retarget_source" && d.Message.Contains("from IVCS")));
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
@@ -1062,13 +1242,15 @@ internal static class AnimationTests
     private sealed class FakeRetargeter : IAnimationRetargeter
     {
         public string? Reason { get; init; }
-        public int Calls { get; private set; }
+        public string? Source { get; init; }
+        public List<RetargetRequest> Requests { get; } = [];
+        public int Calls => Requests.Count;
         public string? UnavailableReason => Reason;
 
-        public RetargetedPap Retarget(byte[] pap, byte[] sourceSkeleton, byte[] targetSkeleton, ushort targetRace)
+        public RetargetedPap Retarget(RetargetRequest request)
         {
-            Calls++;
-            return new RetargetedPap(new PapFile(pap).WithModel(targetRace, 0), ["test note"]);
+            Requests.Add(request);
+            return new RetargetedPap(new PapFile(request.Pap).WithModel(request.TargetRace, 0), ["test note"], Source);
         }
     }
 

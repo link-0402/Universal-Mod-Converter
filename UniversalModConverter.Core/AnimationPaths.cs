@@ -51,6 +51,18 @@ public sealed partial record PapPath(ushort Race, string Set, string Directory, 
     public static string BaseSkeletonPath(ushort race)
         => $"chara/human/c{race:D4}/skeleton/base/b0001/skl_c{race:D4}b0001.sklb";
 
+    [GeneratedRegex(@"^chara/human/c(?<race>\d{4})/skeleton/base/b0001/skl_c\k<race>b0001\.sklb$",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
+    private static partial Regex BaseSkeletonRegex();
+
+    /// <summary>Whether <paramref name="gamePath"/> is a race's base skeleton (see <see cref="BaseSkeletonPath"/>), and whose.</summary>
+    public static bool TryParseBaseSkeleton(string gamePath, out ushort race)
+    {
+        race = 0;
+        var match = BaseSkeletonRegex().Match(Core.GamePath.Normalize(gamePath));
+        return match.Success && ushort.TryParse(match.Groups["race"].Value, out race);
+    }
+
     public override string ToString() => GamePath;
 }
 

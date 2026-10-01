@@ -152,7 +152,7 @@ public sealed class ConfigWindow : Window, IDisposable
             ? usage.Folders == 0
                 ? "No backups are stored right now."
                 : $"{usage.Folders} backup(s) using {BackupMaintenanceService.Describe(usage.Bytes)}."
-            : "Measuring…");
+            : "Measuring");
 
         ImGui.SameLine();
         if (Widgets.IconTextButton(FontAwesomeIcon.Broom, "Clean up now"))
@@ -223,6 +223,6 @@ public sealed class ConfigWindow : Window, IDisposable
             _usage = null;
             _location = null;
         });
-        _sweepMessage = started ? "Cleaning up…" : "A cleanup is already running.";
+        _sweepMessage = started ? "Cleaning up" : "A cleanup is already running.";
     }
 }

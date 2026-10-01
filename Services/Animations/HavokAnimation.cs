@@ -119,15 +119,6 @@ internal sealed unsafe class HavokAnimation
         [FieldOffset(0xB0)] public hkaSkeleton* Skeleton;
     }
 
-    // hkaSkeletonMapper: hkReferencedObject (0x10), then hkaSkeletonMapperData's two
-    // skeleton references. Only the references are read.
-    [StructLayout(LayoutKind.Explicit, Size = 0x20)]
-    private struct MapperSkeletons
-    {
-        [FieldOffset(0x10)] public hkaSkeleton* A;
-        [FieldOffset(0x18)] public hkaSkeleton* B;
-    }
-
     // ── Memory ──────────────────────────────────────────────────────────────
 
     /// <summary>Plugin-owned native memory, freed together. Havok must never release it.</summary>
@@ -184,11 +175,17 @@ internal sealed unsafe class HavokAnimation
     /// <summary>A loaded Havok resource. The resource owns the object graph.</summary>
     internal sealed class Document : IDisposable
     {
+        private static ReadOnlySpan<byte> TagfileMagic => [0x1E, 0x0D, 0xB0, 0xCA, 0xCE, 0xFA, 0x11, 0xD0];
+        private static ReadOnlySpan<byte> PackfileMagic => [0x57, 0xE0, 0xE0, 0x57, 0x10, 0xC0, 0xC0, 0x10];
+
         private hkResource* _resource;
         private GCHandle _input;
 
         public Document(byte[] bytes)
         {
+            // Only data that starts like a binary tagfile or packfile reaches the loader.
+            if (bytes.Length < 8 || !(bytes.AsSpan(0, 8).SequenceEqual(TagfileMagic) || bytes.AsSpan(0, 8).SequenceEqual(PackfileMagic)))
+                throw new InvalidDataException("The data is not a Havok file.");
             var registry = hkBuiltinTypeRegistry.Instance();
             if (registry == null) throw new InvalidOperationException("The Havok type registry is unavailable.");
             var options = new hkSerializeUtil.LoadOptions
@@ -356,15 +353,14 @@ internal sealed unsafe class HavokAnimation
                  ((Predictive*)animation)->NumFloatSlots != skeleton->FloatSlots.Length))
                 throw new InvalidDataException(
                     $"The animation was compressed for a skeleton with {((Predictive*)animation)->NumBones} bones, " +
-                    $"but this skeleton has {skeleton->Bones.Length}. It was made for a modified skeleton; " +
-                    "include that skeleton in the mod to retarget it.");
+                    $"but this skeleton has {skeleton->Bones.Length}.");
             if (animation->Type == hkaAnimation.AnimationType.QuantizedCompressedAnimation)
             {
                 var header = (QuantizedHeader*)((Quantized*)animation)->Data.Data;
                 if (header->NumBones != skeleton->Bones.Length || header->NumFloats != skeleton->FloatSlots.Length)
                     throw new InvalidDataException(
                         $"The animation was compressed for a skeleton with {header->NumBones} bones, but this skeleton has " +
-                        $"{skeleton->Bones.Length}. It was made for a modified skeleton; include that skeleton in the mod to retarget it.");
+                        $"{skeleton->Bones.Length}.");
             }
 
             var bound = new HashSet<short>();
@@ -397,37 +393,17 @@ internal sealed unsafe class HavokAnimation
 
     // ── Skeletons ───────────────────────────────────────────────────────────
 
-    /// <summary>Every distinct skeleton in an SKLB: its main skeletons and both ends of its skeleton mappers.</summary>
-    public static List<SkeletonDescription> DescribeSkeletons(Document document)
+    /// <summary>
+    /// A skeleton file's main skeleton, the first in its container. The skeletons that
+    /// hkaSkeletonMapper entries embed are conversion endpoints, not full skeletons, and are
+    /// never read.
+    /// </summary>
+    public static SkeletonDescription DescribeMain(byte[] sklb)
     {
-        var result = new List<SkeletonDescription>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        void Add(hkaSkeleton* skeleton)
-        {
-            if (skeleton == null) return;
-            try
-            {
-                var description = Describe(skeleton);
-                if (seen.Add(Fingerprint(description))) result.Add(description);
-            }
-            catch (InvalidDataException)
-            {
-                // A broken secondary skeleton must not hide valid ones.
-            }
-        }
-
-        for (var i = 0; i < document.Container->Skeletons.Length; i++) Add(document.Container->Skeletons[i].ptr);
-        ValidateArray(document.Root->NamedVariants, 256, "named variants");
-        for (var i = 0; i < document.Root->NamedVariants.Length; i++)
-        {
-            var variant = document.Root->NamedVariants[i];
-            if (variant.ClassName.String != "hkaSkeletonMapper" || variant.Variant.ptr == null) continue;
-            var mapper = (MapperSkeletons*)variant.Variant.ptr;
-            Add(mapper->A);
-            Add(mapper->B);
-        }
-        if (result.Count == 0) throw new InvalidDataException("The skeleton file contains no valid skeleton.");
-        return result;
+        using var document = new Document(SklbEnvelope.ExtractHavok(sklb));
+        if (document.Container->Skeletons.Length == 0 || document.Container->Skeletons[0].ptr == null)
+            throw new InvalidDataException("The skeleton file holds no skeleton.");
+        return Describe(document.Container->Skeletons[0].ptr);
     }
 
     public static SkeletonDescription Describe(hkaSkeleton* skeleton)
@@ -487,23 +463,47 @@ internal sealed unsafe class HavokAnimation
         return skeleton;
     }
 
-    public static string Fingerprint(SkeletonDescription skeleton)
+    // ── Animations ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// What the listed bindings of a PAP's Havok data bind, as managed data. The animation list
+    /// and binding list must agree on them.
+    /// </summary>
+    public static List<AnimationChannels> ReadChannels(byte[] havok, IReadOnlyList<int> bindings)
     {
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        foreach (var bone in skeleton.Bones)
+        using var document = new Document(havok);
+        var container = document.Container;
+        var result = new List<AnimationChannels>();
+        foreach (var index in bindings)
         {
-            hash.AppendData(Encoding.UTF8.GetBytes(bone.Name + "\0"));
-            hash.AppendData(BitConverter.GetBytes(bone.Parent));
-            var r = bone.Reference;
-            foreach (var value in new[] { r.Position.X, r.Position.Y, r.Position.Z, r.Rotation.X, r.Rotation.Y, r.Rotation.Z,
-                         r.Rotation.W, r.Scale.X, r.Scale.Y, r.Scale.Z })
-                hash.AppendData(BitConverter.GetBytes(value));
+            if (index >= container->Bindings.Length || index >= container->Animations.Length ||
+                container->Bindings[index].ptr == null ||
+                container->Animations[index].ptr != container->Bindings[index].ptr->Animation.ptr)
+                throw new InvalidDataException("The file's animation list and binding list disagree.");
+            result.Add(Channels(container->Bindings[index].ptr));
         }
-        foreach (var name in skeleton.FloatNames) hash.AppendData(Encoding.UTF8.GetBytes(name + "\0"));
-        return Convert.ToHexString(hash.GetHashAndReset());
+        return result;
     }
 
-    // ── Animations ──────────────────────────────────────────────────────────
+    private static AnimationChannels Channels(hkaAnimationBinding* binding)
+    {
+        _ = Fingerprint(binding); // Checks every buffer before anything is copied.
+        var animation = binding->Animation.ptr;
+        if (binding->TransformTrackToBoneIndices.Length != animation->NumberOfTransformTracks ||
+            binding->FloatTrackToFloatSlotIndices.Length != animation->NumberOfFloatTracks)
+            throw new InvalidDataException("Animations without explicit track bindings are not supported.");
+        ValidateArray(binding->PartitionIndices, 4096, "binding partitions");
+        static ImmutableArray<short> Copy(hkArray<short> values) => [.. new ReadOnlySpan<short>(values.Data, values.Length)];
+        var predictive = animation->Type == hkaAnimation.AnimationType.PredictiveCompressedAnimation ? (Predictive*)animation : null;
+        var quantized = animation->Type == hkaAnimation.AnimationType.QuantizedCompressedAnimation
+            ? (QuantizedHeader*)((Quantized*)animation)->Data.Data
+            : null;
+        return new AnimationChannels(binding->OriginalSkeletonName.String ?? string.Empty,
+            Copy(binding->TransformTrackToBoneIndices), Copy(binding->FloatTrackToFloatSlotIndices), Copy(binding->PartitionIndices),
+            predictive != null ? predictive->NumBones : quantized != null ? quantized->NumBones : (int?)null,
+            predictive != null ? predictive->NumFloatSlots : quantized != null ? quantized->NumFloats : (int?)null,
+            quantized != null);
+    }
 
     /// <summary>A content hash of a binding and its animation data, to prove other animations were not changed.</summary>
     public static string Fingerprint(hkaAnimationBinding* binding)

@@ -85,7 +85,7 @@ internal sealed class ConversionCards(ConverterSession session)
             {
                 Widgets.Spinner(Theme.Accent);
                 ImGui.SameLine();
-                Widgets.Muted("Scanning the mod…");
+                Widgets.Muted("Scanning the mod");
             }
             else
                 Widgets.MutedWrapped("No gear, facewear, hair, face, tail, Viera-ear, skin or animation was found in this mod.");
@@ -129,7 +129,7 @@ internal sealed class ConversionCards(ConverterSession session)
         if (filterable)
         {
             ImGui.SetNextItemWidth(-1);
-            ImGui.InputTextWithHint("##SourceFilter", "Filter by name, type or ID…", ref _sourceFilter, 128);
+            ImGui.InputTextWithHint("##SourceFilter", "Filter by name, type or ID", ref _sourceFilter, 128);
         }
 
         var filter = filterable ? _sourceFilter : string.Empty;
@@ -320,7 +320,7 @@ internal sealed class ConversionCards(ConverterSession session)
         ImGui.SameLine();
         ImGui.SetNextItemWidth(-1);
         if (_targetFilter != session.TargetFilter) _targetFilter = session.TargetFilter;
-        if (ImGui.InputTextWithHint("##TargetFilter", "Filter by name or model ID…", ref _targetFilter, 128))
+        if (ImGui.InputTextWithHint("##TargetFilter", "Filter by name or model ID", ref _targetFilter, 128))
             session.SetTargetFilter(_targetFilter);
 
         if (session.Source is { } source &&
@@ -352,7 +352,7 @@ internal sealed class ConversionCards(ConverterSession session)
         {
             Widgets.Spinner(Theme.Accent);
             ImGui.SameLine();
-            Widgets.Muted("Loading the item list…");
+            Widgets.Muted("Loading the item list");
             return;
         }
 
@@ -425,7 +425,7 @@ internal sealed class ConversionCards(ConverterSession session)
         {
             Widgets.Spinner(Theme.Accent);
             ImGui.SameLine();
-            Widgets.Muted("Loading the options players can choose…");
+            Widgets.Muted("Loading the options players can choose");
             return;
         }
 
@@ -569,7 +569,7 @@ internal sealed class ConversionCards(ConverterSession session)
         {
             Widgets.Spinner(Theme.Accent);
             ImGui.SameLine();
-            Widgets.Muted("Reading the options players can choose…");
+            Widgets.Muted("Reading the options players can choose");
             return;
         }
 
@@ -584,23 +584,25 @@ internal sealed class ConversionCards(ConverterSession session)
         }
 
         var chosen = options.FirstOrDefault(o => o.Id == session.TargetCustomizationId);
+        var shown = options.Where(o => session.ShowsTarget(
+                session.Modded.Customization(session.TargetCustomizationKind, session.TargetRace, o.Id),
+                o.Id == session.TargetCustomizationId))
+            .ToList();
         Widgets.Badge(chosen?.Label ?? $"{session.TargetOptionLabel} (not available)", chosen != null ? Theme.Success : Theme.Danger);
         ImGui.SameLine();
-        Widgets.Muted($"{options.Count} available");
+        Widgets.Muted(shown.Count < options.Count
+            ? $"{options.Count} available, {options.Count - shown.Count} modded hidden"
+            : $"{options.Count} available");
         if (chosen != null)
             Widgets.ModdedBadge(session.Modded.Customization(session.TargetCustomizationKind, session.TargetRace, chosen.Id));
 
         var note = source.Kind is AssetKind.Tail or AssetKind.VieraEar
-            ? "Tails and Viera ears can convert into each other."
+            ? "Tails and Viera ears can convert into each other." + XaelaNote(source)
             : null;
         var noteHeight = note == null ? 0 : ImGui.GetTextLineHeightWithSpacing() * 2;
 
         using (var grid = ImRaii.Child("##IdGrid", new Vector2(-1, -noteHeight), true))
         {
-            var shown = options.Where(o => session.ShowsTarget(
-                    session.Modded.Customization(session.TargetCustomizationKind, session.TargetRace, o.Id),
-                    o.Id == session.TargetCustomizationId))
-                .ToList();
             if (grid.Success && shown.Count == 0) Widgets.Muted("Every option is already modded.");
             else if (grid.Success)
             {
@@ -627,5 +629,21 @@ internal sealed class ConversionCards(ConverterSession session)
         }
 
         if (note != null) Widgets.MutedWrapped(note);
+    }
+
+    /// <summary>What happens to the Xaela material root of an Au Ra tail on either side, or nothing.</summary>
+    private string XaelaNote(DetectedItem source)
+    {
+        if (source.GenderRace is not { } sourceRace || !ushort.TryParse(source.ModelIdPadded, out var sourceId)) return string.Empty;
+        var sourceXaela = CustomizationPaths.XaelaMaterialEndpoint(new CustomizationPathEndpoint(source.Kind, sourceRace, sourceId));
+        var targetXaela = CustomizationPaths.XaelaMaterialEndpoint(new CustomizationPathEndpoint(
+            session.TargetCustomizationKind, session.TargetRace, (ushort)session.TargetCustomizationId));
+        return (sourceXaela, targetXaela) switch
+        {
+            ({ } from, { } to) => $" Its Xaela material (tail {from.ModelId}) moves to tail {to.ModelId}.",
+            ({ } from, null)   => $" Its Xaela material (tail {from.ModelId}) is left out: the target has none.",
+            (null, { } to)     => $" Xaela get the same material, under tail {to.ModelId}.",
+            _                  => string.Empty,
+        };
     }
 }

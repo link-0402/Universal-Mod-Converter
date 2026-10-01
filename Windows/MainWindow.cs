@@ -223,7 +223,7 @@ public sealed class MainWindow : Window, IDisposable
         // Jump to the log when a conversion or revert writes new entries.
         if (_session.Log.Entries.Count != _lastLogCount)
         {
-            if (_session.Runner.CurrentLabel is "Converting…" or "Reverting…") _selectTab = Tab.Log;
+            if (_session.Runner.CurrentLabel is "Converting" or "Reverting") _selectTab = Tab.Log;
             _lastLogCount = _session.Log.Entries.Count;
         }
 

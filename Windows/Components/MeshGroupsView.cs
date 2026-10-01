@@ -19,7 +19,8 @@ namespace UniversalModConverter.Windows.Components;
 /// The mesh groups of every model the output ships for the target items, with a Keep
 /// checkbox per group. Models with the same layout (normally the race versions of one
 /// model) form a family and are edited together. A run of several gear conversions lists
-/// each under its own heading, with the same rules a single conversion follows.
+/// each under its own heading, with the same rules a single conversion follows. Hair, face, tail and
+/// ear conversions list their models the same way, one family per file.
 /// </summary>
 internal sealed partial class MeshGroupsView(ConverterSession session, Plugin plugin)
 {
@@ -27,8 +28,11 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
 
     private sealed record Family(string Title, List<GearOutputModel> Models);
 
-    /// <summary>One gear conversion of the plan: its editable models as families, and those it cannot edit.</summary>
-    private sealed record Section(string Title, GearConversionRequest Conversion, List<Family> Families,
+    /// <summary>
+    /// One conversion of the plan: its editable models as families, and those it cannot edit.
+    /// <paramref name="Conversion"/> is null for a hair, face, tail or ear conversion.
+    /// </summary>
+    private sealed record Section(string Title, GearConversionRequest? Conversion, List<Family> Families,
         List<GearOutputModel> ReadOnly);
 
     [GeneratedRegex(@"c\d{4}", RegexOptions.CultureInvariant)]
@@ -49,33 +53,40 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         var task = session.Task;
         if (!task.IsPlanned)
         {
-            Widgets.MutedWrapped("Add a gear or facewear conversion to the plan to see the mesh groups of the converted models.");
+            Widgets.MutedWrapped("Add a gear, facewear, hair, face, tail or ear conversion to the plan to see the mesh groups " +
+                                 "of the converted models.");
             return;
         }
         var conversions = task.GearConversions().ToList();
-        if (conversions.Count == 0)
+        // Hair, face, tail and ear conversions patch the mod's files instead of producing a file plan.
+        var customization = task.FilePlan == null && CustomizationKinds.IsCustomization(task.Kind);
+        if (conversions.Count == 0 && !customization)
         {
-            Widgets.MutedWrapped("Mesh groups can be edited for gear and facewear conversions.");
+            Widgets.MutedWrapped("Mesh groups can be edited for gear, facewear, hair, face, tail and ear conversions.");
             return;
         }
 
         // A single conversion says what changing slots does up front; a run says it under each conversion.
-        var single = conversions.Count == 1;
-        if (single && CrossSlotNote(conversions[0].Plan.Request) is { } note)
+        var single = conversions.Count <= 1;
+        if (conversions.Count == 1 && CrossSlotNote(conversions[0].Plan.Request) is { } note)
             DrawCrossSlotNotice(conversions[0].Plan.Request.Source.Slot, conversions[0].Plan.Request.Target.Slot, note);
 
         if (task.OutputModels.Count == 0)
         {
-            Widgets.MutedWrapped(single
+            Widgets.MutedWrapped(customization
+                ? $"The output contains no model for the converted {CustomizationKinds.Get(task.Kind).DisplayName.ToLowerInvariant()}."
+                : single
                 ? "The output contains no model for the target item."
                 : "The output contains no model for the target items.");
             return;
         }
 
-        EnsureSections(task, conversions);
+        EnsureSections(task, conversions, customization);
         Widgets.MutedWrapped("Untick a mesh group to leave it out of the converted model, or open it with the arrow to " +
-                             "keep or remove its parts one by one. Models with the same layout (usually the race versions " +
-                             "of one model) are edited together. Only the converted models change.");
+                             "keep or remove its parts one by one. " +
+                             (customization ? string.Empty
+                                 : "Models with the same layout (usually the race versions of one model) are edited together. ") +
+                             "Only the converted models change.");
         DrawPreviewControls();
         if (session.MeshEditBlockReason is { } reason)
             Widgets.ColoredWrapped(Theme.Warning, reason);
@@ -90,8 +101,8 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
             {
                 ImGui.Spacing();
                 ImGui.TextColored(Theme.Accent, section.Title);
-                if (CrossSlotNote(section.Conversion) is { } sectionNote)
-                    DrawCrossSlotNotice(section.Conversion.Source.Slot, section.Conversion.Target.Slot, sectionNote);
+                if (section.Conversion is { } conversion && CrossSlotNote(conversion) is { } sectionNote)
+                    DrawCrossSlotNotice(conversion.Source.Slot, conversion.Target.Slot, sectionNote);
                 if (section.Families.Count == 0 && section.ReadOnly.Count == 0)
                     Widgets.MutedWrapped("This conversion ships no model for its target item.");
             }
@@ -339,8 +350,9 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         Widgets.Tooltip(unavailable ?? "While this is on, your character shows the model without the mesh groups and parts " +
                         "you untick, and is redrawn each time you change one.");
 
-        // A run converts several items; each gets its own button, on a line of its own.
-        var sources = _sections.Select(s => s.Conversion.Source).Distinct().ToList();
+        // A run converts several items; each gets its own button, on a line of its own. A hair,
+        // face, tail or ear is not worn, so it has none.
+        var sources = _sections.Where(s => s.Conversion != null).Select(s => s.Conversion!.Source).Distinct().ToList();
         var worn = sources.ToDictionary(s => s, s => plugin.WornGear.Wears(s));
         for (var i = 0; i < sources.Count; i++)
         {
@@ -356,7 +368,9 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         }
         if (!enabled) return;
 
-        var shown = _sections.Where(s => worn[s.Conversion.Source] != false).ToList();
+        var shown = _sections.Where(s => s.Conversion is not { } conversion || worn[conversion.Source] != false).ToList();
+        if (_sections.Any(s => s.Conversion == null) && CustomizationSource() is { } original)
+            Widgets.MutedWrapped($"Your character shows your choices while it has the original {original}.");
         foreach (var source in sources.Where(s => worn[s] == false))
         {
             var name = plugin.GameData.FindItem(source)?.Name ?? "the original item";
@@ -373,6 +387,14 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         preview.Request(shown.SelectMany(EditableModels).ToList(), session.Task.MeshRemovals);
         Widgets.MutedWrapped("Your character shows the model without what you untick below, and is redrawn each time " +
                              "you change a checkbox. Keep the source mod enabled.");
+    }
+
+    /// <summary>The hair, face, tail or ear being converted, as "Hyur Midlander Male Hair 12"; null when unknown.</summary>
+    private string? CustomizationSource()
+    {
+        var task = session.Task;
+        if (task.SourceGenderRace is not { } race || !ushort.TryParse(task.OldIdPadded, out var id)) return null;
+        return $"{ConverterSession.RaceLabel(race)} {GameDataService.OptionLabel(task.Kind, id)}";
     }
 
     private static IEnumerable<GearOutputModel> EditableModels(Section section)
@@ -402,11 +424,23 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         Widgets.Tooltip(string.Join("\n", family.Models.SelectMany(m => m.GamePaths.Select(p => $"{p}  ←  {m.Local}"))));
     }
 
-    private void EnsureSections(ConversionTask task, List<(string Description, GearConversionPlan Plan)> conversions)
+    private void EnsureSections(ConversionTask task, List<(string Description, GearConversionPlan Plan)> conversions,
+        bool customization)
     {
         if (ReferenceEquals(task, _builtFor)) return;
         _builtFor = task;
         _expanded.Clear();
+        if (customization)
+        {
+            // Every model is for the one target race, so each file is its own family, named after itself.
+            _sections =
+            [
+                new Section(string.Empty, null,
+                    task.OutputModels.Where(m => m.Editable).Select(m => new Family(FamilyTitle([m]), [m])).ToList(),
+                    task.OutputModels.Where(m => !m.Editable).ToList()),
+            ];
+            return;
+        }
         _sections = conversions.Select(conversion =>
         {
             // Families stay within a conversion: another item's models are not the race versions of these.
