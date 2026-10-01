@@ -18,6 +18,8 @@ public static class InstalledSkeletons
     {
         AllowTrailingCommas = true,
         CommentHandling = JsonCommentHandling.Skip,
+        // A property written twice only fails when the object is first used; refuse it while parsing.
+        AllowDuplicateProperties = false,
     };
 
     /// <summary>
@@ -57,7 +59,7 @@ public static class InstalledSkeletons
         foreach (var file in definitions)
         {
             try { found.AddRange(ReadDefinition(folder, file, mod)); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException)
             {
                 rejected?.Invoke(file, ex);
             }
@@ -113,7 +115,10 @@ public static class InstalledSkeletons
                 }
             }
         }
-        Visit(JsonNode.Parse(bytes, documentOptions: JsonOptions));
+        // Penumbra and the mod loader read these as text, which accepts a UTF-8 byte-order mark; the JSON reader does not.
+        var json = bytes.AsSpan();
+        if (json.StartsWith(new byte[] { 0xEF, 0xBB, 0xBF })) json = json[3..];
+        Visit(JsonNode.Parse(json, documentOptions: JsonOptions));
         return result;
     }
 }
