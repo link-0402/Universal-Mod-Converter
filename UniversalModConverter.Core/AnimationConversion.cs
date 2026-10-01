@@ -472,7 +472,9 @@ public sealed class AnimationConversionPlanner(
                 ? "is left out there."
                 : Keeps
                     ? "stays where it is instead of moving."
-                    : "has nothing to convert to and is removed from the mod. Everything else converts normally.";
+                    : _request.Mode.IsNewMod()
+                        ? "has nothing to convert to and is left out of the new mod. Everything else converts normally."
+                        : "has nothing to convert to and is removed from the mod. Everything else converts normally.";
             return $"{variant.Label} has no {missing}, so {subject} {outcome}";
         }
 

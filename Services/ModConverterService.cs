@@ -558,12 +558,15 @@ public sealed class ModConverterService
             _ = PathSafety.ResolveRelative(directory, GamePath.ToLocal(local));
     }
 
-    public void ConfirmInPlace(ConversionTask task, Action<string>? onLog = null)
+    /// <param name="reloaded">Whether Penumbra reloaded the mod; a folder it does not manage has nothing to confirm.</param>
+    public void ConfirmInPlace(ConversionTask task, Action<string>? onLog = null, bool reloaded = true)
     {
         if (task.ResultStatus != ConversionResultStatus.PublishedButNotActivated) return;
         if (task.JournalPath is { } journal && File.Exists(journal)) File.Delete(journal);
         task.ResultStatus = ConversionResultStatus.Succeeded;
-        onLog?.Invoke("Penumbra activation confirmed; recovery journal cleared.");
+        onLog?.Invoke(reloaded
+            ? "Penumbra activation confirmed; recovery journal cleared."
+            : "Conversion finished; recovery journal cleared.");
     }
 
     public bool RollbackInPlace(ConversionTask task, Action<string>? onLog = null)

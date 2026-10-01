@@ -433,7 +433,7 @@ public sealed partial class ConverterSession
             if (Source is not { } source) return DetectedItems.Count == 0 ? "No convertible item was found in this mod." : "Select a source item.";
             if (source.Animation is { } animation) return AnimationBlockReason(animation);
             if (!source.IsCustomization) return TargetItem == null ? "Select a target item." : null;
-            if (source.CanFanOut) return _textureTargets.Count == 0 ? "Tick at least one race or face to add the paths for." : null;
+            if (source.CanFanOut) return _textureTargets.Count == 0 ? "Tick at least one race or ID to add the paths for." : null;
             if (TargetCustomizationId is < 1 or > 9999) return "Customization IDs must be between 1 and 9999.";
             if (CustomizationTargets.BlockReason(source.Kind, source.GenderRace ?? 0, TargetCustomizationKind, TargetRace) is { } blocked)
                 return blocked;
@@ -1309,7 +1309,7 @@ public sealed partial class ConverterSession
             }
         }
 
-        _plugin.Converter.ConfirmInPlace(task, Log.Add);
+        _plugin.Converter.ConfirmInPlace(task, Log.Add, managed);
         var record = History.Record(task, description, sourceName);
         _plugin.RunBackupMaintenance();
         ClearQueue();
