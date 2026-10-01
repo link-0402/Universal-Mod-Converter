@@ -281,7 +281,7 @@ public sealed class MergeWindow : Window, IDisposable
         {
             ImGui.Spacing();
             Widgets.ColoredWrapped(Theme.Warning, $"{plan.MissingFiles.Count} file(s) the modpacks point at are missing " +
-                                                  "from their folders and are left out:");
+                                                  "from their folders, so they cannot be copied; Penumbra ignores entries that point at them:");
             foreach (var missing in plan.MissingFiles.Take(20))
                 Widgets.MutedWrapped("  " + missing);
             if (plan.MissingFiles.Count > 20) Widgets.Muted($"  and {plan.MissingFiles.Count - 20} more.");

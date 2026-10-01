@@ -188,7 +188,9 @@ public static class ModMerger
                 }
 
                 var renamed = Unique(GamePath.ToLocal(local));
-                _renamed++;
+                // A lower pack that lists the file without shipping it has nothing to clash with; the
+                // top pack's file still gets its own name, so the lower pack's entry keeps pointing at nothing.
+                if (File.Exists(Path.Combine(existing.Directory, GamePath.ToLocal(existing.Source)))) _renamed++;
                 // The bytes still come from the file's own place in the top pack: a file of that
                 // pack that really has the new name must be compared with these, not with itself.
                 _taken[GamePath.NormalizeLocal(renamed)] = (overlayDir, local, renamed);

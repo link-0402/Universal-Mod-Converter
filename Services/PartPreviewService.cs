@@ -59,7 +59,13 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
     /// </summary>
     private readonly Dictionary<string, (DateTime Written, byte[] Bytes)> _sources = new(StringComparer.OrdinalIgnoreCase);
 
-    private sealed record Build(string Key, List<string> Files, Dictionary<string, string> Paths);
+    private sealed record Build(string Key, List<string> Files, Dictionary<string, string> Paths, int Failed);
+
+    /// <summary>
+    /// Why what the character shows is not the choices on screen, or null: a model that could not
+    /// be built, or Penumbra refusing the temporary mod. Read and written on the framework thread.
+    /// </summary>
+    public string? Problem { get; private set; }
 
     /// <summary>Why the preview cannot show these models, or null.</summary>
     public string? UnavailableReason(IReadOnlyList<GearOutputModel> models)
@@ -124,6 +130,7 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
         {
             var files = new List<string>();
             var paths = new Dictionary<string, string>(StringComparer.Ordinal);
+            var failed = 0;
             foreach (var model in models)
             {
                 if (_disposed) break;
@@ -140,11 +147,12 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
                 }
                 catch (Exception ex)
                 {
+                    failed++;
                     log.Warning(ex, "[UMC] Could not build the mesh preview for {0}", model.SourceFile);
                 }
             }
             if (_disposed) Delete(files);
-            else Volatile.Write(ref _built, new Build(key, files, paths));
+            else Volatile.Write(ref _built, new Build(key, files, paths, failed));
         });
     }
 
@@ -165,10 +173,24 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
         var previous = _files;
         _files = build.Files;
 
+        Problem = build.Failed > 0
+            ? $"{build.Failed} model(s) could not be prepared for the preview, so your character shows them unchanged. The log says why."
+            : null;
+
         if (build.Paths.Count > 0 && penumbra.AddTemporaryModAll(Tag, build.Paths, Priority))
         {
             _active = true;
             penumbra.RedrawObject(0);
+        }
+        else if (build.Paths.Count > 0)
+        {
+            Problem = "Penumbra did not accept the preview, so your character shows the original item unchanged. The log says why.";
+            if (_active)
+            {
+                penumbra.RemoveTemporaryModAll(Tag, Priority);
+                penumbra.RedrawObject(0);
+                _active = false;
+            }
         }
         else if (_active)
         {
@@ -183,6 +205,7 @@ public sealed class PartPreviewService(PenumbraIpcService penumbra, IPluginLog l
     private void Restore()
     {
         _shownKey = null;
+        Problem = null;
         if (_active)
         {
             penumbra.RemoveTemporaryModAll(Tag, Priority);
