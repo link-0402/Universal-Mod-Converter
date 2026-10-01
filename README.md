@@ -9,7 +9,7 @@ A [Dalamud](https://github.com/goatcorp/Dalamud) plugin that moves [Penumbra](ht
 - **Retextures:** add a mod's textures (and face or skin materials) for other races and IDs at once (the other faces of a race, for example), either beside the original in its existing options or in new option groups per race. This covers skins, faces, and any hair, tail or ear mod that only replaces textures. A skin has no slots, so it only lists the races that have a skin of their own (Elezen and Miqo'te wear the Midlander one, for example).
 - **Animations:** play an idle in any idle slots you tick, optionally retargeted to other races and with a facial expression; move an emote's animations to another emote, move a facial expression to another expression, retarget body animations to other races, and attach a facial expression from the game's list or another mod. Retargeting finds the skeleton an animation was made for among the game's and your installed skeleton mods (IVCS, YAS or larger ones), so the animation mod doesn't need to include it, and rebuilds it for the smallest standard skeleton of the target race (the game's, IVCS or IVCS + YAS) that has every bone it moves.
 - **Merge modpacks:** combine two modpacks into one new mod, with an explicit choice of which one wins where they overlap.
-- **Batch conversions:** queue up several conversions and apply or revert them together as one result.
+- **Batch conversions:** queue up several gear, facewear and animation conversions and apply or revert them together as one result. Hair, face, tail, ear and skin conversions (retextures included) run on their own.
 - **Safe by default:** everything is previewed before anything is written, and every conversion can be reverted.
 
 ## Installation
@@ -31,7 +31,7 @@ Open the window with `/umc` (settings: `/umcconfig` or the cog icon).
 
 1. **Pick a mod** in the browser on the left, or enter a folder path under **Other folder**.
 2. **From/To:** pick the source item, hair, face, tail, ear, skin or animation, and its target.
-3. **Add selection to conversion plan.** Repeat for anything else to convert in the same pass.
+3. **Add selection to conversion plan.** Repeat for anything else to convert in the same pass (hair, face, tail, ear and skin conversions have to run on their own).
 4. **Output:**
    - **Create a new mod**, **Add to this mod** to put the result beside the original, or **Convert in place** to replace it. 
    - With **Only what's converted** ticked (the default), a new mod holds only the converted items or animations. Untick it to copy the whole mod instead, everything else included, with the conversions made in it as converting in place would. Hair, face, tail, ear and skin conversions always copy the whole mod with that part converted.
