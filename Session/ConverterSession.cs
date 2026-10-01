@@ -452,7 +452,7 @@ public sealed partial class ConverterSession
         {
             if (PreviewBlockReason is { } reason) return reason;
             if (!Task.IsPlanned || !PlanIsCurrent) return "Updating the preview";
-            if (Task.HasBlockers) return "The plan has blockers. Resolve them first.";
+            if (Task.HasBlockers) return "The plan has problems. Fix them first; they are listed in the Plan tab.";
             if (Task.IsApplied) return "This plan was already applied.";
             if (_queue.Count > 0 && _queue.All(e => !e.Enabled)) return "Enable at least one conversion in the plan.";
             if (EffectiveOutputMode.IsNewMod())
@@ -952,7 +952,7 @@ public sealed partial class ConverterSession
                     : $"{planned.PlannedRenames.Count} rename(s), {planned.PlannedJsonChanges.Sum(j => j.Changes.Count)} metadata change(s), " +
                       $"{planned.PlannedBinaryPatches.Sum(b => b.Patches.Count)} binary patch(es), {planned.PlannedMdlChanges.Count} model rewrite(s)";
                 Log.Add(planned.HasBlockers ? LogLevel.Warning : LogLevel.Info,
-                    $"Preview {description}: {counts}{(planned.HasBlockers ? ", has blockers" : string.Empty)}.");
+                    $"Preview {description}: {counts}{(planned.HasBlockers ? ", has problems" : string.Empty)}.");
             }
             else
                 Log.Add(LogLevel.Error, $"Preview failed: {planned.ErrorMessage}");
@@ -1315,9 +1315,9 @@ public sealed partial class ConverterSession
         ClearQueue();
         // Adding to the mod keeps everything it had, so nothing was converted in place.
         var added = task.OutputMode == ConversionOutputMode.AddToMod;
-        Log.Add(LogLevel.Success, added ? $"Added additional paths for {description}." : $"Converted {description} in place.");
+        Log.Add(LogLevel.Success, added ? $"Added {description} to this mod." : $"Converted {description} in place.");
         Result = new ResultBanner(problems > 0 ? BannerKind.Warning : BannerKind.Success,
-            added ? "Added additional paths" : "Mod converted in place",
+            added ? "Added to this mod" : "Mod converted in place",
             (managed ? "The mod was reloaded in Penumbra." : "Reload the mod in Penumbra to see the change.") +
             ProblemSuffix(problems), task.ModDirectory, record.Id);
         Rescan(); // What the mod holds has changed.
