@@ -325,7 +325,7 @@ public sealed class MdlFile
             shapeValues.Add(new MdlShapeValue(r.U16(), r.U16()));
 
         var submeshBoneMapSize = r.U32();
-        if ((submeshBoneMapSize & 1) != 0 || submeshBoneMapSize > int.MaxValue)
+        if ((submeshBoneMapSize & 1) != 0 || submeshBoneMapSize > int.MaxValue || submeshBoneMapSize > bytes.Length - r.Position)
             throw new InvalidDataException("MDL submesh bone-map size is invalid.");
         var submeshBoneMap = r.U16s((int)submeshBoneMapSize / 2);
         // Penumbra's MDL writer stores the neck-morph count but never the neck-morph data,

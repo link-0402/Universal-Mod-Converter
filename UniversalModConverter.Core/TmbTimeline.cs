@@ -114,7 +114,9 @@ public sealed class TmbTimeline
             if (cursor > end - 8) throw new InvalidDataException("Truncated animation timeline entry.");
             var magic = Encoding.ASCII.GetString(bytes, cursor, 4);
             var size = PapFile.ReadInt(bytes, cursor + 4);
-            if (size < 8 || size > end - cursor) throw new InvalidDataException($"Invalid {magic} timeline entry size.");
+            // Entries with an id (actors, tracks, C-entries) hold it at offset 8.
+            var hasId = magic is "TMAC" or "TMTR" or "TMFC" || magic.StartsWith('C');
+            if (size < (hasId ? 10 : 8) || size > end - cursor) throw new InvalidDataException($"Invalid {magic} timeline entry size.");
             if (!Pointers.ContainsKey(magic) && !Plain.Contains(magic))
                 throw new InvalidDataException($"The animation's timeline has an entry of a kind this converter does not know ({magic}).");
             items.Add((new Item(magic, bytes[cursor..(cursor + size)]), cursor));
@@ -123,6 +125,7 @@ public sealed class TmbTimeline
 
         // Every pointer leads past the items, into the data areas.
         var data = cursor;
+        long copied = 0;
         foreach (var (item, position) in items)
         {
             if (!Pointers.TryGetValue(item.Magic, out var layouts)) continue;
@@ -172,6 +175,10 @@ public sealed class TmbTimeline
                         break;
                 }
             }
+            // Every entry copies the data it points at, and a crafted timeline can point many entries at
+            // one large range; real ones never share data between entries.
+            copied += item.Fields.Sum(f => (long)f.Data.Length);
+            if (copied > length) throw new InvalidDataException("The animation's timeline entries share data.");
         }
         return new TmbTimeline(items.Select(i => i.Item).ToList());
     }
