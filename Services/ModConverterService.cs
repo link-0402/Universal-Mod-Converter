@@ -255,7 +255,15 @@ public sealed class ModConverterService
     /// <summary>Records a finished file plan on the task: its fingerprints, and whether it can run.</summary>
     private static void Finish(ConversionTask task, IModFilePlan plan)
     {
-        task.SourceFingerprint = SourceFingerprint(task) ?? string.Empty;
+        string? fingerprint = null;
+        try { fingerprint = SourceFingerprint(task); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            // Not a file that is gone but one that cannot be read (in use, say): the plan cannot be applied.
+            task.Diagnostics.Add(new PlanDiagnostic("source_unreadable",
+                $"A file this plan was made from cannot be read: {ex.Message}", true));
+        }
+        task.SourceFingerprint = fingerprint ?? string.Empty;
         task.PlanFingerprint = plan.Fingerprint();
         task.IsPlanned = true;
         task.ErrorMessage = task.HasBlockers
@@ -276,7 +284,7 @@ public sealed class ModConverterService
             return ModFingerprint.Compute(task.ModDirectory,
                 plan.InputFiles.Concat(PenumbraMod.DefinitionFiles(task.ModDirectory).Where(File.Exists)));
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
             return null; // A planned input no longer exists.
         }
@@ -562,11 +570,25 @@ public sealed class ModConverterService
     public void ConfirmInPlace(ConversionTask task, Action<string>? onLog = null, bool reloaded = true)
     {
         if (task.ResultStatus != ConversionResultStatus.PublishedButNotActivated) return;
-        if (task.JournalPath is { } journal && File.Exists(journal)) File.Delete(journal);
+        DeleteJournal(task, onLog);
         task.ResultStatus = ConversionResultStatus.Succeeded;
         onLog?.Invoke(reloaded
             ? "Penumbra activation confirmed; recovery journal cleared."
             : "Conversion finished; recovery journal cleared.");
+    }
+
+    /// <summary>
+    /// The recovery journal only matters while a swap is in flight. One that cannot be deleted is no
+    /// reason to call a finished or rolled-back conversion failed: the leftover sweep removes it later.
+    /// </summary>
+    private static void DeleteJournal(ConversionTask task, Action<string>? onLog)
+    {
+        if (task.JournalPath is not { } journal || !File.Exists(journal)) return;
+        try { File.Delete(journal); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            onLog?.Invoke($"The recovery journal could not be deleted ({ex.Message}); it is cleaned up later.");
+        }
     }
 
     public bool RollbackInPlace(ConversionTask task, Action<string>? onLog = null)
@@ -581,8 +603,10 @@ public sealed class ModConverterService
                 $".{Path.GetFileName(current)}.umc-failed-{Guid.NewGuid():N}");
             if (Directory.Exists(current)) Directory.Move(current, failed);
             Directory.Move(backup, current);
-            try { if (Directory.Exists(failed)) Directory.Delete(failed, true); } catch { }
-            if (task.JournalPath is { } journal && File.Exists(journal)) File.Delete(journal);
+            // The converted copy can be large: remove it off the framework thread. If that fails, the
+            // leftover sweep finds it by its name.
+            if (Directory.Exists(failed)) _ = Task.Run(() => { try { Directory.Delete(failed, true); } catch { } });
+            DeleteJournal(task, onLog);
             task.ResultStatus = ConversionResultStatus.RolledBack;
             task.IsApplied = false;
             onLog?.Invoke("Penumbra activation failed; the original mod was restored.");

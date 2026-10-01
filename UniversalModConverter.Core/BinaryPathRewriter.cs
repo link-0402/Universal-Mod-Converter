@@ -54,7 +54,11 @@ public static class BinaryPathRewriter
     {
         for (var i = 0; i <= bytes.Length - source.Length; i++)
         {
-            if (!bytes.AsSpan(i, source.Length).SequenceEqual(source)) continue;
+            // Game paths are not case sensitive, and a path found in one casing is found in the others too.
+            if (!System.Text.Ascii.EqualsIgnoreCase(bytes.AsSpan(i, source.Length), source)) continue;
+            // Only a whole string: not the tail of a longer one, and ended by its NUL.
+            if (i > 0 && IsPathByte(bytes[i - 1])) continue;
+            if (i + source.Length >= bytes.Length || bytes[i + source.Length] != 0) continue;
             target.CopyTo(bytes, i);
             i += source.Length - 1;
         }

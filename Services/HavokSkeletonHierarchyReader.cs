@@ -10,8 +10,9 @@ using Dalamud.Plugin.Services;
 namespace UniversalModConverter.Services;
 
 /// <summary>
-/// Thin game-runtime adapter. Callers invoke this only from the framework/UI thread
-/// during preview and keep the returned hierarchy as ordinary managed data.
+/// Thin game-runtime adapter. <c>Read</c> may be called from any thread (planning runs on a
+/// background task): it marshals the game-runtime work onto the framework thread itself, and the
+/// caller keeps the returned hierarchy as ordinary managed data.
 /// </summary>
 internal sealed unsafe class HavokSkeletonHierarchyReader(IFramework framework) : ISkeletonHierarchyReader
 {

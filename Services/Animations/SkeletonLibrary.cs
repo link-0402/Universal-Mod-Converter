@@ -216,8 +216,8 @@ internal sealed class SkeletonLibrary
             try { pending.Add((hash, read())); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
+                // Not remembered: a file in use now may read fine next time.
                 _log.Debug(ex, "[UMC] A skeleton could not be read.");
-                lock (_cacheLock) _descriptions[hash] = null;
             }
         }
 
@@ -230,16 +230,23 @@ internal sealed class SkeletonLibrary
                 {
                     var (hash, bytes) = pending[next++];
                     Described? described = null;
+                    var remember = true;
                     try
                     {
                         var skeleton = HavokAnimation.DescribeMain(bytes);
                         described = new Described(skeleton, skeleton.Fingerprint());
                     }
-                    catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
+                    catch (InvalidDataException ex)
                     {
                         _log.Debug("[UMC] A skeleton was skipped: {0}", ex.Message);
                     }
-                    lock (_cacheLock) _descriptions[hash] = described;
+                    catch (InvalidOperationException ex)
+                    {
+                        // The runtime was not ready, which says nothing about the file: ask again next time.
+                        _log.Debug("[UMC] A skeleton could not be described yet: {0}", ex.Message);
+                        remember = false;
+                    }
+                    if (remember) lock (_cacheLock) _descriptions[hash] = described;
                 } while (next < pending.Count && watch.ElapsedMilliseconds < BatchMilliseconds);
             }, delayTicks: 1).GetAwaiter().GetResult();
 

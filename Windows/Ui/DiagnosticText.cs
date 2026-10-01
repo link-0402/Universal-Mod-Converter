@@ -63,7 +63,6 @@ internal static class DiagnosticText
         ["est_invalid"]            = "Extra skeleton entry invalid",
         ["est_unavailable"]        = "Extra skeleton data unavailable",
         ["extra_skeleton_missing"] = "Extra skeleton missing",
-        ["extra_skeleton_not_added"] = "Extra skeleton not added",
         ["tail_bones_on_ear"]      = "Tail bones on an ear",
         ["pbd_missing"]            = "Race data missing",
         ["pbd_invalid"]            = "Race data invalid",
@@ -89,6 +88,8 @@ internal static class DiagnosticText
         // Converting several things at once
         ["queue_conflict"]               = "Overlaps another conversion",
         ["queue_unsupported_kind"]       = "Cannot be converted together",
+        ["source_unreadable"]            = "A source file cannot be read",
+        ["malformed_mtrl"]               = "Material cannot be read",
 
         // Expressions
         ["no_expression"]                = "No expression chosen",

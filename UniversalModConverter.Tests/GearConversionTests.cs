@@ -29,6 +29,7 @@ internal static class GearConversionTests
         ("Customization detection skips roots that only hold borrowed textures", CustomizationBorrowedTextures),
         ("Customization detection skips a shared material root a model loads", CustomizationSharedMaterialRoot),
         ("Malformed paths and files are refused with an InvalidDataException", MalformedInputIsRefused),
+        ("A binary path rewrite changes whole strings, whatever their casing", BinaryRewriteWholeStrings),
         ("Skin textures are a root of their own and fan out to other races", SkinTextureRoots),
         ("Cross-slot new mod: output models list and mesh-group removal", CrossSlotMeshRemoval),
         ("A run leaves body parts out the way each of its conversions would alone", RunMeshDefaults),
@@ -300,6 +301,15 @@ internal static class GearConversionTests
     /// material and its textures. The Midlander root is the Miqo'te model's dependency, not a
     /// root of its own, whether the model names the material by complete path or by short name.
     /// </summary>
+    private static void BinaryRewriteWholeStrings()
+    {
+        // The same path in another casing is the same path to the game; the tail of a longer string is not it.
+        var input = Encoding.ASCII.GetBytes("chara/a/x.tex CHARA/A/X.TEX zchara/a/x.tex ");
+        var output = BinaryPathRewriter.Rewrite(input,
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["chara/a/x.tex"] = "chara/b/x.tex" });
+        Assert.Equal("chara/b/x.tex chara/b/x.tex zchara/a/x.tex ", Encoding.ASCII.GetString(output));
+    }
+
     private static void MalformedInputIsRefused()
     {
         using var mod = new TempDir();
