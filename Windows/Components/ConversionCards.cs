@@ -57,8 +57,8 @@ internal sealed class ConversionCards(ConverterSession session)
     private static void DrawCard(string id, Vector2 size, Action content)
     {
         Widgets.BeginCard(id, size);
-        content();
-        Widgets.EndCard();
+        try { content(); }
+        finally { Widgets.EndCard(); }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
