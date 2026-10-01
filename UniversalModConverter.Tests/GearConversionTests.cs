@@ -28,6 +28,7 @@ internal static class GearConversionTests
         ("In place refuses to overwrite existing target paths", InPlaceTargetConflict),
         ("Customization detection skips roots that only hold borrowed textures", CustomizationBorrowedTextures),
         ("Customization detection skips a shared material root a model loads", CustomizationSharedMaterialRoot),
+        ("Gear detection skips a set only another item's model loads", GearBorrowedItems),
         ("Malformed paths and files are refused with an InvalidDataException", MalformedInputIsRefused),
         ("A binary path rewrite changes whole strings, whatever their casing", BinaryRewriteWholeStrings),
         ("Skin textures are a root of their own and fan out to other races", SkinTextureRoots),
@@ -296,11 +297,6 @@ internal static class GearConversionTests
             string.Join(", ", roots.Select(r => $"{r.Kind} c{r.GenderRace:D4} #{r.ModelId}")));
     }
 
-    /// <summary>
-    /// A Miqo'te hair loads its material from the Midlander root, which the mod fills with that
-    /// material and its textures. The Midlander root is the Miqo'te model's dependency, not a
-    /// root of its own, whether the model names the material by complete path or by short name.
-    /// </summary>
     private static void BinaryRewriteWholeStrings()
     {
         // The same path in another casing is the same path to the game; the tail of a longer string is not it.
@@ -324,6 +320,11 @@ internal static class GearConversionTests
         Assert.Throws<InvalidDataException>(() => PenumbraMod.Load(mod.Path));
     }
 
+    /// <summary>
+    /// A Miqo'te hair loads its material from the Midlander root, which the mod fills with that
+    /// material and its textures. The Midlander root is the Miqo'te model's dependency, not a
+    /// root of its own, whether the model names the material by complete path or by short name.
+    /// </summary>
     private static void CustomizationSharedMaterialRoot()
     {
         const string material = "chara/human/c0201/obj/hair/h0144/material/v0001/mt_c0201h0144_hir_b.mtrl";
@@ -383,6 +384,57 @@ internal static class GearConversionTests
         skin.File("m/skin.tex", [1]);
         Assert.Equal("Body c0201 #1", string.Join(", ", CustomizationDetection.FindRoots(PenumbraMod.Load(skin.Path), skin.Path)
             .Select(r => $"{r.Kind} c{r.GenderRace:D4} #{r.ModelId}")));
+    }
+
+    /// <summary>
+    /// A model that names a material under another set by its complete path makes that set its
+    /// dependency. The set then is not an item of its own, but a retexture nothing loads, a
+    /// short material name (which stays in the model's own folder) and a set's own material
+    /// loading its own texture hide nothing.
+    /// </summary>
+    private static void GearBorrowedItems()
+    {
+        const string material = "chara/equipment/e0790/material/v0001/mt_c0101e0790_top_a.mtrl";
+        const string texture = "chara/equipment/e0790/texture/v01_c0101e0790_top_n.tex";
+        const string model = "chara/equipment/e0100/model/c0101e0100_top.mdl";
+
+        (bool Borrowed, string Keys) Check(string? modelMaterial, bool withModel = true)
+        {
+            using var mod = new TempDir();
+            var files = new List<string>
+            {
+                $"\"{material}\":\"m\\\\a.mtrl\"", $"\"{texture}\":\"m\\\\n.tex\"",
+            };
+            if (withModel) files.Add($"\"{model}\":\"m\\\\top.mdl\"");
+            mod.Json("meta.json", "{\"FileVersion\":4,\"Identifier\":\"" + G1 + "\",\"Name\":\"Gear\",\"Author\":\"me\"," +
+                                  "\"DefaultData\":{\"Files\":{" + string.Join(",", files) + "}}}");
+            mod.File("m/top.mdl", TestAssets.CreateMdl(material: modelMaterial ?? "/mt_c0101e0100_top_a.mtrl"));
+            mod.File("m/a.mtrl", Mtrl(texture));
+            mod.File("m/n.tex", Encoding.ASCII.GetBytes("n"));
+            var index = new ModIndex(PenumbraMod.Load(mod.Path), mod.Path);
+            string[] keys = [material, texture];
+            return (GearDetection.IsBorrowed(index, keys), string.Join(",", keys));
+        }
+
+        // Another set's model names the material by its complete path: e0790 is its dependency.
+        Assert.True(Check(material).Borrowed, "a set loaded by complete path is borrowed");
+        Assert.True(Check("/" + material).Borrowed, "a leading slash makes no difference");
+        // A short name is looked up beside the model, so it never reaches e0790.
+        Assert.True(!Check(null).Borrowed, "a short name stays in the model's own folder");
+        // No model anywhere: a retexture of vanilla gear, the user's to convert. The set's own material
+        // loading its own texture is not another item loading it.
+        Assert.True(!Check(null, withModel: false).Borrowed, "a retexture nothing loads is listed");
+
+        // A model of the set's own is never borrowed, whatever else loads its materials.
+        using var own = new TempDir();
+        own.Json("meta.json", $$$"""
+            {"FileVersion":4,"Identifier":"{{{G1}}}","Name":"Gear","Author":"me",
+             "DefaultData":{"Files":{"chara/equipment/e0790/model/c0101e0790_top.mdl":"m\\own.mdl","{{{material}}}":"m\\a.mtrl"} } }
+            """);
+        own.File("m/own.mdl", TestAssets.CreateMdl(material: material));
+        own.File("m/a.mtrl", Mtrl(texture));
+        Assert.True(!GearDetection.IsBorrowed(new ModIndex(PenumbraMod.Load(own.Path), own.Path),
+            ["chara/equipment/e0790/model/c0101e0790_top.mdl", material]), "a set with a model is an item");
     }
 
     /// <summary>
