@@ -39,6 +39,7 @@ internal static class AnimationTests
         ("Every animation conversion of a run removes its own unused files", RunRemovesEveryOrphan),
         ("A face from another mod is checked for every race it plays on", ModFacePerRace),
         ("Retarget adds target races, moves them in place and reports inheritance", RetargetPlan),
+        ("A file of the mod's own that a retarget replaces is removed, adding to the mod or not", RetargetRemovesReplacedFile),
         ("Retarget hands the mod's skeletons over and names the source once", RetargetHandsOverSkeletons),
     ];
 
@@ -1098,6 +1099,39 @@ internal static class AnimationTests
         Assert.Equal(@"c1101\loop.pap", files[target]);
         Assert.Equal((ushort)1101, new PapFile(File.ReadAllBytes(Path.Combine(mod.Path, files[target]))).ModelId);
         Assert.True(!File.Exists(Path.Combine(mod.Path, "c0101", "loop.pap")), "the source race's file goes with it");
+    }
+
+    private static void RetargetRemovesReplacedFile()
+    {
+        using var mod = new TempDir();
+        var target = Loop3.Replace("c0101", "c1101");
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"c0101\\loop.pap","{{{target}}}":"c1101\\mine.pap"}}""");
+        mod.File("c0101/loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
+        mod.File("c1101/mine.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 1101));
+        var game = Game();
+        game.Files[PapPath.BaseSkeletonPath(101)] = [1];
+        game.Files[PapPath.BaseSkeletonPath(1101)] = [2];
+        game.Files[target] = BuildPap([("cbem_pose03_1lp", 0)], model: 1101);
+        ushort? Parent(ushort race) => race switch { 1101 => 101, _ => null };
+        var request = new AnimationConversionRequest([PapPath.TryParse(Loop3, out var p) ? p.Location : ""],
+            AnimationOperation.Retarget, ConversionOutputMode.InPlace, "test")
+        {
+            SourceRace = 101,
+            TargetRaces = [1101],
+        };
+
+        // The rebuilt file takes the Lalafell key over, so the mod's own file for it is dead weight,
+        // whether the Midlander original stays (adding) or goes (in place).
+        foreach (var mode in new[] { ConversionOutputMode.InPlace, ConversionOutputMode.AddToMod })
+        {
+            var plan = new AnimationConversionPlanner(game, Parent, new FakeRetargeter()).Plan(mod.Path, request with { Mode = mode });
+            Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+            Assert.True(plan.Diagnostics.Any(d => d.Code == "destination_replaced"), $"{mode}: the replacement is reported");
+            Assert.True(plan.Files.Any(f => f.Operation == LocalFileOperation.Delete && f.Destination == @"c1101\mine.pap"),
+                $"{mode}: the replaced file is removed");
+            Assert.True(plan.Files.Any(f => f.Operation == LocalFileOperation.Delete && f.Destination == @"c0101\loop.pap") == (mode == ConversionOutputMode.InPlace),
+                $"{mode}: the source race's file goes only when converting in place");
+        }
     }
 
     /// <summary>
