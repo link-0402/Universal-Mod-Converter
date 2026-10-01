@@ -28,6 +28,12 @@ public class Configuration : IPluginConfiguration
     /// </summary>
     public TextureFanOutLayout TextureLayout { get; set; } = TextureFanOutLayout.AddPathsToOptions;
 
+    /// <summary>
+    /// A new mod made from gear or animation conversions holds only what they convert. Off, it is
+    /// a copy of the whole mod with the conversions made in it, as converting in place would.
+    /// </summary>
+    public bool NewModOnlyConverted { get; set; } = true;
+
     /// <summary>Write a texture fan-out to a copy of the mod instead of the mod itself.</summary>
     public bool TextureAsNewMod { get; set; }
 

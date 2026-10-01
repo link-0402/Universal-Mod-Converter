@@ -155,7 +155,7 @@ public sealed class ModConverterService
     /// </summary>
     private void PlanQueue(ConversionTask task)
     {
-        var context = new ModPlanContext(task.ModDirectory, task.OutputMode, shared: true);
+        var context = new ModPlanContext(task.ModDirectory, task.PlanMode, shared: true);
         var merger  = new ModPlanMerger(context);
 
         foreach (var entry in task.Entries)
@@ -174,6 +174,7 @@ public sealed class ModConverterService
             }
 
             entry.Task.OutputMode = task.OutputMode;
+            entry.Task.KeepsWholeMod = task.KeepsWholeMod;
             entry.Task.ModDirectory = task.ModDirectory;
             MergedPlanEntry merged;
             GearConversionRequest? gear = null;
@@ -182,7 +183,7 @@ public sealed class ModConverterService
                     ctx => new AnimationConversionPlanner(_gameFiles, ParentRace, _retargeter)
                         .Plan(ctx, ForMode(entry.Task.AnimationRequest
                                   ?? throw new InvalidOperationException("Choose what to do with the animation."),
-                              task.OutputMode)));
+                              task.PlanMode)));
             else
             {
                 var request = gear = BuildGearRequest(entry.Task);
@@ -284,7 +285,7 @@ public sealed class ModConverterService
     private void PlanAnimation(ConversionTask task)
     {
         var request = ForMode(task.AnimationRequest ?? throw new InvalidOperationException("Choose what to do with the animation."),
-            task.OutputMode);
+            task.PlanMode);
         var plan = new AnimationConversionPlanner(_gameFiles, ParentRace, _retargeter)
             .Plan(task.ModDirectory, request);
         task.AnimationPlan = plan;
@@ -332,19 +333,21 @@ public sealed class ModConverterService
         var source = new GearItem(SlotInfo.ToGearSlot(task.Slot), sourceId, (ushort)Math.Max(0, task.SourceVariant));
         var target = new GearItem(SlotInfo.ToGearSlot(task.TargetSlot ?? task.Slot), targetId,
             (ushort)Math.Max(0, task.TargetVariant));
-        return new GearConversionRequest(source, target, task.OutputMode);
+        return new GearConversionRequest(source, target, task.PlanMode);
     }
 
     /// <param name="newMod">
     /// Which of the two write paths is about to run. The plan must agree both on the exact mode
     /// and on which path it was built for, so a plan made for one cannot be written by the other.
+    /// A new mod that keeps the whole mod is planned like converting in place (see
+    /// <see cref="ConversionTask.PlanMode"/>), and only the new-mod path writes it.
     /// </param>
     private static void EnsurePlanIsCurrent(ConversionTask task, bool newMod)
     {
         if (!task.IsPlanned) throw new InvalidOperationException("Wait for the preview of the plan before applying it.");
         if (task.HasBlockers) throw new InvalidOperationException(task.ErrorMessage ?? "The conversion plan has blockers.");
-        var planned = task.FilePlan?.Mode ?? task.OutputMode;
-        if (planned != task.OutputMode || planned.IsNewMod() != newMod)
+        var planned = task.FilePlan?.Mode ?? task.PlanMode;
+        if (planned != task.PlanMode || task.OutputMode.IsNewMod() != newMod)
             throw new InvalidOperationException("The output mode changed after the preview. Wait for the preview to update, then try again.");
         if (!string.Equals(SourceFingerprint(task), task.SourceFingerprint, StringComparison.Ordinal))
             throw new InvalidOperationException("The mod changed on disk after the preview. The preview is updated now; try again once it is ready.");
@@ -576,9 +579,9 @@ public sealed class ModConverterService
     // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Creates a new mod next to the source mod. Gear conversions contain only the converted
-    /// item (with the source's option structure); customization conversions and texture fan-outs
-    /// copy the mod.
+    /// Creates a new mod next to the source mod. Gear and animation conversions contain only the
+    /// converted item (with the source's option structure) unless the task keeps the whole mod;
+    /// customization conversions and texture fan-outs copy the mod.
     /// The source mod is never modified.
     /// </summary>
     public string? CreateNewModFromAssetChain(
@@ -598,11 +601,12 @@ public sealed class ModConverterService
                 throw new IOException($"The output path already exists: {finalDir}");
             var parent = Path.GetDirectoryName(finalDir) ?? throw new InvalidOperationException("The output path has no parent.");
             stageDir = Path.Combine(parent, $".{Path.GetFileName(finalDir)}.umc-stage-{Guid.NewGuid():N}");
-            if (task.TexturePlan is { } texture)
+            if (task.FilePlan is { } copied && (task.TexturePlan != null || task.KeepsWholeMod))
             {
-                // A fan-out keeps its source, so the new mod is all of this one plus the added paths.
+                // A fan-out keeps its source, so the new mod is all of this one plus the added
+                // paths; a new mod keeping the whole mod is this one converted as in place.
                 CopyDirectory(task.ModDirectory, stageDir);
-                GearConversionExecutor.ApplyInPlace(texture, stageDir, Log);
+                GearConversionExecutor.ApplyInPlace(copied, stageDir, Log);
                 UpdateMetaJsonName(stageDir, modDisplayName, Log);
             }
             else if (task.FilePlan is { } plan)

@@ -35,6 +35,8 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         if (ImGui.RadioButton("Create a new mod", mode.IsNewMod()))
             session.SetOutputMode(ConversionOutputMode.NewMod);
         Widgets.Tooltip("Safest: the result goes into a separate new mod, and this mod is never modified.");
+        ImGui.SameLine();
+        DrawNewModOnlyConverted(mode);
 
         var additiveBlock = session.AddToModBlockReason;
         using (ImRaii.Disabled(additiveBlock != null))
@@ -70,12 +72,28 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         DrawNewModName();
     }
 
+    /// <summary>Whether a new mod leaves out what the plan does not convert, or copies the whole mod.</summary>
+    private void DrawNewModOnlyConverted(ConversionOutputMode mode)
+    {
+        var block = session.NewModOnlyConvertedBlockReason;
+        var only  = session.NewModOnlyConverted && block == null;
+        using (ImRaii.Disabled(block != null || !mode.IsNewMod()))
+        {
+            if (ImGui.Checkbox("Only what's converted", ref only)) session.SetNewModOnlyConverted(only);
+        }
+        Widgets.Tooltip(block ?? (mode.IsNewMod() ? string.Empty : "Applies when creating a new mod. ") +
+                        "Ticked, the new mod holds only what the plan converts, and everything else in this mod is " +
+                        "left out. Unticked, it is a copy of this whole mod, everything else included, with the " +
+                        "conversion made in it as converting in place would.");
+    }
+
     // What each output mode does depends on what the plan converts. A run can mix gear and
     // animations, so each kind it holds says its own sentence.
 
     private string NewModDescription()
     {
         var contents = session.OutputContents;
+        if (session.NewModKeepsWholeMod) return WholeModDescription(contents);
         if (contents.HasFlag(PlanContents.Customization))
             return $"Creates a copy of this whole mod with the {session.OutputCustomizationName ?? "customization"} " +
                    "converted; everything else in the mod comes along. This mod is not modified.";
@@ -90,6 +108,26 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
             text += " Both mods then replace the same animation, so disable this one (or give the new one the higher " +
                     "priority) to see the expression.";
         return text;
+    }
+
+    /// <summary>A new mod keeping the whole mod is this mod converted as in place, written elsewhere.</summary>
+    private static string WholeModDescription(PlanContents contents)
+    {
+        var parts = new List<string> { "Creates a copy of this whole mod, everything else included, with the conversion " +
+                                       "made in it as converting in place would." };
+        if (contents.HasFlag(PlanContents.Gear))
+            parts.Add("The item moves to the target: the new mod no longer changes the original item, apart from files " +
+                      "other items still use.");
+        if (contents.HasFlag(PlanContents.AnimationSwap))
+            parts.Add("The animation moves to its destination and stops playing where it was; an idle stays in its " +
+                      "current slot too while that slot is ticked.");
+        if (contents.HasFlag(PlanContents.AnimationRetarget))
+            parts.Add("Retargeting moves the animation from the source race to the ticked races.");
+        if (contents.HasFlag(PlanContents.AnimationExpression))
+            parts.Add("The expression is attached to the animation itself, which then always plays with it.");
+        parts.Add("This mod is not modified. Both mods then change the same things, so disable this one (or give the " +
+                  "new one the higher priority).");
+        return string.Join(" ", parts);
     }
 
     private string AddToModDescription()

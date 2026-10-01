@@ -67,7 +67,7 @@ public sealed partial class ConverterSession
     /// mod always keeps it, converting in place moves it to the target races, and a new mod
     /// follows <see cref="AnimationIncludesSourceRace"/>.
     /// </summary>
-    public bool AnimationSourceRaceStays => EffectiveOutputMode.KeepsSourceRace(AnimationIncludesSourceRace);
+    public bool AnimationSourceRaceStays => PlanOutputMode.KeepsSourceRace(AnimationIncludesSourceRace);
 
     private bool _emotesLoading;
 
@@ -305,7 +305,7 @@ public sealed partial class ConverterSession
     /// <summary>Ticks or unticks the source race; only a new mod leaves that choice to the user.</summary>
     public void SetAnimationIncludesSourceRace(bool include)
     {
-        if (include == AnimationIncludesSourceRace || !EffectiveOutputMode.IsNewMod()) return;
+        if (include == AnimationIncludesSourceRace || !PlanOutputMode.IsNewMod()) return;
         AnimationIncludesSourceRace = include;
         MarkDirty();
     }
