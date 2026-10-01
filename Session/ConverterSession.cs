@@ -527,7 +527,7 @@ public sealed partial class ConverterSession
 
             Log.Add(result.Items.Count > 0
                 ? $"Scan found {result.Items.Count} asset root(s) in {ModName}."
-                : $"Scan found no gear, facewear, hair, face, tail, Viera-ear, skin or animation in {ModName}.");
+                : $"Scan found no gear, facewear, hair, face, tail, Viera ear, skin or animation in {ModName}.");
             if (result.Items.Count == 1) SelectSource(0);
         }, ex =>
         {
@@ -699,7 +699,7 @@ public sealed partial class ConverterSession
 
     /// <summary>
     /// Why the converted item cannot be added beside the original, or null. Hair, face, tail
-    /// and Viera-ear conversions rewrite their model and material files in place, which would
+    /// and Viera ear conversions rewrite their model and material files in place, which would
     /// retarget the original as well, so they still have to replace it. A fan-out has output
     /// choices of its own and never uses this one. With nothing planned yet, the selection decides.
     /// </summary>

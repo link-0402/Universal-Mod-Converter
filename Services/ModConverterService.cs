@@ -167,7 +167,7 @@ public sealed class ModConverterService
                 // Customization conversions patch their files on disk rather than producing a
                 // file plan, so they cannot share a definition with the others yet.
                 entry.Diagnostics.Add(new PlanDiagnostic("queue_unsupported_kind",
-                    $"{entry.Description}: hair, face, tail, Viera-ear and skin conversions cannot be converted " +
+                    $"{entry.Description}: hair, face, tail, Viera ear and skin conversions cannot be converted " +
                     "together with others yet. Convert this one on its own.", true));
                 entry.Rejected = true;
                 continue;
