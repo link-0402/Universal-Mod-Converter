@@ -7,9 +7,17 @@ public static class PathSafety
         if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(candidate))
             throw new InvalidDataException("Root and candidate paths are required.");
 
-        var canonicalRoot = Path.GetFullPath(root)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var canonical = Path.GetFullPath(candidate);
+        string canonicalRoot, canonical;
+        try
+        {
+            canonicalRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            canonical = Path.GetFullPath(candidate);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException)
+        {
+            // A path with a NUL or an illegal character is no file of the mod's, whatever it is named.
+            throw new InvalidDataException($"Not a valid path: {candidate}", ex);
+        }
         var prefix = canonicalRoot + Path.DirectorySeparatorChar;
         if (!canonical.Equals(canonicalRoot, StringComparison.OrdinalIgnoreCase) &&
             !canonical.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

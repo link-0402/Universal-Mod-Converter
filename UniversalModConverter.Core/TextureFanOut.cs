@@ -194,6 +194,10 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                                             $"{RaceNames.Describe(target.GenderRace)}.");
                 else if (CustomizationTargets.BlockReason(_source.Kind, _source.GenderRace, target.Kind, target.GenderRace) is { } reason)
                     Block("invalid_target", reason);
+                else if (_source.Kind == AssetKind.Body && target.Kind == AssetKind.Body && _source.ModelId != target.ModelId)
+                    // A race's body variants (the Xaela skin is b0101) are its own: another race has no such body.
+                    Block("invalid_target", $"This skin is body {_source.ModelId:D4}, which only its own race has, so it cannot be " +
+                                            $"offered to {RaceNames.Describe(target.GenderRace)}.");
                 else
                     targets.Add(target);
             }
