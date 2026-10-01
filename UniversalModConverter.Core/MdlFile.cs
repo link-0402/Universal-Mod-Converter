@@ -354,6 +354,13 @@ public sealed class MdlFile
             verticalFogBoundingBox, boneBounds) = tail.Value;
         var metadataTail = r.Bytes(dataOffset - r.Position).ToArray().ToImmutableArray();
 
+        // The header says where each LOD's buffers are in the file. Some exporters leave the LOD structs'
+        // copies a few bytes off, which the game ignores; trust the header, if it points into the data.
+        for (var l = 0; l < Math.Min(header.LodCount, lods.Count); l++)
+            if (l < header.VertexOffsets.Length && l < header.IndexOffsets.Length &&
+                header.VertexOffsets[l] >= dataOffset && header.IndexOffsets[l] >= dataOffset)
+                lods[l] = lods[l] with { VertexDataOffset = header.VertexOffsets[l], IndexDataOffset = header.IndexOffsets[l] };
+
         ValidateBufferRanges(bytes.Length, dataOffset, header, lods, meshes, declarations);
         return new MdlFile(bytes, header, modelHeader, declarations.ToImmutable(),
             stringList.ToImmutable(), attributes, materials, bones, elementsIds.ToImmutable(),

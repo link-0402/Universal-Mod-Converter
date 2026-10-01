@@ -11,7 +11,30 @@ internal static class MeshPartTests
         ("Removing a part hides only its triangles and moves nothing", RemovePart),
         ("The preview hides removed groups and parts in place", HideRemoved),
         ("A removed part stays hidden while a shape is on", ShapesStayHidden),
+        ("A model whose LOD struct is a few bytes off the header still reads", HeaderBufferOffsetsWin),
     ];
+
+    /// <summary>
+    /// The header's buffer offsets match the file; some exporters leave the LOD struct's copies a
+    /// few bytes off, and the game ignores them. Reading such a model must not refuse it.
+    /// </summary>
+    private static void HeaderBufferOffsetsWin()
+    {
+        var bytes = TestAssets.CreateMdl();
+        var model = MdlFile.Read(bytes);
+        var vertex = model.Lods[0].VertexDataOffset;
+        var index = model.Lods[0].IndexDataOffset;
+        var pair = new byte[8];
+        BinaryPrimitives.WriteUInt32LittleEndian(pair, vertex);
+        BinaryPrimitives.WriteUInt32LittleEndian(pair.AsSpan(4), index);
+        var at = bytes.AsSpan().IndexOf(pair);
+        Assert.True(at >= 0, "the LOD struct holds the buffer locations");
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(at + 4), index + 12);
+
+        var read = MdlFile.Read(bytes);   // was refused: the index buffer ran past the end of the file
+        Assert.Equal(index, read.Lods[0].IndexDataOffset);
+        Assert.Equal(vertex, read.Lods[0].VertexDataOffset);
+    }
 
     /// <summary>
     /// A shape replaces index-buffer entries with vertices of its own. Aimed at a removed part,
