@@ -235,6 +235,9 @@ public sealed class AnimationConversionPlanner(
         /// <summary>Expression timelines a face swap moved away from, for the orphan check.</summary>
         private readonly List<string> _movedTimelines = [];
 
+        /// <summary>Files of the mod's own entries that a conversion replaced, for the orphan check.</summary>
+        private readonly List<string> _replacedLocals = [];
+
         /// <summary>What the current swap is aiming at ("/Box"), for messages. Null while retargeting.</summary>
         private string? _destinationLabel;
         private int _races;
@@ -295,11 +298,13 @@ public sealed class AnimationConversionPlanner(
             }
             if (_plan.HasBlockers) return _plan;
 
-            // Additive mode keeps every source key, so nothing is orphaned to begin with. Each
-            // conversion of a run checks its own sources, once all of them have planned: a file
-            // another conversion still uses stays.
+            // Additive mode keeps every source key, but a file of the mod's own that a conversion
+            // replaced is orphaned in every mode that edits the mod, so all of them clean up the same
+            // way. Each conversion of a run checks its own files, once all of them have planned: a
+            // file another conversion still uses stays.
             if (_request.Mode.EditsSourceMod())
-                _context.AddFinalizer(_ => DeleteOrphans(providers.Select(p => p.Local).Concat(_movedTimelines)));
+                _context.AddFinalizer(_ => DeleteOrphans(
+                    providers.Select(p => p.Local).Concat(_movedTimelines).Concat(_replacedLocals)));
             else
                 _context.AddFinalizerOnce("new-mod", mod =>
                 {
@@ -392,6 +397,13 @@ public sealed class AnimationConversionPlanner(
             if (targets.Count > 0 && !_plan.HasBlockers) DescribeInheritance(OutputLocations(providers, variants), targets);
         }
 
+        /// <summary>Takes a replaced entry out of <paramref name="files"/>, keeping its file for the orphan check.</summary>
+        private void Replace(JsonObject files, string key)
+        {
+            if (Json.GetString(files[key]) is { Length: > 0 } local) _replacedLocals.Add(local);
+            files.Remove(key);
+        }
+
         /// <summary>Takes a provider's own key out of the result's container.</summary>
         private void RemoveKey(Provider provider)
         {
@@ -421,7 +433,7 @@ public sealed class AnimationConversionPlanner(
                 var files = container.GetOrCreateFiles();
                 if (GamePath.FindKey(files, destination.GamePath) != null && !_sources.Contains(destination.Location))
                     Warn("destination_replaced", $"{container.Label}: the mod's own {destination.GamePath} is replaced.");
-                if (GamePath.FindKey(files, destination.GamePath) is { } stale) files.Remove(stale);
+                if (GamePath.FindKey(files, destination.GamePath) is { } stale) Replace(files, stale);
                 files[destination.GamePath] = GamePath.ToLocal(local);
                 _plan.Changes.Add(new GearPlanChange(provider.RetargetedFrom == null ? "Game path" : "Retarget", container.Label,
                     GamePath.Normalize(provider.Key), destination.GamePath));
@@ -741,7 +753,7 @@ public sealed class AnimationConversionPlanner(
                     if (GamePath.FindKey(files, destinationPath) is { } stale)
                     {
                         Warn("destination_replaced", $"{container.Label}: the mod's own {destinationPath} is replaced.");
-                        files.Remove(stale);
+                        Replace(files, stale);
                     }
                     files[destinationPath] = GamePath.ToLocal(written);
                     if (!_request.KeepOriginal && GamePath.FindKey(files, sourcePath) is { } old) files.Remove(old);
@@ -1126,7 +1138,7 @@ public sealed class AnimationConversionPlanner(
             if (GamePath.FindKey(files, destination.GamePath) is { } existing)
             {
                 Warn("destination_replaced", $"{container.Label}: the mod's own {destination.GamePath} is replaced.");
-                files.Remove(existing);
+                Replace(files, existing);
             }
             files[destination.GamePath] = GamePath.ToLocal(local);
             _plan.Outputs.Add(new AnimationOutput(container.Label, destination.GamePath, local, _hashes[local]));
