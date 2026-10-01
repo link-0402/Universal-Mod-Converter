@@ -23,8 +23,9 @@ namespace UniversalModConverter.Services.Animations;
 /// <item>Every body animation is sampled on it, which shows the bones it really moves.</item>
 /// <item>The target race gets the smallest standard skeleton with those bones, or the mod's own
 /// skeleton for it (see <see cref="SkeletonMatcher.ChooseTarget"/>).</item>
-/// <item>Each frame is moved onto it with <see cref="SkeletonRetarget"/>, rebuilt, compressed
-/// like the original, serialized, and then decoded again and compared frame by frame.</item>
+/// <item>Each frame is moved onto it with <see cref="SkeletonRetarget"/>, rebuilt, spline-compressed
+/// when the original was compressed (in any encoding) and left uncompressed when it was
+/// interleaved, serialized, and then decoded again and compared frame by frame.</item>
 /// </list>
 /// Facial animations bind to face skeletons and are kept unchanged.
 /// <para>

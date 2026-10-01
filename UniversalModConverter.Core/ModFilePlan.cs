@@ -18,7 +18,10 @@ public interface IModFilePlan
 
     bool HasBlockers { get; }
 
-    /// <summary>Deterministic hash of the planned output, used to prove Apply matches Preview.</summary>
+    /// <summary>
+    /// Deterministic hash of the planned output. Informational: shown in the plan and recorded in the
+    /// recovery journal. Apply is guarded by the source fingerprint, not by comparing this one.
+    /// </summary>
     string Fingerprint();
 
     /// <summary>

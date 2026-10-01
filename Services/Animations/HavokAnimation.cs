@@ -152,8 +152,8 @@ internal sealed unsafe class HavokAnimation
             => new() { StringAndFlag = Copy<byte>(Encoding.UTF8.GetBytes(text + "\0")).Data };
 
         /// <summary>
-        /// A plugin-owned copy of a binding. Havok keeps the reference count in the low 16 bits
-        /// and the allocation size in the high 16 bits of <c>MemSizeAndRefCount</c>; zero turns
+        /// A plugin-owned copy of a binding. Havok keeps the memory size and flags in the low 16 bits
+        /// and the reference count in the high 16 bits of <c>MemSizeAndRefCount</c>; a zero size turns
         /// reference management off, so a control's release can never free arena memory.
         /// </summary>
         public hkaAnimationBinding* CopyBinding(hkaAnimationBinding* source)

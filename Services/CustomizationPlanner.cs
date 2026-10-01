@@ -113,7 +113,11 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                 {
                     var replacements = planned.Patches.ToDictionary(p => p.OldString, p => p.NewString,
                         StringComparer.Ordinal);
-                    _ = MtrlFile.RewritePaths(File.ReadAllBytes(file), replacements);
+                    try { _ = MtrlFile.RewritePaths(File.ReadAllBytes(file), replacements); }
+                    catch (Exception ex) when (ex is InvalidDataException or IOException or ArgumentException or IndexOutOfRangeException)
+                    {
+                        task.Diagnostics.Add(new PlanDiagnostic("malformed_mtrl", $"{Path.GetFileName(file)}: {ex.Message}", true));
+                    }
                 }
                 task.PlannedBinaryPatches.Add(planned);
             }
@@ -211,7 +215,13 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             var additions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             result[file] = additions;
             // Material names are readable from MDL v5 and v6 alike.
-            foreach (var material in ResourceReferences.ReadMdlMaterials(File.ReadAllBytes(file)))
+            IReadOnlyList<string> materials;
+            try { materials = ResourceReferences.ReadMdlMaterials(File.ReadAllBytes(file)); }
+            catch (Exception ex) when (ex is InvalidDataException or IOException or ArgumentException or IndexOutOfRangeException)
+            {
+                continue; // The model's own planning step names the file and the problem.
+            }
+            foreach (var material in materials)
             {
                 var renamed = CustomizationPaths.RewriteOwnedReference(material, source, target);
                 if (renamed == material) continue;
@@ -602,7 +612,8 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             }
         }
 
-        // Every skeleton the converted part can load, in any option, must exist for the target race.
+        // The skeleton an option sets for the source (the last one the mod defines, should several options
+        // set different ones) and the default must exist for the target race.
         var used = resources.EstOverrides
             .Where(o => o.Key == new EstOverrideKey(source.Kind, source.GenderRace, source.ModelId))
             .Select(o => o.Value)
@@ -625,17 +636,12 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                 $"({skeletonPath}); physics bones of the converted {descriptor.DisplayName.ToLowerInvariant()} may not move.", false));
         }
 
-        // An explicit default entry is retargeted with the rest of the metadata.
-        if (defaultSource != null || !defaultAvailable) return;
+        // An explicit default entry is retargeted with the rest of the metadata, and a target whose own
+        // skeleton is the one the source loads needs no entry to say so.
+        if (defaultSource != null || !defaultAvailable || defaultSkeleton == targetVanilla) return;
 
         var file = Path.Combine(root, PenumbraMod.MetaFileName);
         const string jsonPath = "<root>.DefaultData";
-        if (!File.Exists(file))
-        {
-            task.Diagnostics.Add(new PlanDiagnostic("extra_skeleton_not_added",
-                $"The mod has no default option to receive the extra-skeleton entry for {prefix}{defaultSkeleton:D4}.", false));
-            return;
-        }
 
         var (race, gender) = GenderRaces.Names(target.GenderRace);
         var manipulation = new JsonObject

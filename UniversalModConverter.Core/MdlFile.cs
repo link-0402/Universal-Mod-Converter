@@ -76,9 +76,11 @@ public sealed record MdlFaceData(Vector3 Position, uint Sign);
 public sealed record MdlBoundingBox(Vector4 Minimum, Vector4 Maximum);
 
 /// <summary>
-/// Checked reader and lossless writer for an uncompressed Dawntrail MDL payload.
-/// Unknown and reserved bytes remain in their original locations. Mutations used by
-/// race conversion are fixed-size, so writing never discards newer format data.
+/// Checked reader and writer for an uncompressed Dawntrail MDL payload. A file nothing was
+/// changed in writes back byte for byte. Changing a string or the mesh table writes the metadata
+/// afresh in its canonical layout, which can move section offsets and recomputes padding and
+/// bone-table arrays; the vertex and index data are kept. Mutations used by race conversion
+/// are fixed-size, so writing never discards newer format data.
 /// </summary>
 public sealed class MdlFile
 {
@@ -422,7 +424,7 @@ public sealed class MdlFile
 
     public byte[] Write() => RequiresRebuild ? WriteRebuilt() : _bytes.ToArray();
 
-    /// <summary>Applies same-length path edits while keeping all section offsets stable.</summary>
+    /// <summary>Applies path edits; any change makes the next write rebuild the metadata (see <see cref="SetString"/>).</summary>
     public void ReplacePaths(IReadOnlyDictionary<string, string> replacements)
     {
         foreach (var (source, target) in replacements)
@@ -438,7 +440,7 @@ public sealed class MdlFile
         }
     }
 
-    /// <summary>Replaces one string-table entry; length changes trigger a canonical rebuild.</summary>
+    /// <summary>Replaces one string-table entry; the next write rebuilds the metadata in its canonical layout.</summary>
     public void SetString(int index, string value)
     {
         if ((uint)index >= (uint)Strings.Length) throw new ArgumentOutOfRangeException(nameof(index));

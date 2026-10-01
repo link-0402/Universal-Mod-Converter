@@ -150,6 +150,9 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
 
         private PenumbraMod Result => _plan.Result;
 
+        /// <summary>How many (entry, target) pairs were skipped because the path has no equivalent for the target.</summary>
+        private int _withoutEquivalent;
+
         public TextureFanOutPlan Run()
         {
             var descriptor = CustomizationKinds.Get(_source.Kind);
@@ -177,7 +180,10 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                 Warn("path_exists", $"{scope} already redirects {keys.Count} of {RaceNames.Name(race)}'s paths; " +
                                     "those are left as they are.");
             if (!_plan.HasBlockers && _plan.Outputs.Count == 0)
-                Block("empty_plan", "Every target already has these paths; there is nothing to add.");
+                Block("empty_plan", _withoutEquivalent > 0
+                    ? "There is nothing to add: the source's paths have no equivalent for the ticked targets " +
+                      "(an Au Ra tail's Xaela material, for a race without one, for example)."
+                    : "Every target already has these paths; there is nothing to add.");
             return _plan;
         }
 
@@ -260,7 +266,11 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                 foreach (var target in targets)
                 {
                     var key = Retarget(entry.Key, target);
-                    if (string.Equals(key, entry.Key, StringComparison.Ordinal)) continue;
+                    if (string.Equals(key, entry.Key, StringComparison.Ordinal))
+                    {
+                        _withoutEquivalent++;   // e.g. an Au Ra tail's Xaela material, for a race without one
+                        continue;
+                    }
                     if (Kept(key, target) || Holds(dictionary, key)) continue;
                     Add(dictionary, entry, target, key, container.Label, "Game path");
                 }
@@ -481,7 +491,8 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                     }
                 }
             }
-            catch (Exception ex) when (ex is InvalidDataException or IOException)
+            catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException
+                                           or ArgumentException or OverflowException)
             {
                 Warn("material_unreadable", $"{entry.Value}: {ex.Message} It is shared unchanged instead.");
             }
