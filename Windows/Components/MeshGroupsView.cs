@@ -385,8 +385,10 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         if (shown.Count == 0) return;
 
         preview.Request(shown.SelectMany(EditableModels).ToList(), session.Task.MeshRemovals);
-        Widgets.MutedWrapped("Your character shows the model without what you untick below, and is redrawn each time " +
-                             "you change a checkbox. Keep the source mod enabled.");
+        if (preview.Problem is { } problem) Widgets.ColoredWrapped(Theme.Warning, problem);
+        else
+            Widgets.MutedWrapped("Your character shows the model without what you untick below, and is redrawn each time " +
+                                 "you change a checkbox. Keep the source mod enabled.");
     }
 
     /// <summary>The hair, face, tail or ear being converted, as "Hyur Midlander Male Hair 12"; null when unknown.</summary>

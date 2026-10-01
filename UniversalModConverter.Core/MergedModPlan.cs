@@ -167,11 +167,17 @@ public sealed class ModPlanMerger(ModPlanContext context)
                 return Reject(description, other.Description, "move or delete the same file", consumed);
             if (claims.TouchedImcGroups.Overlaps(other.Claims.TouchedImcGroups))
                 return Reject(description, other.Description, "change the same IMC option group",
-                    claims.TouchedImcGroups.First(g => other.Claims.TouchedImcGroups.Contains(g)).ToString());
+                    GroupLabel(claims.TouchedImcGroups.First(g => other.Claims.TouchedImcGroups.Contains(g))));
         }
 
         return null;
     }
+
+    /// <summary>A group as the user knows it, by name; its position only when it cannot be found (counted from 1, as in the mod's list).</summary>
+    private string GroupLabel(int index)
+        => index >= 0 && index < Context.Result.Groups.Count && Context.Result.Groups[index].Name is { Length: > 0 } name
+            ? $"'{name}'"
+            : $"group {index + 1}";
 
     private static PlanDiagnostic Reject(string description, string other, string what, string example)
         => new("queue_conflict",
