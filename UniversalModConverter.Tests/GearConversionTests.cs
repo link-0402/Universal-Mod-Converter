@@ -28,6 +28,7 @@ internal static class GearConversionTests
         ("In place refuses to overwrite existing target paths", InPlaceTargetConflict),
         ("Customization detection skips roots that only hold borrowed textures", CustomizationBorrowedTextures),
         ("Customization detection skips a shared material root a model loads", CustomizationSharedMaterialRoot),
+        ("A new mod of only a converted hair keeps its redirects, metadata and files", CustomizationKeepOnly),
         ("Gear detection skips a set only another item's model loads", GearBorrowedItems),
         ("Malformed paths and files are refused with an InvalidDataException", MalformedInputIsRefused),
         ("A binary path rewrite changes whole strings, whatever their casing", BinaryRewriteWholeStrings),
@@ -295,6 +296,62 @@ internal static class GearConversionTests
         // Face 1 only supplies a texture face 2's material loads; face 3's texture is its own retexture.
         Assert.Equal("Face c0801 #2, Face c0801 #3",
             string.Join(", ", roots.Select(r => $"{r.Kind} c{r.GenderRace:D4} #{r.ModelId}")));
+    }
+
+    /// <summary>
+    /// A hair converted in a copy of its mod, with the rest of the mod still in it: the new mod
+    /// keeps the converted hair's paths in the options they are in, the source's textures its
+    /// unchanged material still loads, its own extra skeleton and shape switch, and the files
+    /// those paths load. Another hair, its metadata, a group holding only that, an IMC group and
+    /// the files nothing loads any more go.
+    /// </summary>
+    private static void CustomizationKeepOnly()
+    {
+        using var mod = new TempDir();
+        const string model = "chara/human/c1401/obj/hair/h0135/model/c1401h0135_hir.mdl";
+        const string material = "chara/human/c0201/obj/hair/h0135/material/v0001/mt_c0201h0135_c1401_hir_b.mtrl";
+        const string texture = "chara/human/c0201/obj/hair/h0135/texture/c0201h0135_hir_b_norm.tex";
+        const string other = "chara/human/c1801/obj/hair/h0144/model/c1801h0144_hir.mdl";
+        const string otherMaterial = "chara/human/c0201/obj/hair/h0144/material/v0001/mt_c0201h0144_hir_b.mtrl";
+        const string shared = "chara/human/c0201/obj/hair/h0144/texture/c0201h0144_hir_b_norm.tex";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Identifier":"{{{G1}}}","Name":"Hairs","DefaultData":{
+              "Files":{"{{{model}}}":"m/hair.mdl","{{{material}}}":"m/b.mtrl","{{{other}}}":"v/hair.mdl",
+                       "{{{otherMaterial}}}":"m/b.mtrl"},
+              "FileSwaps":{"chara/human/c1801/obj/hair/h0144/texture/x.tex":"{{{texture}}}"},
+              "Manipulations":[
+                {"Type":"Est","Manipulation":{"Entry":5,"Gender":"Female","Race":"AuRa","SetId":135,"Slot":"Hair"}},
+                {"Type":"Est","Manipulation":{"Entry":7,"Gender":"Female","Race":"Viera","SetId":144,"Slot":"Hair"}},
+                {"Type":"Shp","Manipulation":{"Entry":true,"Slot":"Hair","Id":135,"Shape":"shp_a","GenderRaceCondition":1401}},
+                {"Type":"Shp","Manipulation":{"Entry":true,"Slot":"Hair","Id":135,"Shape":"shp_b","GenderRaceCondition":1801}},
+                {"Type":"Rsp","Manipulation":{"Entry":1.0,"SubRace":"Raen","Attribute":"BustMaxX"}}]},
+             "Groups":[
+               {"Name":"Colour","Type":"Single","Options":[
+                 {"Name":"Dark","Files":{"{{{texture}}}":"t/dark.tex"}},
+                 {"Name":"Viera only","Files":{"chara/human/c1801/obj/hair/h0144/texture/n.tex":"t/viera.tex"}}]},
+               {"Name":"Highlights","Type":"Single","Options":[
+                 {"Name":"Ombre","Files":{"{{{shared}}}":"t/ombre.tex"}},{"Name":"Roots","Files":{"{{{shared}}}":"t/roots.tex"}}]},
+               {"Name":"Viera","Type":"Multi","Options":[
+                 {"Name":"Ears","Files":{"chara/human/c1801/obj/zear/z0001/model/c1801z0001_zer.mdl":"v/ear.mdl"}}]},
+               {"Name":"Variant","Type":"Imc","Identifier":{"PrimaryId":1,"SecondaryId":0,"Variant":1,"ObjectType":"Equipment","EquipSlot":"Head","BodySlot":"Unknown"},
+                "DefaultEntry":{"MaterialId":1},"Options":[{"Name":"On","AttributeMask":1}]}]}
+            """);
+        foreach (var file in new[] { "m/hair.mdl", "v/hair.mdl", "v/ear.mdl", "t/dark.tex", "t/viera.tex", "t/ombre.tex", "t/roots.tex", "readme.txt" })
+            mod.File(file, Encoding.ASCII.GetBytes(file));
+        mod.File("m/b.mtrl", Mtrl(shared));
+
+        CustomizationOutput.KeepOnly(mod.Path, [model, material, texture], new CustomizationPathEndpoint(AssetKind.Hair, 1401, 135));
+
+        var result = PenumbraMod.Load(mod.Path);
+        Assert.Equal($"{model}, {material}", string.Join(", ", result.Default.FileEntries().Select(e => e.Key)));
+        Assert.True(result.Default.FileSwaps == null, "the other hair's swap is left out");
+        Assert.Equal("Est|Shp", string.Join("|", result.Default.Manipulations!.OfType<JsonObject>().Select(m => Json.GetString(m["Type"]))));
+        Assert.Equal("Colour, Highlights", string.Join(", ", result.Groups.Select(g => g.Name)));
+        Assert.Equal($"{texture} | ", string.Join(" | ", result.Groups[0].Containers.Select(c => string.Join(",", c.FileEntries().Select(e => e.Key)))));
+        var files = Directory.EnumerateFiles(mod.Path, "*", SearchOption.AllDirectories)
+            .Select(f => System.IO.Path.GetRelativePath(mod.Path, f).Replace(System.IO.Path.DirectorySeparatorChar, '/')).Order(StringComparer.Ordinal);
+        Assert.Equal("m/b.mtrl, m/hair.mdl, meta.json, t/dark.tex, t/ombre.tex, t/roots.tex", string.Join(", ", files));
+        Assert.True(!Directory.Exists(System.IO.Path.Combine(mod.Path, "v")), "an emptied folder is removed");
     }
 
     private static void BinaryRewriteWholeStrings()
@@ -633,11 +690,12 @@ internal static class GearConversionTests
             new Dictionary<string, string> { ["/mt_c0201e0100_top_a.mtrl"] = "/mt_c0201e0300_glv_a.mtrl" });
         Assert.Equal(bytes.Length, rewritten.Length);
         Assert.Equal("/mt_c0201e0300_glv_a.mtrl", ResourceReferences.ReadMdlMaterials(rewritten).Single());
-        // Length changes append the new name and repoint the material offset (v5 and v6).
+        // Length changes rebuild the string table: the new name takes the old one's place (v5 and v6).
         var longerV5 = ResourceReferences.RewriteMdlStrings(bytes,
             new Dictionary<string, string> { ["/mt_c0201e0100_top_a.mtrl"] = "/mt_c0201e0300_top_glv_a.mtrl" });
         Assert.Equal("/mt_c0201e0300_top_glv_a.mtrl", ResourceReferences.ReadMdlMaterials(longerV5).Single());
         Assert.Equal(0, (longerV5.Length - bytes.Length) % 16);
+        Assert.True(!Encoding.ASCII.GetString(longerV5).Contains("mt_c0201e0100_top_a"), "the old name is not left in a v5 model");
 
         var v6 = TestAssets.CreateMdl(faceData: true, material: "/mt_c0201e0100_top_a.mtrl");
         var longer = ResourceReferences.RewriteMdlStrings(v6,
@@ -646,6 +704,18 @@ internal static class GearConversionTests
         var parsed = MdlFile.Read(longer);
         Assert.Equal("/mt_c0201e0300_dwn_glv_a.mtrl", parsed.Materials.Single());
         Assert.Equal("j_root", parsed.Bones.Single());
+        Assert.True(!parsed.Strings.Contains("/mt_c0201e0100_top_a.mtrl"), "the old name is not left in a v6 model");
+        // A shorter name shrinks the table again, and the model still reads.
+        var shorter = MdlFile.Read(ResourceReferences.RewriteMdlStrings(longer,
+            new Dictionary<string, string> { ["/mt_c0201e0300_dwn_glv_a.mtrl"] = "/mt_a.mtrl" }));
+        Assert.Equal("/mt_a.mtrl|j_root", $"{shorter.Materials.Single()}|{shorter.Bones.Single()}");
+        Assert.True(shorter.Strings.All(n => !n.Contains("e0300")), "nothing of the longer name is left");
+        // Names after the material in the table (a shape's) move with it.
+        var shaped = TestAssets.CreateMdl(shape: true, material: "/mt_c0201e0100_top_a.mtrl");
+        var shapeName = MdlFile.Read(shaped).Shapes.Single().Name;
+        var reshaped = MdlFile.Read(ResourceReferences.RewriteMdlStrings(shaped,
+            new Dictionary<string, string> { ["/mt_c0201e0100_top_a.mtrl"] = "/mt_c0201e0300_dwn_glv_a.mtrl" }));
+        Assert.Equal($"/mt_c0201e0300_dwn_glv_a.mtrl|{shapeName}", $"{reshaped.Materials.Single()}|{reshaped.Shapes.Single().Name}");
         var shift = longer.Length - v6.Length;
         Assert.True(longer.AsSpan(parsed.DataOffset).SequenceEqual(v6.AsSpan(MdlFile.Read(v6).DataOffset)),
             "vertex and index data are unchanged");

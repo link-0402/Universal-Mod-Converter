@@ -33,8 +33,8 @@ Open the window with `/umc` (settings: `/umcconfig` or the cog icon).
 2. **From/To:** pick the source item, hair, face, tail, ear, skin or animation, and its target.
 3. **Add selection to conversion plan.** Repeat for anything else to convert in the same pass (hair, face, tail, ear and skin conversions have to run on their own).
 4. **Output:**
-   - **Create a new mod**, **Add to this mod** to put the result beside the original, or **Convert in place** to replace it. 
-   - With **Only what's converted** ticked (the default), a new mod holds only the converted items or animations. Untick it to copy the whole mod instead, everything else included, with the conversions made in it as converting in place would. Hair, face, tail, ear and skin conversions always copy the whole mod with that part converted.
+   - **Create a new mod**, **Add to this mod** to put the result beside the original, or **Convert in place** to replace it. A hair, face, tail or ear added to this mod loads the same textures as the original; only the model and the files the conversion changes are copied.
+   - With **Only what's converted** ticked (the default), a new mod holds only the converted items or animations. Untick it to copy the whole mod instead, everything else included, with the conversions made in it as converting in place would.
    - Retextures instead offer **Add paths on existing options** or **Create new groups for new paths**, optionally with **Create as a new mod** to write them to a copy of the whole mod; the original always keeps working.
    - An idle plays in every slot you tick; its current slot keeps it only while ticked, so converting in place with it unticked moves the idle away.
    - Retargeting lists the source race ticked: a new mod holds its animation too unless you untick it, adding to this mod always keeps it, and converting in place moves the animation from it to the ticked races.

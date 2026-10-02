@@ -79,9 +79,10 @@ public static partial class ResourceReferences
 
     /// <summary>
     /// Rewrites MDL material names for MDL v5 and v6. Same-length edits are written in place.
-    /// Length changes keep every existing string where it is, append the new names to the
-    /// string table and repoint only the material offsets; every absolute offset behind the
-    /// string table moves by the same 16-byte aligned amount.
+    /// Length changes rebuild the string table: each replaced name takes the place of the name it
+    /// replaces, so nothing of the old name is left behind, and every reference into the table
+    /// (attribute, material, bone and shape names) is pointed at its string's new offset. Every
+    /// absolute offset behind the string table moves by the same 16-byte aligned amount.
     /// </summary>
     public static byte[] RewriteMdlStrings(byte[] data, IReadOnlyDictionary<string, string> replacements)
     {
@@ -99,7 +100,8 @@ public static partial class ResourceReferences
             return output;
         }
 
-        if (!TryLocateMaterialOffsets(data, table, out var materialPosition, out var materialCount))
+        if (!TryLocateMaterialOffsets(data, table, out _, out _) ||
+            StringReferences(data, table) is not { } references)
             throw new InvalidDataException("The MDL layout cannot be followed for a length-changing material rename.");
         // Edge geometry (a LOD's size at +28, offset at +32; +36 is its polygon count) is not moved.
         var lodStart = LodTableStart(data, table);
@@ -107,31 +109,31 @@ public static partial class ResourceReferences
             if (BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(lodStart + l * LodSize + 28)) != 0)
                 throw new InvalidDataException("MDL files with edge geometry only support same-length material renames.");
 
-        // Append each new name once, then pad so every later structure keeps its alignment.
-        using var appended = new MemoryStream();
-        var newOffsets = new Dictionary<string, uint>(StringComparer.Ordinal);
-        foreach (var value in replacements.Values.Distinct(StringComparer.Ordinal))
+        // Every string in its order, the replaced ones under their new names.
+        using var strings = new MemoryStream();
+        var moved = new Dictionary<uint, uint>();
+        for (var i = 0; i < table.Strings.Count; i++)
         {
-            newOffsets[value] = (uint)(table.StringsEnd - table.DataStart + appended.Length);
-            appended.Write(Encoding.UTF8.GetBytes(value));
-            appended.WriteByte(0);
+            moved[(uint)(table.Offsets[i] - table.DataStart)] = (uint)strings.Length;
+            strings.Write(Encoding.UTF8.GetBytes(replacements.GetValueOrDefault(table.Strings[i], table.Strings[i])));
+            strings.WriteByte(0);
         }
-        while (appended.Length % 16 != 0) appended.WriteByte(0);
-        var delta = (int)appended.Length;
+        // The table keeps the padding it had after its strings, and grows or shrinks by whole
+        // 16-byte steps so every later structure keeps its alignment.
+        var padding = table.Size - (table.StringsEnd - table.DataStart);
+        var grown = (int)strings.Length + padding - table.Size;
+        var delta = (grown + 15) & ~15;
+        var size = table.Size + delta;
         var oldDataOffset = MdlHeaderSize + (long)BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(4)) +
                             BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(8));
-        // Insert directly after the last string so count-based readers see the new names
-        // before any original padding.
-        var tableEnd = table.StringsEnd;
 
+        var tableEnd = table.DataStart + table.Size;
         var result = new byte[data.Length + delta];
-        data.AsSpan(0, tableEnd).CopyTo(result);
-        appended.ToArray().CopyTo(result, tableEnd);
+        data.AsSpan(0, table.DataStart).CopyTo(result);
+        strings.ToArray().CopyTo(result, table.DataStart);
         data.AsSpan(tableEnd).CopyTo(result.AsSpan(tableEnd + delta));
 
-        BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(table.TableStart),
-            checked((ushort)(table.Strings.Count + newOffsets.Count)));
-        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(table.TableStart + 4), (uint)(table.Size + delta));
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(table.TableStart + 4), (uint)size);
         Add(8);                                                            // runtime size
         for (var i = 0; i < 6; i++) ShiftBufferOffset(16 + i * 4);          // vertex and index buffer offsets
         for (var l = 0; l < 3; l++)
@@ -139,27 +141,67 @@ public static partial class ResourceReferences
             ShiftBufferOffset(lodStart + delta + l * LodSize + 52);
             ShiftBufferOffset(lodStart + delta + l * LodSize + 56);
         }
-
-        var byOffset = StringsByOffset(table);
-        for (var i = 0; i < materialCount; i++)
+        foreach (var position in references)
         {
-            var at = materialPosition + delta + i * 4;
-            var relative = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(at));
-            if (byOffset.TryGetValue(table.DataStart + (int)relative, out var name) &&
-                replacements.TryGetValue(name, out var replacement))
-                BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(at), newOffsets[replacement]);
+            var at = position + delta;
+            BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(at), moved[BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(at))]);
         }
         return result;
 
         void Add(int position)
             => BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(position),
-                BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(position)) + (uint)delta);
+                (uint)(BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(position)) + delta));
 
         void ShiftBufferOffset(int position)
         {
             var value = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(position));
             if (value != 0 && value >= oldDataOffset) Add(position);
         }
+    }
+
+    /// <summary>
+    /// Where the model metadata names a string: the attribute, material and bone name offsets
+    /// and each shape's name. Null when one of them does not land on a string, which means the
+    /// layout was not followed correctly.
+    /// </summary>
+    private static List<int>? StringReferences(byte[] data, MdlStringTable table)
+    {
+        var model = table.DataStart + table.Size;
+        if (model + ModelHeaderSize > data.Length) return null;
+        ushort Count(int at) => BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(model + at));
+        var meshes = Count(4);
+        var attributes = Count(6);
+        var submeshes = Count(8);
+        var materials = Count(10);
+        var bones = Count(12);
+        var boneTables = Count(14);
+        var shapes = Count(16);
+        var terrainMeshes = data[model + 26];
+        var flags2 = data[model + 27];
+        var terrainSubmeshes = Count(38);
+        var boneTableWords = Count(44);
+
+        var attributeStart = LodTableStart(data, table) + 3 * LodSize + ((flags2 & 0x10) != 0 ? 3 * 40 : 0) + meshes * 36;
+        var materialStart = attributeStart + attributes * 4 + terrainMeshes * 20 + submeshes * 16 + terrainSubmeshes * 12;
+        var boneStart = materialStart + materials * 4;
+        // A v5 bone table is 64 bone indices, a count and padding; v6 packs the indices behind
+        // an offset and count per table.
+        var boneTableSize = BinaryPrimitives.ReadUInt32LittleEndian(data) == MdlFile.Version5
+            ? boneTables * 132
+            : boneTables * 4 + boneTableWords * 2;
+        var shapeStart = boneStart + bones * 4 + boneTableSize;
+
+        var positions = new List<int>();
+        for (var i = 0; i < attributes; i++) positions.Add(attributeStart + i * 4);
+        for (var i = 0; i < materials; i++) positions.Add(materialStart + i * 4);
+        for (var i = 0; i < bones; i++) positions.Add(boneStart + i * 4);
+        for (var i = 0; i < shapes; i++) positions.Add(shapeStart + i * 16);
+
+        var starts = table.Offsets.Select(o => (long)(o - table.DataStart)).ToHashSet();
+        foreach (var position in positions)
+            if (position + 4 > data.Length || !starts.Contains(BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(position))))
+                return null;
+        return positions;
     }
 
     private const int ModelHeaderSize = 56;

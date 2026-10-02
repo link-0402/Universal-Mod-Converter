@@ -243,30 +243,20 @@ public sealed partial class ConverterSession
     /// <summary>The output mode the plan actually runs with.</summary>
     public ConversionOutputMode EffectiveOutputMode => UsesTextureOutput
         ? TextureAsNewMod ? ConversionOutputMode.NewMod : ConversionOutputMode.AddToMod
-        // A preferred mode the plan cannot use waits rather than being overwritten by the
-        // fallback: it applies again as soon as the plan can use it.
-        : OutputMode == ConversionOutputMode.AddToMod && AddToModBlockReason != null ? ConversionOutputMode.NewMod
         : OutputMode;
 
     /// <summary>
-    /// Whether a new mod made from gear or animation conversions holds only what they convert,
-    /// rather than a copy of the whole mod with them converted in it.
+    /// Whether a new mod holds only what the plan converts, rather than a copy of the whole mod
+    /// with it converted in it.
     /// </summary>
     public bool NewModOnlyConverted { get; private set; }
 
     /// <summary>
-    /// Why a new mod is always a copy of the whole mod, so the choice of
-    /// <see cref="NewModOnlyConverted"/> does not apply, or null. A customization is converted
-    /// in a copy of its mod, and a fan-out has output choices of its own.
+    /// Whether the new mod is a copy of the whole mod, converted the way converting in place
+    /// would. A fan-out has output choices of its own and always copies the whole mod.
     /// </summary>
-    public string? NewModOnlyConvertedBlockReason
-        => UsesTextureOutput || OutputContents.HasFlag(PlanContents.Customization)
-            ? $"A new mod from a {OutputCustomizationName ?? "customization"} conversion is always a copy of the whole mod."
-            : null;
-
-    /// <summary>Whether the new mod is a copy of the whole mod, converted the way converting in place would.</summary>
     public bool NewModKeepsWholeMod
-        => EffectiveOutputMode.IsNewMod() && !NewModOnlyConverted && NewModOnlyConvertedBlockReason == null;
+        => EffectiveOutputMode.IsNewMod() && !NewModOnlyConverted && !UsesTextureOutput;
 
     /// <summary>
     /// The mode the planners see: <see cref="EffectiveOutputMode"/>, except that a new mod
@@ -698,23 +688,6 @@ public sealed partial class ConverterSession
     // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Why the converted item cannot be added beside the original, or null. Hair, face, tail
-    /// and Viera ear conversions rewrite their model and material files in place, which would
-    /// retarget the original as well, so they still have to replace it. A fan-out has output
-    /// choices of its own and never uses this one. With nothing planned yet, the selection decides.
-    /// </summary>
-    public string? AddToModBlockReason
-    {
-        get
-        {
-            var kind = _queue.Count > 0
-                ? RunEntries.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind) && !e.CanFanOut)?.Kind
-                : Source is { IsCustomization: true, CanFanOut: false } source ? source.Kind : null;
-            return kind is { } replaced ? OutputModeRules.ReplacesOriginal(replaced) : null;
-        }
-    }
-
-    /// <summary>
     /// What the plan converts, so the output options can say what each does with it. Like the
     /// output mode it follows the ticked entries, or the selection while nothing is planned.
     /// </summary>
@@ -751,7 +724,6 @@ public sealed partial class ConverterSession
 
     public void SetOutputMode(ConversionOutputMode mode)
     {
-        if (mode == ConversionOutputMode.AddToMod && AddToModBlockReason != null) return;
         if (mode == OutputMode) return;
         OutputMode = mode;
         Config.OutputMode = mode;
@@ -949,7 +921,7 @@ public sealed partial class ConverterSession
                     ? $"{animationPlan.Changes.Count} change(s), {animationPlan.Files.Count} file operation(s)"
                     : planned.TexturePlan is { } texturePlan
                     ? $"{texturePlan.Outputs.Count} path(s) added, {texturePlan.Files.Count} material file(s) written"
-                    : $"{planned.PlannedRenames.Count} rename(s), {planned.PlannedJsonChanges.Sum(j => j.Changes.Count)} metadata change(s), " +
+                    : $"{planned.PlannedRenames.Count(r => !r.KeepsOriginal)} rename(s), {planned.PlannedRenames.Count(r => r.KeepsOriginal)} file(s) copied, {planned.PlannedJsonChanges.Sum(j => j.Changes.Count)} metadata change(s), " +
                       $"{planned.PlannedBinaryPatches.Sum(b => b.Patches.Count)} binary patch(es), {planned.PlannedMdlChanges.Count} model rewrite(s)";
                 Log.Add(planned.HasBlockers ? LogLevel.Warning : LogLevel.Info,
                     $"Preview {description}: {counts}{(planned.HasBlockers ? ", has problems" : string.Empty)}.");

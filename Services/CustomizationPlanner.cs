@@ -124,10 +124,68 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         }
 
         var materialDependencies = PlanMaterialDependencies(task, source, target, resources, keys);
-        PlanJson(task, root, descriptor, source, target, resources, materialDependencies, keys);
-        PlanExtraSkeleton(task, root, mod, descriptor, source, target, resources);
         PlanDeformation(task, sourceRace, targetRace, source, resources);
+        // Adding to the mod keeps the source working: what the conversion changes is changed in
+        // copies, and the target's paths are added beside the source's rather than moved.
+        var keepSource = task.PlanMode.KeepsSource();
+        if (keepSource) KeepSourceFiles(task, root, mod, keys, target);
+        PlanJson(task, root, descriptor, source, target, resources, materialDependencies, keys, keepSource);
+        PlanExtraSkeleton(task, root, mod, descriptor, source, target, resources);
         task.OutputModels.AddRange(CollectOutputModels(task, root, mod, keys));
+    }
+
+    /// <summary>
+    /// Adding to the mod leaves the source's files as they are. A file the conversion changes is
+    /// copied, under the name converting in place would give it, and the copy is changed; a file
+    /// it leaves as it is (a texture, say) is not copied, and the target's paths load the same
+    /// file. Models are always copied, so leaving out mesh groups never edits the source's.
+    /// Only files the target's paths load are copied: another file the conversion would patch in
+    /// place (a model of another hair loading the same material, say) stays the source's.
+    /// </summary>
+    private static void KeepSourceFiles(ConversionTask task, string root, PenumbraMod mod, KeyRules keys,
+        CustomizationPathEndpoint target)
+    {
+        var loaded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var container in mod.Containers)
+        foreach (var (key, local) in container.FileEntries())
+        {
+            if (keys.Target(key) == null) continue;
+            try { loaded.Add(Path.GetFullPath(PathSafety.ResolveRelative(root, GamePath.ToLocal(local)))); }
+            catch (InvalidDataException) { /* a path outside the mod folder is no file of the mod's */ }
+        }
+        task.PlannedBinaryPatches.RemoveAll(p => !loaded.Contains(Path.GetFullPath(p.FilePath)));
+        task.PlannedMdlChanges.RemoveAll(m => !loaded.Contains(Path.GetFullPath(m.FilePath)));
+
+        var changed = task.PlannedBinaryPatches.Select(p => p.FilePath)
+            .Concat(task.PlannedMdlChanges.Select(m => m.FilePath))
+            .Concat(task.AllAssetFiles.Where(f => f.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase)))
+            .Select(Path.GetFullPath)
+            .Where(loaded.Contains)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var renamed = task.PlannedRenames.ToDictionary(r => Path.GetFullPath(r.OldPath), r => Path.GetFullPath(r.NewPath),
+            StringComparer.OrdinalIgnoreCase);
+        task.PlannedRenames.Clear();
+
+        var copies = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var suffix = $"_c{target.GenderRace:D4}{CustomizationKinds.Get(target.Kind).Token(target.ModelId)}";
+        foreach (var file in changed)
+        {
+            // A file that keeps its name in place (a shared material, or one whose name holds no
+            // root) needs a name of its own beside the original.
+            var copy = renamed.GetValueOrDefault(file, file);
+            for (var number = 1; string.Equals(copy, file, StringComparison.OrdinalIgnoreCase) || File.Exists(copy) || taken.Contains(copy); number++)
+                copy = Path.Combine(Path.GetDirectoryName(file)!,
+                    Path.GetFileNameWithoutExtension(file) + suffix + (number > 1 ? $"_{number}" : string.Empty) + Path.GetExtension(file));
+            taken.Add(copy);
+            copies[file] = copy;
+            task.PlannedRenames.Add(new PlannedRename { OldPath = file, NewPath = copy, KeepsOriginal = true });
+        }
+
+        foreach (var patch in task.PlannedBinaryPatches) patch.FilePath = copies[Path.GetFullPath(patch.FilePath)];
+        foreach (var change in task.PlannedMdlChanges) change.FilePath = copies[Path.GetFullPath(change.FilePath)];
     }
 
     /// <summary>
@@ -167,7 +225,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         var result = new List<GearOutputModel>();
         foreach (var (full, (gamePaths, sourcePaths, options)) in targets.OrderBy(t => t.Key, StringComparer.OrdinalIgnoreCase))
         {
-            var replacements = MaterialReplacements(task, full);
+            var replacements = MaterialReplacements(task, full, renames.GetValueOrDefault(full, full));
             IReadOnlyList<MdlMeshGroup> groups = [];
             string? error = null;
             try
@@ -195,13 +253,17 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         return result;
     }
 
-    /// <summary>The planned rewrites of the paths inside the model at <paramref name="file"/>.</summary>
-    private static Dictionary<string, string> MaterialReplacements(ConversionTask task, string file)
+    /// <summary>
+    /// The planned rewrites of the paths inside the model at <paramref name="file"/>. They are
+    /// planned on the file itself when it is converted in place, and on <paramref name="copy"/>
+    /// when the source keeps it.
+    /// </summary>
+    private static Dictionary<string, string> MaterialReplacements(ConversionTask task, string file, string copy)
     {
-        var patches = task.PlannedMdlChanges.FirstOrDefault(c => string.Equals(c.FilePath, file, StringComparison.OrdinalIgnoreCase))
-                          ?.PathReplacements
-                      ?? task.PlannedBinaryPatches.FirstOrDefault(p => string.Equals(p.FilePath, file, StringComparison.OrdinalIgnoreCase))
-                          ?.Patches
+        bool Planned(string path) => string.Equals(path, file, StringComparison.OrdinalIgnoreCase) ||
+                                     string.Equals(path, copy, StringComparison.OrdinalIgnoreCase);
+        var patches = task.PlannedMdlChanges.FirstOrDefault(c => Planned(c.FilePath))?.PathReplacements
+                      ?? task.PlannedBinaryPatches.FirstOrDefault(p => Planned(p.FilePath))?.Patches
                       ?? [];
         return patches.ToDictionary(p => p.OldString, p => p.NewString, StringComparer.Ordinal);
     }
@@ -404,10 +466,14 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         }
     }
 
+    /// <param name="keepSource">
+    /// Add the target's paths beside the source's instead of moving them, and add the target's
+    /// own metadata beside the source's instead of editing it.
+    /// </param>
     private static void PlanJson(ConversionTask task, string root,
         CustomizationKindDescriptor descriptor, CustomizationPathEndpoint source,
         CustomizationPathEndpoint target, ModResourceIndex resources,
-        IReadOnlyDictionary<string, Dictionary<string, string>> materialDependencies, KeyRules keys)
+        IReadOnlyDictionary<string, Dictionary<string, string>> materialDependencies, KeyRules keys, bool keepSource)
     {
         var renameMap = task.PlannedRenames.ToDictionary(
             rename => Normalize(Path.GetRelativePath(root, rename.OldPath)),
@@ -457,17 +523,20 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                         foreach (var (gamePath, destination) in dependencies) additions[gamePath] = destination;
                     }
                     if (additions.Count > 0)
+                    {
+                        foreach (var (gamePath, _) in additions) task.CustomizationOutputKeys.Add(Normalize(gamePath));
                         changes.Add(new JsonFieldChange { JsonPath = path, ChangeType = "dependency_files",
                             NewValue = additions.ToJsonString() });
+                    }
                 }
                 if (descriptor.SupportsEst &&
                     string.Equals(Json.GetString(obj["Type"]), "Est", StringComparison.OrdinalIgnoreCase) &&
                     obj["Manipulation"] is JsonObject est)
-                    AddEstChanges(est, path + ".Manipulation", changes);
+                    Retarget(obj, path, EstEdits(est), changes);
                 if (Json.GetString(obj["Type"]) is { } shapeType &&
                     (shapeType.Equals("Shp", StringComparison.OrdinalIgnoreCase) || shapeType.Equals("Atr", StringComparison.OrdinalIgnoreCase)) &&
                     obj["Manipulation"] is JsonObject shape)
-                    AddShapeChanges(shape, path + ".Manipulation", changes);
+                    Retarget(obj, path, ShapeEdits(shape), changes);
 
                 foreach (var (key, value) in obj.ToList())
                 {
@@ -475,14 +544,18 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                     {
                         var produced = new HashSet<string>(dict.Select(p => Normalize(p.Key)), StringComparer.OrdinalIgnoreCase);
                         // Keys this conversion leaves where they are, which a moved key must not land on.
-                        var staying = dict.Where(p => keys.Target(p.Key) == null && !keys.IsDropped(p.Key))
+                        // Adding beside the source leaves every key where it is.
+                        var staying = dict.Where(p => keepSource || keys.Target(p.Key) == null && !keys.IsDropped(p.Key))
                             .Select(p => Normalize(p.Key))
                             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                        var added = new JsonObject();
                         var variantAdditions = new JsonObject();
                         foreach (var (dictKey, dictValue) in dict.ToList())
                         {
                             if (keys.IsDropped(dictKey))
                             {
+                                // Kept beside the source, they still load with the source's tail.
+                                if (keepSource) continue;
                                 dropped.Add(Normalize(dictKey));
                                 changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[key]", OldValue = dictKey, ChangeType = "path_key_remove" });
                                 continue;
@@ -493,8 +566,10 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                             {
                                 if (staying.Contains(Normalize(newKey))) occupied.Add(Normalize(newKey));
                                 produced.Add(Normalize(newKey));
-                                changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[key]", OldValue = dictKey, NewValue = newKey,
-                                    ChangeType = keys.IsShared(dictKey) ? "path_key_copy" : "path_key" });
+                                task.CustomizationOutputKeys.Add(Normalize(newKey));
+                                if (!keepSource)
+                                    changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[key]", OldValue = dictKey, NewValue = newKey,
+                                        ChangeType = keys.IsShared(dictKey) ? "path_key_copy" : "path_key" });
                             }
 
                             if (dictValue is not JsonValue dv || !dv.TryGetValue<string>(out var valueText)) continue;
@@ -507,7 +582,11 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                                 // target resources. Retarget only when that resource is moved.
                                 replacement = resources.Files.ContainsKey(normalized) || resources.FileSwaps.ContainsKey(normalized)
                                     ? CustomizationPaths.Rewrite(valueText, source, target) : valueText;
-                            if (replacement != valueText)
+                            if (keepSource)
+                            {
+                                if (newKey != null) added[newKey] = replacement;
+                            }
+                            else if (replacement != valueText)
                                 changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[{dictKey}]", OldValue = valueText, NewValue = replacement, ChangeType = "path_value" });
                             if (key == "Files" && newKey != null)
                                 foreach (var extra in keys.ExtraTargetVariants(newKey))
@@ -515,9 +594,15 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                         }
                         foreach (var (extra, extraValue) in variantAdditions.ToList())
                             if (produced.Contains(Normalize(extra))) variantAdditions.Remove(extra);
-                        if (variantAdditions.Count > 0)
-                            changes.Add(new JsonFieldChange { JsonPath = path, ChangeType = "dependency_files",
-                                NewValue = variantAdditions.ToJsonString() });
+                            else
+                            {
+                                task.CustomizationOutputKeys.Add(Normalize(extra));
+                                variantAdditions.Remove(extra);
+                                added[extra] = extraValue;
+                            }
+                        if (added.Count > 0)
+                            changes.Add(new JsonFieldChange { JsonPath = path,
+                                ChangeType = key == "Files" ? "dependency_files" : "dependency_swaps", NewValue = added.ToJsonString() });
                         continue;
                     }
                     Walk(value, path + "." + key, changes);
@@ -525,7 +610,8 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             }
             else if (node is JsonArray array)
                 for (var i = 0; i < array.Count; i++) Walk(array[i], $"{path}[{i}]", changes);
-            else if (node is JsonValue value && value.TryGetValue<string>(out var text))
+            // Beside the source, every other mention of it stays the source's.
+            else if (!keepSource && node is JsonValue value && value.TryGetValue<string>(out var text))
             {
                 var replacement = CustomizationPaths.Rewrite(text, source, target);
                 if (replacement != text)
@@ -533,41 +619,80 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             }
         }
 
+        // A manipulation of the source's becomes the target's: edited where it is when converting in
+        // place, or copied and the copy added to the same option when the source keeps its own.
+        void Retarget(JsonObject manipulation, string path, List<JsonFieldChange> edits, List<JsonFieldChange> changes)
+        {
+            if (edits.Count == 0) return;
+            if (!keepSource)
+            {
+                foreach (var edit in edits)
+                {
+                    edit.JsonPath = $"{path}.Manipulation.{edit.JsonPath}";
+                    changes.Add(edit);
+                }
+                return;
+            }
+
+            var copy = (JsonObject)manipulation.DeepClone();
+            var fields = (JsonObject)copy["Manipulation"]!;
+            foreach (var edit in edits)
+                fields[edit.JsonPath] = edit.ChangeType == "numeric_id"
+                    ? JsonValue.Create(int.Parse(edit.NewValue))
+                    : JsonValue.Create(edit.NewValue);
+            changes.Add(new JsonFieldChange
+            {
+                JsonPath   = ManipulationsEntry().Replace(path, string.Empty),
+                ChangeType = "manipulation_insert",
+                OldValue   = GearManipulations.Describe(manipulation),
+                NewValue   = copy.ToJsonString(),
+            });
+        }
+
         // Shape (Shp) and attribute (Atr) switches name a hair or face by slot and ID, and the race it is
         // for by GenderRaceCondition. One for this very ID is the converted item's own and moves with it;
         // one without an ID applies to every hair or face of its race, which this conversion is not about.
-        void AddShapeChanges(JsonObject shape, string path, List<JsonFieldChange> changes)
+        // Each edit's JsonPath is the field it changes.
+        List<JsonFieldChange> ShapeEdits(JsonObject shape)
         {
+            var edits = new List<JsonFieldChange>();
             var slot = source.Kind switch { AssetKind.Hair => "Hair", AssetKind.Face => "Face", _ => null };
-            if (slot == null || !string.Equals(Json.GetString(shape["Slot"]), slot, StringComparison.OrdinalIgnoreCase)) return;
-            if (!Json.TryGetInt(shape["Id"], out var id) || id != source.ModelId) return;
+            if (slot == null || !string.Equals(Json.GetString(shape["Slot"]), slot, StringComparison.OrdinalIgnoreCase)) return edits;
+            if (!Json.TryGetInt(shape["Id"], out var id) || id != source.ModelId) return edits;
             var hasRace = Json.TryGetInt(shape["GenderRaceCondition"], out var race) && race != 0;
-            if (hasRace && race != source.GenderRace) return;
+            if (hasRace && race != source.GenderRace) return edits;
 
             if (source.ModelId != target.ModelId)
-                changes.Add(new JsonFieldChange { JsonPath = path + ".Id", OldValue = source.ModelId.ToString(), NewValue = target.ModelId.ToString(),
+                edits.Add(new JsonFieldChange { JsonPath = "Id", OldValue = source.ModelId.ToString(), NewValue = target.ModelId.ToString(),
                     ChangeType = shape["Id"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
             if (hasRace && source.GenderRace != target.GenderRace)
-                changes.Add(new JsonFieldChange { JsonPath = path + ".GenderRaceCondition", OldValue = source.GenderRace.ToString(), NewValue = target.GenderRace.ToString(),
+                edits.Add(new JsonFieldChange { JsonPath = "GenderRaceCondition", OldValue = source.GenderRace.ToString(), NewValue = target.GenderRace.ToString(),
                     ChangeType = shape["GenderRaceCondition"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
+            return edits;
         }
 
-        void AddEstChanges(JsonObject est, string path, List<JsonFieldChange> changes)
+        List<JsonFieldChange> EstEdits(JsonObject est)
         {
-            if (!Json.TryGetInt(est["SetId"], out var setId) || setId != source.ModelId) return;
+            var edits = new List<JsonFieldChange>();
+            if (!Json.TryGetInt(est["SetId"], out var setId) || setId != source.ModelId) return edits;
             // Hair and face share the same identifier space; the slot tells them apart.
-            if (!string.Equals(Json.GetString(est["Slot"]), source.Kind.ToString(), StringComparison.OrdinalIgnoreCase)) return;
-            if (Json.GetString(est["Race"]) is { } race && !race.Equals(sourceNames.Race, StringComparison.OrdinalIgnoreCase)) return;
-            if (Json.GetString(est["Gender"]) is { } gender && !gender.Equals(sourceNames.Gender, StringComparison.OrdinalIgnoreCase)) return;
-            changes.Add(new JsonFieldChange { JsonPath = path + ".SetId", OldValue = source.ModelId.ToString("D4"), NewValue = target.ModelId.ToString("D4"),
+            if (!string.Equals(Json.GetString(est["Slot"]), source.Kind.ToString(), StringComparison.OrdinalIgnoreCase)) return edits;
+            if (Json.GetString(est["Race"]) is { } race && !race.Equals(sourceNames.Race, StringComparison.OrdinalIgnoreCase)) return edits;
+            if (Json.GetString(est["Gender"]) is { } gender && !gender.Equals(sourceNames.Gender, StringComparison.OrdinalIgnoreCase)) return edits;
+            edits.Add(new JsonFieldChange { JsonPath = "SetId", OldValue = source.ModelId.ToString("D4"), NewValue = target.ModelId.ToString("D4"),
                 ChangeType = est["SetId"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
             // Only real edits: an unchanged value would count as a failed change at apply time.
             if (est["Race"] is not null && sourceNames.Race != targetNames.Race)
-                changes.Add(new JsonFieldChange { JsonPath = path + ".Race", OldValue = sourceNames.Race, NewValue = targetNames.Race, ChangeType = "path_string" });
+                edits.Add(new JsonFieldChange { JsonPath = "Race", OldValue = sourceNames.Race, NewValue = targetNames.Race, ChangeType = "path_string" });
             if (est["Gender"] is not null && sourceNames.Gender != targetNames.Gender)
-                changes.Add(new JsonFieldChange { JsonPath = path + ".Gender", OldValue = sourceNames.Gender, NewValue = targetNames.Gender, ChangeType = "path_string" });
+                edits.Add(new JsonFieldChange { JsonPath = "Gender", OldValue = sourceNames.Gender, NewValue = targetNames.Gender, ChangeType = "path_string" });
+            return edits;
         }
     }
+
+    /// <summary>The end of a manipulation's JSON path that names it within its option.</summary>
+    [System.Text.RegularExpressions.GeneratedRegex(@"\.Manipulations\[\d+\]$")]
+    private static partial System.Text.RegularExpressions.Regex ManipulationsEntry();
 
     /// <summary>
     /// Local files that must keep their name because a key that is copied or skipped

@@ -84,6 +84,7 @@ public sealed class ModConverterService
         task.PlannedBinaryPatches.Clear();
         task.PlannedMdlChanges.Clear();
         task.PlannedGeneratedFiles.Clear();
+        task.CustomizationOutputKeys.Clear();
         task.AllAssetFiles.Clear();
         task.OutputModels.Clear();
         task.MeshRemovals.Clear();
@@ -122,9 +123,6 @@ public sealed class ModConverterService
 
             if (CustomizationKinds.IsCustomization(task.Kind))
             {
-                // The window never offers this; refusing it here too keeps a stray request from
-                // quietly converting the original away.
-                if (task.OutputMode.KeepsSource()) throw new InvalidDataException(OutputModeRules.ReplacesOriginal(task.Kind));
                 _customizationPlanner.Plan(task);
                 ConversionPlanValidator.Finalize(task);
                 return;
@@ -538,10 +536,13 @@ public sealed class ModConverterService
     /// <summary>Applies a customization plan (hair, face, tail, ear) to a staged directory.</summary>
     private void ApplyConversionCore(ConversionTask task, Action<string> log)
     {
+        // A copy is what the patches change, so it is made first; a file that moves is changed
+        // where it is, then moved.
+        foreach (var copy in task.PlannedRenames.Where(r => r.KeepsOriginal)) ApplyRename(copy, log);
         foreach (var mdl in task.PlannedMdlChanges) ApplyMdlChange(mdl, log);
         foreach (var bp in task.PlannedBinaryPatches) ApplyBinaryPatch(bp, log);
         foreach (var jc in task.PlannedJsonChanges) ApplyJsonChange(jc, log);
-        foreach (var rename in task.PlannedRenames.OrderByDescending(r => r.OldPath.Length))
+        foreach (var rename in task.PlannedRenames.Where(r => !r.KeepsOriginal).OrderByDescending(r => r.OldPath.Length))
             ApplyRename(rename, log);
 
         foreach (var generated in task.PlannedGeneratedFiles)
@@ -625,10 +626,9 @@ public sealed class ModConverterService
     // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Creates a new mod next to the source mod. Gear and animation conversions contain only the
-    /// converted item (with the source's option structure) unless the task keeps the whole mod;
-    /// customization conversions and texture fan-outs copy the mod.
-    /// The source mod is never modified.
+    /// Creates a new mod next to the source mod. It contains only the converted item (with the
+    /// source's option structure) unless the task keeps the whole mod; texture fan-outs always
+    /// copy the mod. The source mod is never modified.
     /// </summary>
     public string? CreateNewModFromAssetChain(
         ConversionTask task, string newModDir, string modDisplayName, Action<string>? onLog = null)
@@ -659,9 +659,13 @@ public sealed class ModConverterService
                 GearConversionExecutor.WriteNewMod(plan, task.ModDirectory, stageDir, modDisplayName, Log);
             else
             {
+                // A customization patches the files of its mod, so it is converted in a copy of
+                // it, and then the rest of the mod is taken out unless the new mod keeps it.
                 CopyDirectory(task.ModDirectory, stageDir);
                 var stagedTask = RemapTask(task, stageDir);
                 ApplyConversionCore(stagedTask, Log);
+                if (!task.KeepsWholeMod)
+                    CustomizationOutput.KeepOnly(stageDir, task.CustomizationOutputKeys, CustomizationTarget(task), Log);
                 UpdateMetaJsonName(stageDir, modDisplayName, Log);
             }
             // The copy of a customization's mod keeps its layout, so its models are where the plan says.
@@ -776,6 +780,7 @@ public sealed class ModConverterService
             {
                 OldPath  = Remap(r.OldPath),
                 NewPath  = Remap(r.NewPath),
+                KeepsOriginal = r.KeepsOriginal,
             });
 
         foreach (var jc in original.PlannedJsonChanges)
@@ -868,6 +873,9 @@ public sealed class ModConverterService
 
             if (CustomizationKinds.IsCustomization(task.Kind))
             {
+                // Added beside the source, the source's paths stay on purpose; what matters is
+                // that every added one loads a file.
+                if (task.OutputMode.KeepsSource()) return VerifyAddedCustomization(task, modDirectory, hits);
                 var remapped = directory == null ? task : RemapTask(task, directory);
                 return VerifyCustomizationConversion(remapped, hits);
             }
@@ -917,6 +925,30 @@ public sealed class ModConverterService
             return [source];
         return CustomizationPaths.MovedRoots(source,
             new CustomizationPathEndpoint(task.TargetCustomizationKind ?? task.Kind, targetRace, targetId));
+    }
+
+    /// <summary>The converted customization's own target, as its task names it.</summary>
+    private static CustomizationPathEndpoint CustomizationTarget(ConversionTask task)
+        => task.TargetGenderRace is { } race && ushort.TryParse(task.NewIdPadded, out var id)
+            ? new CustomizationPathEndpoint(task.TargetCustomizationKind ?? task.Kind, race, id)
+            : throw new InvalidDataException("The conversion does not name its target.");
+
+    private static List<LeftoverHit> VerifyAddedCustomization(ConversionTask task, string modDirectory, List<LeftoverHit> hits)
+    {
+        foreach (var container in PenumbraMod.Load(modDirectory).Containers)
+        foreach (var (key, local) in container.FileEntries())
+        {
+            if (!task.CustomizationOutputKeys.Contains(GamePath.Normalize(key))) continue;
+            var file = PathSafety.ResolveRelative(modDirectory, GamePath.ToLocal(local));
+            if (File.Exists(file)) continue;
+            hits.Add(new LeftoverHit
+            {
+                FilePath = file,
+                HitType = "missing",
+                Detail = $"{container.Label}: {key} loads {local}, which does not exist.",
+            });
+        }
+        return hits;
     }
 
     private static List<LeftoverHit> VerifyCustomizationConversion(
@@ -979,7 +1011,7 @@ public sealed class ModConverterService
         var moved = MovedCustomizationRoots(task);
         var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var rename in task.PlannedRenames)
+        foreach (var rename in task.PlannedRenames.Where(r => !r.KeepsOriginal))
         {
             var directory = Path.GetDirectoryName(rename.OldPath);
             while (directory != null && moved.Any(root => CustomizationPaths.Contains(directory, root)))
@@ -1017,6 +1049,12 @@ public sealed class ModConverterService
             Path.GetDirectoryName(rename.OldPath),
             Path.GetDirectoryName(rename.NewPath),
             StringComparison.OrdinalIgnoreCase);
+        if (rename.KeepsOriginal)
+        {
+            File.Copy(rename.OldPath, rename.NewPath);
+            log($"Copied:  {rename.OldPath} → {rename.NewPath}");
+            return;
+        }
         File.Move(rename.OldPath, rename.NewPath);
         log(sameDir
             ? $"Renamed: {Path.GetFileName(rename.OldPath)} → {Path.GetFileName(rename.NewPath)}"
@@ -1057,7 +1095,9 @@ public sealed class ModConverterService
                 {
                     if (segment.Kind == PathSegKind.Property && container is JsonObject parent)
                     {
-                        if (parent[segment.Name] is not JsonObject child) parent[segment.Name] = child = new JsonObject();
+                        // Only a missing container is created; Groups is an array on the way to an option.
+                        var child = parent[segment.Name];
+                        if (child == null) parent[segment.Name] = child = new JsonObject();
                         container = child;
                     }
                     else container = segment.Kind == PathSegKind.Index ? (container as JsonArray)?[segment.Index] : null;
@@ -1072,7 +1112,7 @@ public sealed class ModConverterService
                 return true;
             }
 
-            if (change.ChangeType == "dependency_files")
+            if (change.ChangeType is "dependency_files" or "dependency_swaps")
             {
                 // This insertion is scoped to the exact option containing the model.
                 JsonNode? option = root;
@@ -1084,8 +1124,9 @@ public sealed class ModConverterService
                         _ => null,
                     };
                 if (option is not JsonObject obj) return false;
-                var files = obj["Files"] as JsonObject;
-                if (files == null) obj["Files"] = files = new JsonObject();
+                var dictionary = change.ChangeType == "dependency_swaps" ? "FileSwaps" : "Files";
+                var files = obj[dictionary] as JsonObject;
+                if (files == null) obj[dictionary] = files = new JsonObject();
                 foreach (var (key, value) in JsonNode.Parse(change.NewValue)!.AsObject())
                 {
                     if (files.ContainsKey(key)) return false;
