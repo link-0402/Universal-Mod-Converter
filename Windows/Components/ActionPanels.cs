@@ -38,16 +38,12 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         ImGui.SameLine();
         DrawNewModOnlyConverted(mode);
 
-        var additiveBlock = session.AddToModBlockReason;
-        using (ImRaii.Disabled(additiveBlock != null))
-        {
-            if (ImGui.RadioButton("Add to this mod", mode == ConversionOutputMode.AddToMod))
-                session.SetOutputMode(ConversionOutputMode.AddToMod);
-        }
-        Widgets.Tooltip(additiveBlock ?? "The original keeps working, and the converted result is added beside it in this " +
-                                         "mod. The mod as it is now is kept as a backup.");
+        if (ImGui.RadioButton("Add to this mod", mode == ConversionOutputMode.AddToMod))
+            session.SetOutputMode(ConversionOutputMode.AddToMod);
+        Widgets.Tooltip("The original keeps working, and the converted result is added beside it in this mod. The mod " +
+                        "as it is now is kept as a backup.");
         ImGui.SameLine();
-        Widgets.Badge("Keeps the original", additiveBlock == null ? Theme.Info : Theme.Muted);
+        Widgets.Badge("Keeps the original", Theme.Info);
 
         if (ImGui.RadioButton("Convert in place", mode == ConversionOutputMode.InPlace))
             session.SetOutputMode(ConversionOutputMode.InPlace);
@@ -75,13 +71,12 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
     /// <summary>Whether a new mod leaves out what the plan does not convert, or copies the whole mod.</summary>
     private void DrawNewModOnlyConverted(ConversionOutputMode mode)
     {
-        var block = session.NewModOnlyConvertedBlockReason;
-        var only  = session.NewModOnlyConverted && block == null;
-        using (ImRaii.Disabled(block != null || !mode.IsNewMod()))
+        var only = session.NewModOnlyConverted;
+        using (ImRaii.Disabled(!mode.IsNewMod()))
         {
             if (ImGui.Checkbox("Only what's converted", ref only)) session.SetNewModOnlyConverted(only);
         }
-        Widgets.Tooltip(block ?? (mode.IsNewMod() ? string.Empty : "Applies when creating a new mod. ") +
+        Widgets.Tooltip((mode.IsNewMod() ? string.Empty : "Applies when creating a new mod. ") +
                         "Ticked, the new mod holds only what the plan converts, and everything else in this mod is " +
                         "left out. Unticked, it is a copy of this whole mod, everything else included, with the " +
                         "conversion made in it as converting in place would.");
@@ -93,10 +88,7 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
     private string NewModDescription()
     {
         var contents = session.OutputContents;
-        if (session.NewModKeepsWholeMod) return WholeModDescription(contents);
-        if (contents.HasFlag(PlanContents.Customization))
-            return $"Creates a copy of this whole mod with the {session.OutputCustomizationName ?? "customization"} " +
-                   "converted; everything else in the mod comes along. This mod is not modified.";
+        if (session.NewModKeepsWholeMod) return WholeModDescription(contents, session.OutputCustomizationName);
 
         var text = "Creates a new mod holding only what the plan converts, in the options it is in; everything else " +
                    "in this mod is left out. This mod is not modified.";
@@ -111,13 +103,15 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
     }
 
     /// <summary>A new mod keeping the whole mod is this mod converted as in place, written elsewhere.</summary>
-    private static string WholeModDescription(PlanContents contents)
+    private static string WholeModDescription(PlanContents contents, string? customization)
     {
         var parts = new List<string> { "Creates a copy of this whole mod, everything else included, with the conversion " +
                                        "made in it as converting in place would." };
         if (contents.HasFlag(PlanContents.Gear))
             parts.Add("The item moves to the target: the new mod no longer changes the original item, apart from files " +
                       "other items still use.");
+        if (contents.HasFlag(PlanContents.Customization) && customization is { } kind)
+            parts.Add($"The {kind} moves to the target: the new mod no longer changes the original {kind}.");
         if (contents.HasFlag(PlanContents.AnimationSwap))
             parts.Add("The animation moves to its destination and stops playing where it was; an idle stays in its " +
                       "current slot too while that slot is ticked.");
@@ -137,6 +131,9 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         if (contents.HasFlag(PlanContents.Gear))
             parts.Add("The original item keeps working: the converted one is added beside it, in the same options, so " +
                       "the toggles this mod already has control both.");
+        if (contents.HasFlag(PlanContents.Customization) && session.OutputCustomizationName is { } kind)
+            parts.Add($"The original {kind} keeps working: the converted one is added beside it, in the same options, " +
+                      "and loads the same textures; only the files the conversion changes are copied.");
         if (contents.HasFlag(PlanContents.AnimationSwap))
             parts.Add("The animation keeps playing where it is and also plays at every destination, switched by the " +
                       "same options.");
@@ -292,6 +289,12 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
                     $"'{session.ModName}' gets the option group '{AnimationConversionPlanner.ExpressionGroupName}', which " +
                     "plays the animation with the expression; its \"-\" option plays it without. The mod as it is now " +
                     "is kept as a backup and can be restored with Revert.",
+                    "Add"),
+            ConversionOutputMode.AddToMod when session.OutputContents.HasFlag(PlanContents.Customization) &&
+                                               session.OutputCustomizationName is { } kind
+                => ($"Add the converted {kind} to this mod?",
+                    $"'{session.ModName}' will be modified, but the original {kind} keeps working. The mod as it is " +
+                    "now is kept as a backup and can be restored with Revert.",
                     "Add"),
             ConversionOutputMode.AddToMod => ("Add the converted item to this mod?",
                 $"'{session.ModName}' will be modified, but the original item keeps working. The mod as it is " +

@@ -11,18 +11,24 @@ internal static class ConversionPlanValidator
     public static void Finalize(ConversionTask task)
     {
         var root = Path.GetFullPath(task.ModDirectory);
-        var sources = task.PlannedRenames.Select(r => Path.GetFullPath(r.OldPath))
+        // Files that move away; a copy's original stays where it is.
+        var sources = task.PlannedRenames.Where(r => !r.KeepsOriginal).Select(r => Path.GetFullPath(r.OldPath))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var destinations = task.PlannedRenames.Select(r => Path.GetFullPath(r.NewPath))
             .Concat(task.PlannedGeneratedFiles.Select(f => Path.GetFullPath(f.FilePath))).ToArray();
 
         try
         {
-            foreach (var path in sources) PathSafety.EnsureContained(root, path, true);
+            foreach (var rename in task.PlannedRenames) PathSafety.EnsureContained(root, rename.OldPath, true);
             foreach (var path in destinations) PathSafety.EnsureContained(root, path);
             foreach (var json in task.PlannedJsonChanges) PathSafety.EnsureContained(root, json.FilePath, true);
-            foreach (var binary in task.PlannedBinaryPatches) PathSafety.EnsureContained(root, binary.FilePath, true);
-            foreach (var mdl in task.PlannedMdlChanges) PathSafety.EnsureContained(root, mdl.FilePath, true);
+            // A patch on a copy changes a file the plan makes first.
+            var copies = task.PlannedRenames.Where(r => r.KeepsOriginal).Select(r => Path.GetFullPath(r.NewPath))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var binary in task.PlannedBinaryPatches)
+                PathSafety.EnsureContained(root, binary.FilePath, !copies.Contains(Path.GetFullPath(binary.FilePath)));
+            foreach (var mdl in task.PlannedMdlChanges)
+                PathSafety.EnsureContained(root, mdl.FilePath, !copies.Contains(Path.GetFullPath(mdl.FilePath)));
             PathSafety.ValidateNoCaseCollisions(destinations);
 
             foreach (var destination in destinations)
@@ -44,7 +50,7 @@ internal static class ConversionPlanValidator
             .ToArray();
         task.SourceFingerprint = ModFingerprint.Compute(root, inputFiles);
 
-        var operations = task.PlannedRenames.Select(r => new ConversionOperation("rename", r.OldPath, r.NewPath))
+        var operations = task.PlannedRenames.Select(r => new ConversionOperation(r.KeepsOriginal ? "copy" : "rename", r.OldPath, r.NewPath))
             .Concat(task.PlannedGeneratedFiles.Select(f => new ConversionOperation("dependency", f.FilePath,
                 MdlRaceConverter.Hash(f.Data.AsSpan()))))
             .Concat(task.PlannedJsonChanges.Select(j => new ConversionOperation("metadata", j.FilePath, j.FilePath)))

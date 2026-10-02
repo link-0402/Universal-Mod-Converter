@@ -371,8 +371,9 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
 
         return
         [
-            new Section("File renames", ["From", "To"], [Cell.From, Cell.To],
-                task.PlannedRenames.Select(r => new[] { Rel(r.OldPath), Rel(r.NewPath) }).ToList()),
+            new Section("Files renamed or copied", ["Operation", "From", "To"], [Cell.Accent, Cell.From, Cell.To],
+                task.PlannedRenames.Select(r => new[] { r.KeepsOriginal ? "Copy" : "Rename", Rel(r.OldPath), Rel(r.NewPath) })
+                    .ToList()),
             new Section("Metadata", ["File", "Kind", "Field", "From", "To"], [Cell.Accent, Cell.Muted, Cell.Muted, Cell.From, Cell.To],
                 task.PlannedJsonChanges.SelectMany(j => j.Changes.Select(c => new[]
                     { Rel(j.FilePath), ChangeTypeLabel(c.ChangeType), c.JsonPath, c.OldValue, c.NewValue })).ToList()),
@@ -413,6 +414,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         "path_key_copy"       => "Copy",
         "path_key_remove"     => "Remove",
         "dependency_files"    => "Add",
+        "dependency_swaps"    => "Add swap",
         "manipulation_insert" => "Meta",
         _                     => changeType,
     };

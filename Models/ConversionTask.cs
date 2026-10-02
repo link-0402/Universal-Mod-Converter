@@ -13,8 +13,8 @@ public class ConversionTask
 
     /// <summary>
     /// A new mod only: it is a copy of the whole mod, converted the way converting in place
-    /// would, instead of holding only what the plan converts. Gear and animations only; hair,
-    /// face, tail, ear and skin conversions and texture fan-outs always copy the whole mod.
+    /// would, instead of holding only what the plan converts. Texture fan-outs always copy the
+    /// whole mod.
     /// </summary>
     public bool KeepsWholeMod { get; set; }
 
@@ -119,6 +119,12 @@ public class ConversionTask
     public List<PlannedGeneratedFile> PlannedGeneratedFiles { get; } = new();
 
     /// <summary>
+    /// Hair, face, tail and ear conversions: every game path the converted customization is
+    /// loaded from once written, so a new mod holding only it knows what to keep.
+    /// </summary>
+    public HashSet<string> CustomizationOutputKeys { get; } = new(System.StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// All physical asset files discovered in the item's asset chain during planning
     /// (models, materials, textures – including files whose paths don't change).
     /// Populated by <see cref="ModConverterService.PlanConversion"/> and used when
@@ -200,11 +206,17 @@ public class ConversionTask
     public string? ErrorMessage { get; set; }
 }
 
-/// <summary>A single file rename.</summary>
+/// <summary>A single file rename, or a copy when the original has to stay.</summary>
 public class PlannedRename
 {
     public string OldPath   { get; set; } = string.Empty;
     public string NewPath   { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Copies instead of moving: adding to the mod leaves the source's file as it is, and the
+    /// copy is the one the plan's patches and model rewrites change.
+    /// </summary>
+    public bool KeepsOriginal { get; set; }
 }
 
 /// <summary>A collection of field-level changes inside a single JSON file.</summary>

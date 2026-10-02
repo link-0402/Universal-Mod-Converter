@@ -36,13 +36,6 @@ public enum ConversionOutputMode
 /// </summary>
 public static class OutputModeRules
 {
-    /// <summary>
-    /// Hair, face, tail, ear and skin conversions that move their root patch the mod's files, so
-    /// the original does not survive them: they cannot be added beside it.
-    /// </summary>
-    public static string ReplacesOriginal(AssetKind kind)
-        => $"{CustomizationKinds.Get(kind).DisplayName} conversions replace the original; create a new mod to keep it.";
-
     /// <summary>A texture fan-out keeps its source and only adds paths.</summary>
     public const string FanOutInPlace = "A fan-out keeps its source; it adds to this mod or to a new one.";
 }
