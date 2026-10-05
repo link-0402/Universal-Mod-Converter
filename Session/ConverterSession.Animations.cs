@@ -33,10 +33,16 @@ public sealed partial class ConverterSession
     /// </summary>
     public ContainerAddress? AnimationSourceContainer { get; private set; }
 
-    /// <summary>Whether the user has to choose <see cref="AnimationSourceContainer"/> for the selection.</summary>
+    /// <summary>
+    /// Whether the user has to choose <see cref="AnimationSourceContainer"/> for the selection:
+    /// slot groups, or an expression's group added to this mod, can each hold only one version.
+    /// </summary>
     public bool NeedsAnimationSourceContainer
-        => Source?.Animation is { HasVariants: true } animation && ExpressionAtSource(animation) &&
-           EffectiveOutputMode == ConversionOutputMode.AddToMod;
+        => Source?.Animation is { HasVariants: true } animation &&
+           (GroupsSlots(animation) || ExpressionAtSource(animation) && EffectiveOutputMode == ConversionOutputMode.AddToMod);
+
+    /// <summary>Whether the selected idle goes into slot groups (see <see cref="GroupsSlots"/>).</summary>
+    public bool AnimationSlotGroups => Source?.Animation is { } animation && GroupsSlots(animation);
 
     /// <summary>
     /// Whether the plan adds an expression to this mod where the animation is. That goes into an
@@ -64,10 +70,11 @@ public sealed partial class ConverterSession
 
     /// <summary>
     /// Whether the source race keeps its animation, which is what its tick shows: adding to this
-    /// mod always keeps it, converting in place moves it to the target races, and a new mod
-    /// follows <see cref="AnimationIncludesSourceRace"/>.
+    /// mod always keeps it, converting in place moves it to the target races (unless the idle
+    /// goes into slot groups, where it keeps a group of its own), and a new mod follows
+    /// <see cref="AnimationIncludesSourceRace"/>.
     /// </summary>
-    public bool AnimationSourceRaceStays => PlanOutputMode.KeepsSourceRace(AnimationIncludesSourceRace);
+    public bool AnimationSourceRaceStays => PlanOutputMode.KeepsSourceRace(AnimationIncludesSourceRace, AnimationSlotGroups);
 
     private bool _emotesLoading;
 
@@ -111,6 +118,27 @@ public sealed partial class ConverterSession
     private List<IdleSlot> OtherOutputSlots(AnimationSource source)
         => [.. AnimationSlots.Where(s => s.Index != source.SlotIndex && _animationOutputSlots.Contains(s.Index))];
 
+    /// <summary>
+    /// The slots the idle plays in once converted, in slot order: the ticked ones, and its current
+    /// one also while adding to this mod, which always keeps it there (see
+    /// <see cref="AnimationConversionRequest.PlayedSlots"/>).
+    /// </summary>
+    private List<IdleSlot> PlayedSlots(AnimationSource source)
+        => [.. AnimationSlots.Where(s => _animationOutputSlots.Contains(s.Index) ||
+                                        s.Index == source.SlotIndex && PlanOutputMode.KeepsSource())];
+
+    /// <summary>
+    /// Whether the idle goes into a single-select option group per race, with an option per slot
+    /// it plays in (see <see cref="PlayedSlots"/>) after a "-" every group starts on, rather than
+    /// into every ticked slot at once: whenever it plays in more than one slot.
+    /// </summary>
+    private bool GroupsSlots(AnimationSource source)
+        => source.Kind == AnimationSourceKind.Idle && PlayedSlots(source).Count > 1;
+
+    /// <summary>The name slot groups start with: the idle family's, "Standing idle".</summary>
+    public static string SlotGroupName(AnimationSource source)
+        => source.Family is { } family && IdleSlots.GetFamily(family) is { } descriptor ? descriptor.Label : "Idle";
+
     /// <summary>Whether the animation goes somewhere else: an idle to another slot, or any other swap.</summary>
     private bool Moves(AnimationSource source)
         => source.Kind == AnimationSourceKind.Idle ? OtherOutputSlots(source).Count > 0 : AnimationOperation == AnimationOperation.Swap;
@@ -121,11 +149,11 @@ public sealed partial class ConverterSession
     /// <summary>
     /// Whether the expression is attached where the animation already is: "Only add an
     /// expression", or an idle that stays in its current slot. Added to this mod, that goes into
-    /// an option group.
+    /// an option group. Slot groups carry the expression in every option instead.
     /// </summary>
     private bool ExpressionAtSource(AnimationSource source)
         => source.Kind == AnimationSourceKind.Idle
-            ? AttachExpression && StaysInSlot(source)
+            ? AttachExpression && StaysInSlot(source) && !GroupsSlots(source)
             : AnimationOperation == AnimationOperation.Expression;
 
     /// <summary>What the selected animation's conversion would do, for the output options (see <see cref="AnimationContents"/>).</summary>
@@ -133,17 +161,22 @@ public sealed partial class ConverterSession
     {
         var contents = PlanContents.None;
         if (Moves(source)) contents |= PlanContents.AnimationSwap;
+        if (GroupsSlots(source)) contents |= PlanContents.AnimationSlotGroups;
         if (Retargets(source)) contents |= PlanContents.AnimationRetarget;
         if (ExpressionAtSource(source)) contents |= PlanContents.AnimationExpression;
         return contents == PlanContents.None ? PlanContents.AnimationSwap : contents;
     }
 
-    /// <summary>What an animation conversion does, for the output options' sentences.</summary>
-    private static PlanContents AnimationContents(AnimationConversionRequest? request)
+    /// <summary>What an animation conversion does in the current output mode, for the output options' sentences.</summary>
+    private PlanContents AnimationContents(AnimationConversionRequest? request)
     {
         if (request == null) return PlanContents.AnimationSwap;
+        request = request.ForMode(PlanOutputMode);
         var contents = PlanContents.None;
-        if (request.Operation == AnimationOperation.Swap && !request.Variants.IsDefaultOrEmpty) contents |= PlanContents.AnimationSwap;
+        if (request.Operation == AnimationOperation.Swap && !request.Variants.IsDefault &&
+            request.Variants.Any(v => !AnimationConversionRequest.IsOwnSlot(v)))
+            contents |= PlanContents.AnimationSwap;
+        if (request.InSlotGroups) contents |= PlanContents.AnimationSlotGroups;
         if (!request.TargetRaces.IsDefaultOrEmpty) contents |= PlanContents.AnimationRetarget;
         if (request.ExpressionAtSource) contents |= PlanContents.AnimationExpression;
         return contents == PlanContents.None ? PlanContents.AnimationSwap : contents;
@@ -246,15 +279,18 @@ public sealed partial class ConverterSession
     private string _idleOutputsKey = string.Empty;
     private IReadOnlyList<string> _idleOutputs = [];
 
-    /// <summary>The locations an idle conversion writes, for any race: each ticked slot's, the current one's being the idle's own.</summary>
+    /// <summary>
+    /// The locations an idle conversion writes, for any race: those of every slot it plays in (see
+    /// <see cref="PlayedSlots"/>), the current one's being the idle's own.
+    /// </summary>
     private IReadOnlyList<string> IdleOutputLocations(AnimationSource source)
     {
-        var key = string.Join(",", _animationOutputSlots);
+        var key = $"{string.Join(",", _animationOutputSlots)}/{PlanOutputMode}";
         if (!ReferenceEquals(source, _idleOutputsFor) || key != _idleOutputsKey)
         {
             _idleOutputsFor = source;
             _idleOutputsKey = key;
-            _idleOutputs = AnimationSlots.Where(s => _animationOutputSlots.Contains(s.Index))
+            _idleOutputs = PlayedSlots(source)
                 .SelectMany(s => s.Index == source.SlotIndex ? source.Locations : SlotVariant(source, s).Locations.Values)
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
@@ -327,10 +363,15 @@ public sealed partial class ConverterSession
         if (_animationOutputSlots.All(index => index == source.SlotIndex) && !AnimationAlsoRetargets && !AttachExpression)
             return "It already plays in its current slot. Tick another slot, or retarget it or attach an expression.";
         if (AnimationAlsoRetargets && RetargetBlockReason(source) is { } reason) return reason;
-        return NeedsAnimationSourceContainer && source.Providers.All(p => p.Address != AnimationSourceContainer)
-            ? "Several options have their own version of this animation; choose the one the expression's option group uses."
-            : null;
+        return SourceContainerBlockReason(source);
     }
+
+    /// <summary>Why the version a new option group uses still has to be chosen, or null.</summary>
+    private string? SourceContainerBlockReason(AnimationSource source)
+        => NeedsAnimationSourceContainer && source.Providers.All(p => p.Address != AnimationSourceContainer)
+            ? "Several options have their own version of this animation; choose the one " +
+              (GroupsSlots(source) ? "the slot groups use." : "the expression's option group uses.")
+            : null;
 
     private string? RetargetBlockReason(AnimationSource source)
     {
@@ -340,10 +381,7 @@ public sealed partial class ConverterSession
 
     private string? OperationBlockReason(AnimationSource source)
     {
-        if (AnimationOperation == AnimationOperation.Expression)
-            return NeedsAnimationSourceContainer && source.Providers.All(p => p.Address != AnimationSourceContainer)
-                ? "Several options have their own version of this animation; choose the one the expression's option group uses."
-                : null;
+        if (AnimationOperation == AnimationOperation.Expression) return SourceContainerBlockReason(source);
         if (AnimationOperation == AnimationOperation.Retarget) return RetargetBlockReason(source);
 
         switch (source.Kind)
@@ -371,12 +409,17 @@ public sealed partial class ConverterSession
             Expression      = source.Kind == AnimationSourceKind.Expression ? null : CurrentExpression(source),
             SourceContainer = NeedsAnimationSourceContainer ? AnimationSourceContainer : null,
         };
-        // An idle goes to every ticked slot at once, and is retargeted wherever it goes.
+        // An idle goes to every ticked slot at once, and is retargeted wherever it goes. Playing in
+        // several, every slot becomes an option, in slot order. Its own slot is always among the
+        // variants, leaving it where it is: whether it counts is decided when the plan is made,
+        // in the output mode it is made in (see AnimationConversionRequest.PlayedSlots).
         if (source.Kind == AnimationSourceKind.Idle)
             return request with
             {
-                Variants          = [.. OtherOutputSlots(source).Select(slot => SlotVariant(source, slot))],
+                Variants          = [.. AnimationSlots.Where(s => s.Index == source.SlotIndex || _animationOutputSlots.Contains(s.Index))
+                                        .Select(slot => SlotVariant(source, slot))],
                 StaysAtSource     = StaysInSlot(source),
+                SlotGroupName     = SlotGroupName(source),
                 SourceRace        = AnimationAlsoRetargets ? AnimationSourceRace : (ushort)0,
                 TargetRaces       = AnimationAlsoRetargets ? [.. _animationTargetRaces] : [],
                 IncludeSourceRace = AnimationIncludesSourceRace,
@@ -475,12 +518,17 @@ public sealed partial class ConverterSession
             ? VersionSuffix(chosen.Label)
             : string.Empty;
 
-    /// <summary>"Standing idle 3 → Standing idle 5 and its own slot, retargeted (races), with the /Smile".</summary>
+    /// <summary>
+    /// "Standing idle 3 → Standing idle 5 and its own slot, retargeted (races), with the /Smile",
+    /// or "Standing idle 3 → a slot choice per race: Standing idle 3, Standing idle 5" in slot groups.
+    /// </summary>
     private string DescribeIdle(AnimationSource source)
     {
         var others = OtherOutputSlots(source);
         var text = source.Label;
-        if (others.Count > 0)
+        if (GroupsSlots(source))
+            text += " → a slot choice per race: " + string.Join(", ", PlayedSlots(source).Select(s => s.Label));
+        else if (others.Count > 0)
             text += " → " + string.Join(", ", others.Select(s => s.Label)) + (StaysInSlot(source) ? " and its own slot" : string.Empty);
         if (AnimationAlsoRetargets)
             text += (others.Count > 0 ? ", retargeted " : ": ") + DescribeRetarget();
@@ -510,7 +558,7 @@ public sealed partial class ConverterSession
     {
         var moves = Moves(source);
         var retargets = Retargets(source);
-        return (moves ? "Animation swap" : retargets ? "Race retarget" : "Expression added") +
+        return (moves ? GroupsSlots(source) ? "Slot choice" : "Animation swap" : retargets ? "Race retarget" : "Expression added") +
                (moves && retargets ? " + retarget" : string.Empty) +
                (WantsExpression && (moves || retargets) ? " + expression" : string.Empty);
     }
@@ -614,6 +662,7 @@ public sealed partial class ConverterSession
         if (source.Kind == AnimationSourceKind.Idle)
         {
             var others = OtherOutputSlots(source);
+            if (GroupsSlots(source)) return "Slot choice";
             if (others.Count > 0) return others.Count == 1 ? others[0].Label : $"{others.Count} slots";
             if (AnimationAlsoRetargets) return RetargetNameLabel();
             return AttachExpression ? $"with {ExpressionLabel}" : "Swapped";

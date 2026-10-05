@@ -94,6 +94,8 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
                    "in this mod is left out. This mod is not modified.";
         if (contents.HasFlag(PlanContents.AnimationSwap))
             text += " While it stays enabled, the animation also keeps playing where it was.";
+        if (contents.HasFlag(PlanContents.AnimationSlotGroups))
+            text += " " + SlotGroupsSentence;
         if (contents.HasFlag(PlanContents.AnimationRetarget))
             text += " A retarget brings the source race's animation along, unless that race is unticked.";
         if (contents.HasFlag(PlanContents.AnimationExpression))
@@ -101,6 +103,15 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
                     "priority) to see the expression.";
         return text;
     }
+
+    /// <summary>What slot groups are, for every output mode.</summary>
+    private const string SlotGroupsSentence =
+        "An idle ticked in several slots goes into a single-select option group per race instead, with an option for " +
+        "each slot; its own files move out of the options they were in, into the option for its own slot, and a " +
+        "retarget's source race keeps a group too. Every group starts on \"-\", so choose the slots in Penumbra.";
+
+    /// <summary>What becomes of an idle in slot groups until slots are chosen, in a mod it was in.</summary>
+    private const string SlotGroupsUntilChosen = SlotGroupsSentence + " Until then the idle plays nowhere, not even where it was.";
 
     /// <summary>A new mod keeping the whole mod is this mod converted as in place, written elsewhere.</summary>
     private static string WholeModDescription(PlanContents contents, string? customization)
@@ -115,6 +126,8 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         if (contents.HasFlag(PlanContents.AnimationSwap))
             parts.Add("The animation moves to its destination and stops playing where it was; an idle stays in its " +
                       "current slot too while that slot is ticked.");
+        if (contents.HasFlag(PlanContents.AnimationSlotGroups))
+            parts.Add(SlotGroupsUntilChosen);
         if (contents.HasFlag(PlanContents.AnimationRetarget))
             parts.Add("Retargeting moves the animation from the source race to the ticked races.");
         if (contents.HasFlag(PlanContents.AnimationExpression))
@@ -137,6 +150,8 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         if (contents.HasFlag(PlanContents.AnimationSwap))
             parts.Add("The animation keeps playing where it is and also plays at every destination, switched by the " +
                       "same options.");
+        if (contents.HasFlag(PlanContents.AnimationSlotGroups))
+            parts.Add(SlotGroupsUntilChosen);
         if (contents.HasFlag(PlanContents.AnimationRetarget))
             parts.Add("The source race keeps its animation, and the other races' versions are added in the same options.");
         if (session.AddsExpressionGroup)
@@ -159,6 +174,8 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         if (contents.HasFlag(PlanContents.AnimationSwap))
             parts.Add("The animation moves to its destination and stops playing where it was; an idle stays in its " +
                       "current slot too while that slot is ticked.");
+        if (contents.HasFlag(PlanContents.AnimationSlotGroups))
+            parts.Add(SlotGroupsUntilChosen);
         if (contents.HasFlag(PlanContents.AnimationRetarget))
             parts.Add("Retargeting moves the animation from the source race to the ticked races; add to this mod to keep " +
                       "the source race's too.");

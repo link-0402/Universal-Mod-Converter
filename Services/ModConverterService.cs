@@ -231,15 +231,10 @@ public sealed class ModConverterService
 
     /// <summary>
     /// The request for the output mode chosen at preview time; a plan entry is made before the
-    /// mode may change. Adding to the mod always keeps the animation where it is, converting in
-    /// place keeps it there when asked to, and a new mod holds only what the conversion writes.
+    /// mode may change (see <see cref="AnimationConversionRequest.ForMode"/>).
     /// </summary>
     private static AnimationConversionRequest ForMode(AnimationConversionRequest request, ConversionOutputMode mode)
-        => request with
-        {
-            Mode = mode,
-            KeepOriginal = mode.KeepsSource() || mode == ConversionOutputMode.InPlace && request.KeepOriginal,
-        };
+        => request.ForMode(mode);
 
     /// <summary>What a queued animation conversion claims: the animations it reads and writes.</summary>
     private static IEnumerable<string> AnimationRoots(QueuedConversion entry)

@@ -40,7 +40,11 @@ public sealed record AnimationConversionRequest(
     ConversionOutputMode Mode,
     string Description)
 {
-    /// <summary>Swap: the destinations. The animation is placed at every one of them.</summary>
+    /// <summary>
+    /// Swap: the destinations. The animation is placed at every one of them. One may leave it
+    /// where it is (see <see cref="IsOwnSlot"/>): it only counts in slot groups, as the option for
+    /// its own slot, and only while the animation stays there.
+    /// </summary>
     public ImmutableArray<AnimationSwapVariant> Variants { get; init; } = [];
 
     /// <summary>
@@ -50,8 +54,43 @@ public sealed record AnimationConversionRequest(
     /// </summary>
     public bool StaysAtSource { get; init; }
 
+    /// <summary>
+    /// Swap of an idle: the name its slot groups start with, "Standing idle". When the idle plays
+    /// in more than one slot (see <see cref="InSlotGroups"/>), every race it is written for gets a
+    /// single-select option group of its own, "{SlotGroupName} ({race})", with an option per slot,
+    /// so the player picks the slot each race plays it in; the animation then leaves the
+    /// containers it was in for the groups, whatever the mode. Null places it at every destination.
+    /// </summary>
+    public string? SlotGroupName { get; init; }
+
     /// <summary>Swap: keep the animation where it is, as it is, instead of moving it away.</summary>
     public bool KeepOriginal { get; init; }
+
+    /// <summary>Whether a variant leaves the animation where it is: every location maps to itself.</summary>
+    public static bool IsOwnSlot(AnimationSwapVariant variant)
+        => variant.Locations.Count > 0 && variant.Locations.All(l => l.Key == l.Value);
+
+    /// <summary>
+    /// The slots an idle plays in once converted, in the order given: every destination, its own
+    /// slot only while it stays there (ticked, or kept by adding to the mod).
+    /// </summary>
+    public IEnumerable<AnimationSwapVariant> PlayedSlots
+        => (Variants.IsDefault ? [] : Variants).Where(v => !IsOwnSlot(v) || StaysAtSource || KeepOriginal);
+
+    /// <summary>Whether the swap goes into slot groups: an idle that plays in more than one slot.</summary>
+    public bool InSlotGroups => SlotGroupName != null && PlayedSlots.Count() > 1;
+
+    /// <summary>
+    /// The request as it is planned in <paramref name="mode"/>, which may have changed since it was
+    /// made: adding to the mod always keeps the animation where it is, converting in place keeps it
+    /// there when asked to, and a new mod holds only what the conversion writes.
+    /// </summary>
+    public AnimationConversionRequest ForMode(ConversionOutputMode mode)
+        => this with
+        {
+            Mode = mode,
+            KeepOriginal = mode.KeepsSource() || mode == ConversionOutputMode.InPlace && KeepOriginal,
+        };
 
     /// <summary>
     /// An expression attached where the animation is, added to this mod (see
@@ -69,8 +108,9 @@ public sealed record AnimationConversionRequest(
 
     /// <summary>
     /// Retargeting into a new mod: whether it holds the source race's animation too. Adding to
-    /// this mod always keeps it and converting in place always moves it to the target races (see
-    /// <see cref="ConversionOutputModes.KeepsSourceRace"/>).
+    /// this mod always keeps it and converting in place always moves it to the target races,
+    /// except in slot groups, where the source race keeps a group of its own (see
+    /// <see cref="ConversionOutputModes.KeepsSourceRace(ConversionOutputMode, bool, bool)"/>).
     /// </summary>
     public bool IncludeSourceRace { get; init; } = true;
 
@@ -83,9 +123,11 @@ public sealed record AnimationConversionRequest(
     /// <summary>
     /// Whether the expression is attached where the animation already is. Added to this mod, that
     /// goes into an option group beside the original, so the animation still plays without it.
+    /// Slot groups carry it in their options instead.
     /// </summary>
     public bool ExpressionAtSource
-        => Expression != null && (Operation == AnimationOperation.Expression || Operation == AnimationOperation.Swap && StaysAtSource);
+        => Expression != null && (Operation == AnimationOperation.Expression ||
+                                  Operation == AnimationOperation.Swap && StaysAtSource && !InSlotGroups);
 }
 
 /// <summary>Rebuilds a PAP's body animations for another race's skeleton.</summary>
@@ -157,7 +199,8 @@ public sealed class AnimationConversionPlan : ModFilePlan
 /// </para>
 /// <para>
 /// A swap may do both: an idle can go to several slots at once, stay where it is too, and be
-/// retargeted on the way, the target races getting it wherever the others do.
+/// retargeted on the way, the target races getting it wherever the others do. Its slots can also
+/// become the options of an option group per race.
 /// </para>
 /// </summary>
 public sealed class AnimationConversionPlanner(
@@ -256,17 +299,33 @@ public sealed class AnimationConversionPlanner(
 
         private PenumbraMod Result => _plan.Result;
 
-        private ImmutableArray<AnimationSwapVariant> Variants => _request.Variants.IsDefault ? [] : _request.Variants;
+        /// <summary>
+        /// Where the swap places the animation: in slot groups, every slot it plays in, its own
+        /// among them while it stays there; otherwise every destination but its own slot, where
+        /// staying is <see cref="AnimationConversionRequest.StaysAtSource"/>'s to say.
+        /// </summary>
+        private ImmutableArray<AnimationSwapVariant> Variants
+            => _variants ??= InSlotGroups
+                ? [.. _request.PlayedSlots]
+                : [.. (_request.Variants.IsDefault ? [] : _request.Variants).Where(v => !AnimationConversionRequest.IsOwnSlot(v))];
 
-        /// <summary>Whether the animation's own keys stay: a swap that keeps it, or one that also converts it where it is.</summary>
-        private bool Keeps => _request.KeepOriginal || _request.StaysAtSource;
+        private ImmutableArray<AnimationSwapVariant>? _variants;
+
+        /// <summary>
+        /// Whether the animation's own keys stay: a swap that keeps it, or one that also converts it
+        /// where it is. In slot groups they never do: they move into the groups, whatever the mode.
+        /// </summary>
+        private bool Keeps => !InSlotGroups && (_request.KeepOriginal || _request.StaysAtSource);
+
+        /// <summary>Whether the swap goes into option groups, one per race (see <see cref="AnimationConversionRequest.InSlotGroups"/>).</summary>
+        private bool InSlotGroups => _request.InSlotGroups;
 
         /// <summary>The races to retarget to, without the source race.</summary>
         private List<ushort> TargetRaces()
             => _request.TargetRaces.IsDefault ? [] : _request.TargetRaces.Where(r => r != _request.SourceRace).Distinct().ToList();
 
         /// <summary>Retargeting: whether the source race keeps its animation, as the output mode decides.</summary>
-        private bool SourceRaceStays => _request.Mode.KeepsSourceRace(_request.IncludeSourceRace);
+        private bool SourceRaceStays => _request.Mode.KeepsSourceRace(_request.IncludeSourceRace, InSlotGroups);
 
         public AnimationConversionPlan Run()
         {
@@ -284,7 +343,7 @@ public sealed class AnimationConversionPlanner(
             // A face pack plays on the face skeleton and is itself the face: it can only move, to one place.
             if (providers.Any(p => p.Path.IsFacial) &&
                 (_request.Operation != AnimationOperation.Swap || _request.Expression != null || _request.StaysAtSource ||
-                 TargetRaces().Count > 0 || Variants.Length > 1))
+                 TargetRaces().Count > 0 || Variants.Length > 1 || InSlotGroups))
             {
                 Block("facial_swap_only", "A facial expression can only be swapped to another expression, as a plain replacement.");
                 return _plan;
@@ -342,7 +401,8 @@ public sealed class AnimationConversionPlanner(
         /// comes from, and where it is when it stays there too. Retargeting on the way, the target
         /// races get the source race's animation rebuilt for them wherever the other races get
         /// theirs, in place of any version of their own the mod has; the source race keeps its
-        /// own only where the output mode says so (see <see cref="SourceRaceStays"/>).
+        /// own only where the output mode says so (see <see cref="SourceRaceStays"/>). In slot
+        /// groups, every race gets an option per destination instead (see <see cref="PlanSlotGroups"/>).
         /// </summary>
         private void PlanSwap(List<Provider> providers)
         {
@@ -369,8 +429,12 @@ public sealed class AnimationConversionPlanner(
             }
 
             var planned = _plan.Changes.Count;
-            if (_request.StaysAtSource) PlanAtSource(sources);
-            foreach (var variant in variants) PlanDestination(variant, sources);
+            if (InSlotGroups) PlanSlotGroups(sources);
+            else
+            {
+                if (_request.StaysAtSource) PlanAtSource(sources);
+                foreach (var variant in variants) PlanDestination(variant, sources);
+            }
             // Every destination may lack a game animation of its own to convert to (a race with no
             // file for the slot): the mod's animation would then go with nothing to take its place.
             var removes = !Keeps || targets.Count > 0 && !SourceRaceStays;
@@ -386,8 +450,9 @@ public sealed class AnimationConversionPlanner(
                 foreach (var provider in providers)
                 {
                     // Unpaired parts (a start without a counterpart) leave together with the rest.
-                    // A location that is also a destination was just rewritten; leave it.
-                    if (variants.Any(v => v.Locations.Values.Contains(provider.Path.Location))) continue;
+                    // A location that is also a destination was just rewritten; leave it. Slot
+                    // groups rewrite nothing where it is: they hold all of it.
+                    if (!InSlotGroups && variants.Any(v => v.Locations.Values.Contains(provider.Path.Location))) continue;
                     RemoveKey(provider);
                 }
             else if (targets.Count > 0 && !SourceRaceStays)
@@ -437,6 +502,63 @@ public sealed class AnimationConversionPlanner(
                 files[destination.GamePath] = GamePath.ToLocal(local);
                 _plan.Changes.Add(new GearPlanChange(provider.RetargetedFrom == null ? "Game path" : "Retarget", container.Label,
                     GamePath.Normalize(provider.Key), destination.GamePath));
+            }
+        }
+
+        /// <summary>
+        /// Gives every race the animation is written for a single-select group of its own, with an
+        /// option per destination, in the order given (slot order), that places the race's file
+        /// there, renamed for it, after an empty "-" that places it nowhere, which every group
+        /// starts on. The groups outrank the mod's other groups, so the chosen slot wins over
+        /// anything else the mod has there. In every output mode the animation leaves the
+        /// containers it was in for the groups (see <see cref="PlanSwap"/>): its own files become
+        /// the option for its own slot, so choosing a slot is all that decides where it plays.
+        /// One group holds one file per game path, so where options of the mod each have their
+        /// own version, the chosen one is used and the others are left out.
+        /// </summary>
+        private void PlanSlotGroups(List<Provider> sources)
+        {
+            var chosen = OneSourcePerPath(sources);
+            if (_plan.HasBlockers) return;
+            var left = sources.Where(p => p.RetargetedFrom == null && !chosen.Any(c => c.Path.GamePath == p.Path.GamePath &&
+                    string.Equals(GamePath.NormalizeLocal(c.Local), GamePath.NormalizeLocal(p.Local), StringComparison.Ordinal)))
+                .Select(p => $"'{p.Container.Label}'")
+                .Distinct()
+                .ToList();
+            if (left.Count > 0)
+                Warn("versions_left_out", $"{string.Join(", ", left)} {(left.Count == 1 ? "has its" : "have their")} own version " +
+                                          "of this animation, which is left out: the option groups hold the one chosen under " +
+                                          "\"Take it from\".");
+
+            var priority = ModGroupBuilder.TopPriority(Result) + 1;
+            foreach (var race in chosen.Select(p => p.Path.Race).Distinct().Order())
+            {
+                var name = ModGroupBuilder.UniqueName(Result, $"{_request.SlotGroupName} ({RaceNames.Name(race)})");
+                var options = new JsonArray { ModGroupBuilder.Option(ModGroup.OffOptionName, string.Empty, new JsonObject()) };
+                foreach (var variant in Variants)
+                {
+                    _destinationLabel = variant.Label;
+                    var files = new JsonObject();
+                    foreach (var provider in chosen.Where(p => p.Path.Race == race))
+                    {
+                        if (!variant.Locations.TryGetValue(provider.Path.Location, out var location))
+                        {
+                            Warn("unpaired", Unpaired(variant, provider));
+                            continue;
+                        }
+                        var destination = FromLocation(race, location);
+                        if (destination == null || !GameHas(destination, variant.Label, provider, "is left out there.")) continue;
+                        if (SwapContent(provider, destination) is not { } local) continue;
+                        files[destination.GamePath] = GamePath.ToLocal(local);
+                        _plan.Changes.Add(new GearPlanChange(provider.RetargetedFrom == null ? "Option" : "Retarget",
+                            $"{name} / {variant.Label}", GamePath.Normalize(provider.Key), destination.GamePath));
+                    }
+                    if (files.Count > 0) options.Add(ModGroupBuilder.Option(variant.Label, string.Empty, files));
+                }
+                if (options.Count == 1) continue;
+                _plan.Changes.Add(ModGroupBuilder.Add(Result, name,
+                    $"Choose the slot {RaceNames.Name(race)} plays this animation in; \"-\" picks none. Created by Universal Mod Converter.",
+                    priority, "Single", 0, options));
             }
         }
 
@@ -586,6 +708,8 @@ public sealed class AnimationConversionPlanner(
         /// </summary>
         private string SwapLocal(Provider provider, PapPath destination)
         {
+            // Where it already is (a slot group's option for its own slot), it keeps its own name.
+            if (provider.RetargetedFrom == null && destination.GamePath == provider.Path.GamePath) return GamePath.ToLocal(provider.Local);
             // A target race's file is named after the source race's, which it is made from.
             var origin = provider.RetargetedFrom is { } from ? provider.Path.WithRace(from) : provider.Path;
             if (Mirrored(provider.Local, origin.GamePath, destination.GamePath) is { } mirrored) return mirrored;
