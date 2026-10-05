@@ -32,6 +32,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         ("Game path", "Game paths"),
         ("File swap", "File swaps"),
         ("Reference", "References inside models, materials and effects"),
+        ("Part tag", "Part tags in models, renamed for the target slot"),
         ("Game dependency", "Game files copied into the mod"),
         ("Metadata", "Metadata (EQP, EQDP, IMC, EST and more)"),
         ("IMC group", "IMC option groups"),

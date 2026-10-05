@@ -69,6 +69,8 @@ internal static class DiagnosticText
         ["pbd_invalid"]            = "Race data invalid",
         ["accessory_skin_material"] = "Body materials on an accessory",
         ["unused_material_kept"]   = "Unused material kept",
+        ["accessory_part_tags"]    = "Part toggles on an accessory",
+        ["part_tags_not_merged"]   = "Part tags not renamed",
         ["xaela_material_dropped"] = "Xaela material removed",
 
         // Skin and face retextures

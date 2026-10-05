@@ -45,7 +45,7 @@ Open the window with `/umc` (settings: `/umcconfig` or the cog icon).
 
 Nothing converts until it's added to the **conversion plan**; the plan is previewed and applied as a whole, so one apply is one revertable entry in **History**.
 **Merge modpacks** (top right) is a separate flow for combining two modpacks, such as separate mods containing only textures and only models. I'd recommend using this before attempting to swap such mods.
-During gear conversion you can tick off parts of the mesh you'd like to remove. When converting to a different slot, body parts will automatically be removed. Note that this cannot automatically add body meshes for the new output slot.
+During gear conversion you can tick off parts of the mesh you'd like to remove. When converting to a different slot, body parts will automatically be removed. Note that this cannot automatically add body meshes for the new output slot. Part toggles move with the model: a tag like `atr_tv_a` becomes the new slot's `atr_nv_a`, so the mod's IMC options keep switching those parts. On an accessory the game itself only switches `_a`; `_b` to `_j` rely on Penumbra's custom shape and attribute support, which is on by default.
 
 ## Safety and reverting
 

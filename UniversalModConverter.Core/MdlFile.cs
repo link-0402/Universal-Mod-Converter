@@ -597,6 +597,71 @@ public sealed class MdlFile
     }
 
     /// <summary>
+    /// Renames attributes (part tags). A new name the model already has is not listed twice: the
+    /// two are merged, every part tagged with either carries the one left, and the attributes
+    /// after it move down a bit. Returns the new names such a merge produced.
+    /// </summary>
+    public IReadOnlyList<string> RenameAttributes(IReadOnlyDictionary<string, string> renames)
+    {
+        if (!Attributes.Any(a => renames.TryGetValue(a, out var to) && to != a)) return [];
+        if (renames.Values.Any(v => v.IndexOf('\0') >= 0))
+            throw new ArgumentException("MDL strings cannot contain NUL bytes.", nameof(renames));
+
+        // Where each old attribute bit goes. Only a rename merges: two names the model already
+        // listed twice are left as they were.
+        var names = new List<string>();
+        var renamedSlots = new HashSet<int>();
+        var merged = new List<string>();
+        var bits = new int[Attributes.Length];
+        for (var i = 0; i < Attributes.Length; i++)
+        {
+            var renamed = renames.TryGetValue(Attributes[i], out var name) && name != Attributes[i];
+            if (!renamed) name = Attributes[i];
+            var at = names.IndexOf(name!);
+            if (at >= 0 && (renamed || renamedSlots.Contains(at)))
+            {
+                bits[i] = at;
+                if (!merged.Contains(name!)) merged.Add(name!);
+                continue;
+            }
+            bits[i] = names.Count;
+            if (renamed) renamedSlots.Add(names.Count);
+            names.Add(name!);
+        }
+
+        // Merging only ever moves a bit down, so every bit stays inside the 32-bit mask. Bits past
+        // the attribute list name nothing and are kept as they are.
+        uint Remap(uint mask)
+        {
+            var result = 0u;
+            for (var bit = 0; bit < 32; bit++)
+                if ((mask & (1u << bit)) != 0) result |= 1u << (bit < bits.Length ? bits[bit] : bit);
+            return result;
+        }
+        Submeshes = Submeshes.Select(s => s with { AttributeMask = Remap(s.AttributeMask) }).ToImmutableArray();
+
+        // The string table: a renamed attribute's string takes the new name unless a bone, material
+        // or shape still uses the old one, and a merged name is kept once.
+        var others = Materials.Concat(Bones).Concat(Shapes.Select(s => s.Name)).ToHashSet(StringComparer.Ordinal);
+        var newNames = renames.Values.ToHashSet(StringComparer.Ordinal);
+        var strings = new List<string>(Strings.Length);
+        foreach (var value in Strings)
+        {
+            var replaced = renames.TryGetValue(value, out var to) && Attributes.Contains(value) && !others.Contains(value)
+                ? to : value;
+            if (newNames.Contains(replaced) && strings.Contains(replaced)) continue;
+            strings.Add(replaced);
+        }
+        foreach (var name in names)
+            if (!strings.Contains(name)) strings.Add(name);
+
+        Strings = strings.ToImmutableArray();
+        Attributes = names.ToImmutableArray();
+        RequiresRebuild = true;
+        return merged;
+    }
+
+    /// <summary>
     /// Hides submeshes (by absolute submesh-table index) by turning their triangles into
     /// zero-area ones: every index of the submesh's range is set to its first index. Nothing
     /// moves and no table changes, so this is safe whether the game draws a mesh as a whole or

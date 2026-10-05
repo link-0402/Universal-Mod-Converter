@@ -83,6 +83,25 @@ public static class GearSlots
         _ => throw new ArgumentOutOfRangeException(nameof(slot)),
     };
 
+    /// <summary>
+    /// The letter of the part variant tags (<c>atr_{family}v_a</c> to <c>_j</c>) the game shows or
+    /// hides from this slot's IMC attribute mask; both rings share one. Null for facewear, whose
+    /// tags are not known.
+    /// </summary>
+    public static char? PartTagFamily(this GearSlot slot) => slot switch
+    {
+        GearSlot.Head => 'm',
+        GearSlot.Body => 't',
+        GearSlot.Hands => 'g',
+        GearSlot.Legs => 'd',
+        GearSlot.Feet => 's',
+        GearSlot.Ears => 'e',
+        GearSlot.Neck => 'n',
+        GearSlot.Wrists => 'w',
+        GearSlot.RFinger or GearSlot.LFinger => 'r',
+        _ => null,
+    };
+
     /// <summary>Penumbra's <c>EquipSlot</c> spelling used by Eqp, Eqdp and Imc manipulations.</summary>
     public static string EquipSlotName(this GearSlot slot) => slot switch
     {
