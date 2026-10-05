@@ -15,6 +15,7 @@ internal static class SkeletonMatchingTests
         ("A quantized animation only fits its own race's whole skeleton", SourceQuantized),
         ("Standard layouts: the game's bones first, then IVCS, then YAS", StandardLayouts),
         ("The target is the smallest standard with every bone that moves", TargetSmallestStandard),
+        ("Game bones skeleton mods keep at other indices get no track", UnportableBones),
         ("Float noise does not count as motion", MotionThreshold),
         ("Installed skeletons are read from every definition layout", InstalledDefinitions),
     ];
@@ -203,6 +204,26 @@ internal static class SkeletonMatchingTests
         var bare = Choose(SkeletonMatcher.Standards(game, []), "iv_a", "j_kosi");
         Assert.Equal(SkeletonStandard.Vanilla, bare.Standard);
         Assert.Equal(["iv_a"], bare.Missing);
+    }
+
+    /// <summary>
+    /// The reported case: a retarget rebuilt for the game's skeleton tracked its last bone,
+    /// n_hara_noanim_trans, whose index holds a fingertip on IVCS and YAS, so the finger
+    /// stretched to the floor. Such bones are found by name and in the installed standard
+    /// layouts; a layout that is no standard says nothing about where the game's bones are.
+    /// </summary>
+    private static void UnportableBones()
+    {
+        string[] Unportable(SkeletonDescription game, params SkeletonDescription[] layouts)
+            => [.. SkeletonMatcher.UnportableBones(game, layouts).Order(StringComparer.Ordinal)];
+        Assert.Equal(new[] { "n_hara_noanim_trans" }, Unportable(GameSkeleton));
+        Assert.Equal(new[] { "n_hara_noanim_trans" }, Unportable(GameSkeleton, Skeleton("s", Ivcs), Skeleton("s", Yas)));
+
+        // A later game bone the mods also put elsewhere, which its name does not give away.
+        string[] newer = [.. Game, "j_new"];
+        string[] newerIvcs = [.. Game[..4], "iv_a", "iv_b", "n_hara_noanim_trans", "j_new"];
+        Assert.Equal(new[] { "j_new", "n_hara_noanim_trans" }, Unportable(Skeleton("s", newer), Skeleton("s", newerIvcs)));
+        Assert.Equal(new[] { "n_hara_noanim_trans" }, Unportable(Skeleton("s", newer), Skeleton("s", newer), Skeleton("s", Big)));
     }
 
     /// <summary>

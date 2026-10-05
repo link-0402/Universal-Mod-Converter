@@ -164,6 +164,28 @@ public static class SkeletonMatcher
             .First();
     }
 
+    /// <summary>
+    /// The game's bones an animation rebuilt for a standard layout leaves without a track: those
+    /// skeleton mods do not keep at the game's index. The game appended them after IVCS and YAS
+    /// fixed their layouts (<c>n_hara_noanim_trans</c>), so on those skeletons another bone sits
+    /// at that index (a fingertip, or the first tail bone), and a track bound there moves it with
+    /// this bone's motion instead: a finger stretched to the floor, for most players. The game's
+    /// own animations never track these bones (hence "noanim"), so at rest they change nothing on
+    /// its skeleton. Found in <paramref name="layouts"/>, the race's installed skeletons laid out
+    /// as a standard (see <see cref="IsStandardLayout"/>), and by name for when none is installed.
+    /// </summary>
+    public static ImmutableHashSet<string> UnportableBones(SkeletonDescription game, IEnumerable<SkeletonDescription> layouts)
+    {
+        var names = game.Bones.Select(b => b.Name).ToArray();
+        var result = names.Where(name => name.Contains("_noanim", StringComparison.Ordinal)).ToHashSet(StringComparer.Ordinal);
+        foreach (var layout in layouts.Where(l => IsStandardLayout(l, game, SkeletonStandard.Ivcs) ||
+                                                  IsStandardLayout(l, game, SkeletonStandard.IvcsYas)))
+            for (var i = 0; i < names.Length; i++)
+                if (i >= layout.Bones.Length || layout.Bones[i].Name != names[i])
+                    result.Add(names[i]);
+        return result.ToImmutableHashSet(StringComparer.Ordinal);
+    }
+
     /// <summary>The bones of <paramref name="moving"/> that <paramref name="skeleton"/> lacks, by name.</summary>
     public static ImmutableArray<string> Missing(SkeletonDescription skeleton, IReadOnlySet<string> moving)
     {

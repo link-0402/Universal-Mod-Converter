@@ -55,9 +55,14 @@ internal sealed class HavokAnimationRetargeter(HavokAnimation havok, SkeletonLib
         {
             Run(job.CheckRoundTrip);
             while (!Tick(job.ScanBatch)) { }
-            var (target, standards) = FindTarget(request, job.MovingBones(), live);
-            Run(() => job.Target(target.Candidate.Skeleton));
+            var (target, standards, unportable) = FindTarget(request, job.MovingBones(), live);
+            Run(() => job.Target(target.Candidate.Skeleton, unportable));
             while (!Tick(job.SampleBatch)) { }
+            if (job.HeldAtRest.Count > 0)
+                job.Notes.Add($"{Capitalized(List(job.HeldAtRest, 3))} {(job.HeldAtRest.Count == 1 ? "stays" : "stay")} at rest: " +
+                              "skeleton mods such as IVCS and YAS keep another bone at " +
+                              $"{(job.HeldAtRest.Count == 1 ? "its" : "their")} index (a fingertip or the tail), which " +
+                              $"{(job.HeldAtRest.Count == 1 ? "its" : "their")} motion would move instead.");
 
             byte[] saved;
             var compress = havok.CanCompress;
@@ -144,19 +149,23 @@ internal sealed class HavokAnimationRetargeter(HavokAnimation havok, SkeletonLib
     }
 
     /// <summary>
-    /// The skeleton the target race gets, and the standards it had to choose from: the one the
-    /// mod itself has for the race, which is what the race plays the result on; otherwise the
-    /// smallest standard skeleton of the race with every bone the animation moves.
+    /// The skeleton the target race gets, the standards it had to choose from, and the bones it
+    /// leaves without a track: the one the mod itself has for the race, which is what the race
+    /// plays the result on, and which keeps every bone; otherwise the smallest standard skeleton
+    /// of the race with every bone the animation moves, which leaves out the game's bones that
+    /// skeleton mods keep at other indices (see <see cref="SkeletonMatcher.UnportableBones"/>).
     /// </summary>
-    private (TargetChoice Choice, ImmutableArray<SkeletonStandard> Standards) FindTarget(RetargetRequest request,
-        IReadOnlySet<string> moving, IReadOnlyDictionary<ushort, string> live)
+    private (TargetChoice Choice, ImmutableArray<SkeletonStandard> Standards, ImmutableHashSet<string> Unportable) FindTarget(
+        RetargetRequest request, IReadOnlySet<string> moving, IReadOnlyDictionary<ushort, string> live)
     {
         var race = request.TargetRace;
         if (skeletons.Mod(request.ModSkeletons.Where(s => s.Race == race)).FirstOrDefault() is { } own)
-            return (new TargetChoice(own, null, SkeletonMatcher.Missing(own.Skeleton, moving)), []);
+            return (new TargetChoice(own, null, SkeletonMatcher.Missing(own.Skeleton, moving)), [], []);
         var game = skeletons.Game(race, live) ?? throw new InvalidDataException($"The game has no skeleton for {RaceNames.Describe(race)}.");
-        var standards = SkeletonMatcher.Standards(game, skeletons.Installed([race], live));
-        return (SkeletonMatcher.ChooseTarget(standards, moving), [.. standards.Select(s => s.Standard)]);
+        var installed = skeletons.Installed([race], live);
+        var standards = SkeletonMatcher.Standards(game, installed);
+        return (SkeletonMatcher.ChooseTarget(standards, moving), [.. standards.Select(s => s.Standard)],
+            SkeletonMatcher.UnportableBones(game.Skeleton, installed.Select(c => c.Skeleton)));
     }
 
     /// <summary>The source skeleton in words, when it is not the game's own skeleton of the race the animation was made for.</summary>
@@ -324,10 +333,21 @@ internal sealed class HavokAnimationRetargeter(HavokAnimation havok, SkeletonLib
             return true;
         }
 
-        /// <summary>Sets the skeleton to rebuild for; sampling (see <see cref="SampleBatch"/>) moves every frame onto it.</summary>
-        public void Target(SkeletonDescription target)
+        /// <summary>Target bones the rebuilt animation leaves without a track, at rest (see <see cref="SkeletonMatcher.UnportableBones"/>).</summary>
+        private readonly HashSet<int> _untracked = [];
+
+        /// <summary>The untracked target bones some frame would have moved, by name.</summary>
+        public SortedSet<string> HeldAtRest { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Sets the skeleton to rebuild for; sampling (see <see cref="SampleBatch"/>) moves every
+        /// frame onto it, except for the bones of <paramref name="untracked"/>, which stay at rest.
+        /// </summary>
+        public void Target(SkeletonDescription target, IReadOnlySet<string> untracked)
         {
             _target = target;
+            _untracked.Clear();
+            _untracked.UnionWith(Enumerable.Range(0, target.Bones.Length).Where(i => untracked.Contains(target.Bones[i].Name)));
             _targetSkeleton = HavokAnimation.Materialize(target, _arena);
             foreach (var clip in _clips) clip.Target();
             _clip = 0;
@@ -484,6 +504,11 @@ internal sealed class HavokAnimationRetargeter(HavokAnimation havok, SkeletonLib
                 for (var i = 0; i < pose.Length; i++)
                 {
                     if (!pose[i].IsFinite) throw new InvalidDataException($"Retargeting produced an invalid pose for {target.Bones[i].Name}.");
+                    if (_job._untracked.Contains(i))
+                    {
+                        if (!pose[i].Near(target.Bones[i].Reference, 1e-6f)) _job.HeldAtRest.Add(target.Bones[i].Name);
+                        pose[i] = target.Bones[i].Reference;
+                    }
                     // Keep quaternions on one hemisphere so interpolation takes the short way.
                     if (_frame > 0 && Quaternion.Dot(_expected[^1][i].Rotation, pose[i].Rotation) < 0)
                         pose[i] = pose[i] with { Rotation = Quaternion.Negate(pose[i].Rotation) };
@@ -507,6 +532,8 @@ internal sealed class HavokAnimationRetargeter(HavokAnimation havok, SkeletonLib
                 var target = _job._target!;
                 var tracks = Retarget!.MapTracks(_tracks).ToList();
                 tracks.AddRange(_affected.Order().Where(i => !tracks.Contains((short)i)).Select(i => (short)i));
+                // A track at one of these indices would move another bone on most players' skeletons.
+                tracks.RemoveAll(t => _job._untracked.Contains(t));
                 if (tracks.Count == 0) tracks.Add(0);
 
                 var arena = _job._arena;
