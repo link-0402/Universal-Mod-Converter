@@ -130,19 +130,19 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         var missing = slots.Count(s => s.Index != source.SlotIndex && !session.CanSwapToIdleSlot(source, s));
         using var list = ImRaii.Child("##Slots", new Vector2(-1, -1), true);
         if (!list.Success) return;
-        var hidden = 0;
+        var hidden = new List<string>();
         foreach (var slot in slots)
         {
             var current = slot.Index == source.SlotIndex;
             var ticked = session.AnimationOutputSlots.Contains(slot.Index);
             if (!current && !ticked && !session.CanSwapToIdleSlot(source, slot)) continue;
-            var modded = session.ModdedIdleSlot(source, slot);
             // The current slot stays for orientation, whoever changes it.
-            if (!current && !session.ShowsTarget(modded, ticked))
+            if (!current && session.HidesIdleSlot(source, slot, ticked))
             {
-                hidden++;
+                hidden.Add(slot.Label);
                 continue;
             }
+            var modded = session.ModdedIdleSlot(source, slot);
             using var id = ImRaii.PushId(slot.Index);
             using (ImRaii.PushColor(ImGuiCol.Text, Theme.Danger, modded != null))
             {
@@ -152,7 +152,10 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
             var keys = slot.StartKey == null ? $"{slot.LoopKey} (no start animation)" : $"{slot.LoopKey} and {slot.StartKey}";
             Widgets.Tooltip(current ? $"{keys}\nWhere the animation plays now." : keys, modded);
         }
-        if (hidden > 0) Widgets.Muted($"{hidden} modded {(hidden == 1 ? "slot" : "slots")} hidden.");
+        if (hidden.Count > 0)
+            HiddenNote(hidden, hidden.Count == 1 ? "slot" : "slots",
+                $"Another mod in your collection already changes {(hidden.Count == 1 ? "that slot" : "those slots")} " +
+                "for the races in this mod.");
         if (missing > 0) NotListed(source, missing, missing == 1 ? "slot is" : "slots are");
     }
 
@@ -405,6 +408,17 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
                                 $"{string.Join(", ", source.Races.Select(RaceNames.Name))}, which play another race's " +
                                 "instead, so a swapped file would never load.");
 
+    /// <summary>
+    /// Says what "Hide modded" leaves out of a list, so that nothing just seems to be missing: the
+    /// count, and in its tooltip the <paramref name="names"/> and the <paramref name="reason"/>.
+    /// </summary>
+    private static void HiddenNote(IReadOnlyList<string> names, string noun, string reason)
+    {
+        Widgets.Muted($"{names.Count} modded {noun} hidden.");
+        Widgets.Tooltip($"{string.Join(", ", names)}\n\n{reason} Turn off \"Hide modded\" to list " +
+                        $"{(names.Count == 1 ? "it" : "them")}.");
+    }
+
     private static void Loading(string message)
     {
         Widgets.Spinner(Theme.Accent);
@@ -442,7 +456,8 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
 
     /// <summary>
     /// The races the retarget writes, in <paramref name="columns"/> columns filling the rest of the
-    /// card: the source race first, then those to rebuild the animation for.
+    /// card: the source race first, then those to rebuild the animation for, then how many
+    /// "Hide modded" leaves out.
     /// </summary>
     private void DrawTargetRaces(AnimationSource source, int columns)
     {
@@ -460,30 +475,42 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
                                  "it inherits from, so there is no race to retarget it to.");
             return;
         }
-        using var table = ImRaii.Table("##RaceTable", columns, ImGuiTableFlags.SizingStretchSame);
-        if (!table.Success) return;
-        DrawSourceRace(sourceRace);
-        foreach (var race in targets)
+        var hidden = new List<string>();
+        using (var table = ImRaii.Table("##RaceTable", columns, ImGuiTableFlags.SizingStretchSame))
         {
-            var included = session.AnimationTargetRaces.Contains(race);
-            var provided = source.Races.Contains(race);
-            var modded   = session.ModdedRetargetRace(source, race);
-            if (!session.ShowsTarget(modded, included)) continue;
-            ImGui.TableNextColumn();
-            using var id = ImRaii.PushId(race);
-            using (ImRaii.PushColor(ImGuiCol.Text, Theme.Danger, modded != null))
+            if (!table.Success) return;
+            DrawSourceRace(sourceRace);
+            foreach (var race in targets)
             {
-                if (ImGui.Checkbox(ConverterSession.RaceLabel(race), ref included)) session.SetAnimationTargetRace(race, included);
-            }
-            Widgets.Tooltip(provided
-                ? $"{RaceNames.Describe(race)}. The mod already has this animation for this race; it would be replaced."
-                : RaceNames.Describe(race), modded);
-            if (provided)
-            {
-                ImGui.SameLine();
-                Widgets.Badge("in mod", Theme.Warning);
+                var included = session.AnimationTargetRaces.Contains(race);
+                if (session.HidesRetargetRace(source, race, included))
+                {
+                    hidden.Add(ConverterSession.RaceLabel(race));
+                    continue;
+                }
+                var provided = source.Races.Contains(race);
+                var modded   = session.ModdedRetargetRace(source, race);
+                ImGui.TableNextColumn();
+                using var id = ImRaii.PushId(race);
+                using (ImRaii.PushColor(ImGuiCol.Text, Theme.Danger, modded != null))
+                {
+                    if (ImGui.Checkbox(ConverterSession.RaceLabel(race), ref included)) session.SetAnimationTargetRace(race, included);
+                }
+                Widgets.Tooltip(provided
+                    ? $"{RaceNames.Describe(race)}. The mod already has this animation for this race; it would be replaced."
+                    : RaceNames.Describe(race), modded);
+                if (provided)
+                {
+                    ImGui.SameLine();
+                    Widgets.Badge("in mod", Theme.Warning);
+                }
             }
         }
+        if (hidden.Count > 0)
+            HiddenNote(hidden, hidden.Count == 1 ? "race" : "races",
+                $"Another mod in your collection already changes " +
+                $"{(source.Kind == AnimationSourceKind.Idle ? source.Label : "this animation")} for " +
+                $"{(hidden.Count == 1 ? "that race" : "those races")}.");
     }
 
     /// <summary>

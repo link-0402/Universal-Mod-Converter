@@ -519,14 +519,26 @@ public sealed partial class ConverterSession
     // A swap writes the target's animations for every race the source has, and a retarget the
     // source's for the target race. What is looked up is what those races play there: their own
     // file where the game has one, or else the one of the race they inherit it from.
+    // An idle's slot and race lists mark a target for everything the conversion writes, but
+    // "Hide modded" hides it only for what the source fixes, never for a tick in the other list:
+    // otherwise ticking a race could hide a slot and ticking a slot a race, and what can be
+    // ticked would depend on the order of the clicks.
 
     /// <summary>
     /// Who already changes the slot as the races the conversion writes for play it, or null. Its
     /// loop and its start both count, the loop the most, so the note says which is changed.
     /// </summary>
-    public string? ModdedIdleSlot(AnimationSource source, IdleSlot slot)
+    public string? ModdedIdleSlot(AnimationSource source, IdleSlot slot) => ModdedIdleSlot(source, slot, IdleRaces(source));
+
+    /// <summary>
+    /// Whether "Hide modded" leaves the slot out of the list: another mod changes it for the races
+    /// the conversion writes for whichever races are ticked (see <see cref="OwnIdleRaces"/>).
+    /// </summary>
+    public bool HidesIdleSlot(AnimationSource source, IdleSlot slot, bool ticked)
+        => HideModdedTargets && !ShowsTarget(ModdedIdleSlot(source, slot, OwnIdleRaces(source)), ticked);
+
+    private string? ModdedIdleSlot(AnimationSource source, IdleSlot slot, IReadOnlyList<ushort> races)
     {
-        var races = IdleRaces(source);
         var scope = (source, string.Join(",", races));
         IReadOnlyList<string> Part(string? key)
             => key == null ? [] : Modded.PathMods(scope, key, () => PlayedPaths(races, [$"a0001/bt_common/{key}"]));
@@ -540,10 +552,17 @@ public sealed partial class ConverterSession
         return Modded.DescribeMods([.. loop.Union(start, StringComparer.OrdinalIgnoreCase)], what);
     }
 
-    /// <summary>The races an idle conversion writes for: the mod's, and those it retargets to, the source race while it stays.</summary>
+    /// <summary>The races an idle conversion writes for: the mod's (see <see cref="OwnIdleRaces"/>) and those it retargets to.</summary>
     private IReadOnlyList<ushort> IdleRaces(AnimationSource source)
+        => AnimationAlsoRetargets ? [.. OwnIdleRaces(source).Union(_animationTargetRaces).Order()] : source.Races;
+
+    /// <summary>
+    /// The races an idle conversion writes for whichever races are ticked: the mod's, the source
+    /// race only while it stays.
+    /// </summary>
+    private IReadOnlyList<ushort> OwnIdleRaces(AnimationSource source)
         => AnimationAlsoRetargets
-            ? [.. source.Races.Union(_animationTargetRaces).Where(r => r != AnimationSourceRace || AnimationSourceRaceStays).Order()]
+            ? [.. source.Races.Where(r => r != AnimationSourceRace || AnimationSourceRaceStays)]
             : source.Races;
 
     /// <summary>Who already changes any of the emote's animations, as the source's races play them, or null.</summary>
@@ -561,13 +580,19 @@ public sealed partial class ConverterSession
             : null;
 
     /// <summary>Who already changes the animation for <paramref name="race"/> where a retarget writes it, or null.</summary>
-    public string? ModdedRetargetRace(AnimationSource source, ushort race)
-    {
-        var locations = RetargetLocations(source);
-        return Modded.Paths((source, string.Join("|", locations)), race, () => locations
+    public string? ModdedRetargetRace(AnimationSource source, ushort race) => ModdedRace(source, RetargetLocations(source), race);
+
+    /// <summary>
+    /// Whether "Hide modded" leaves the race out of the list: another mod changes the race's
+    /// animation where the source's is now, whichever idle slots are ticked.
+    /// </summary>
+    public bool HidesRetargetRace(AnimationSource source, ushort race, bool ticked)
+        => HideModdedTargets && !ShowsTarget(ModdedRace(source, source.Locations, race), ticked);
+
+    private string? ModdedRace(AnimationSource source, IReadOnlyList<string> locations, ushort race)
+        => Modded.Paths((source, string.Join("|", locations)), race, () => locations
             .Select(location => PapGamePath(race, location))
             .Where(GameData.Animations.FileExists));
-    }
 
     /// <summary>
     /// What <paramref name="races"/> play at <paramref name="locations"/>: each race's own file
