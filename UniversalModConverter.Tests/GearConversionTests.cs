@@ -22,6 +22,9 @@ internal static class GearConversionTests
         ("A conversion that overlaps another is rejected and rolled back", MergeRejectsOverlap),
         ("A run keeps every conversion's metadata, IMC group and shared files", RunKeepsEveryConversion),
         ("Accessory to equipment conversion", AccessoryToEquipment),
+        ("A body that becomes a necklace renames its part tags to the necklace's", BodyToNeckPartTags),
+        ("An earring that becomes a top renames its part tags to the top's", AccessoryToGearPartTags),
+        ("A part tag the model already has under its new name is merged, not doubled", PartTagMerge),
         ("Races with a model get an EQDP entry on a target without one", EqdpForRaceModels),
         ("Item the mod does not change is rejected", EmptyPlanWithoutModContent),
         ("v4 in place: IMC group, swaps, missing files", InPlaceV4ImcGroupAndSwaps),
@@ -1213,6 +1216,216 @@ internal static class GearConversionTests
         Assert.True(!converted.Default.Manipulations!.OfType<JsonObject>().Any(m => m["Type"]!.GetValue<string>() == "GlobalEqp"));
         var issues = GearConversionVerifier.Verify(output.Path, request.Target, request.Source, game);
         Assert.True(issues.Count == 0, string.Join("; ", issues.Select(i => i.Message)));
+    }
+
+    /// <summary>
+    /// A necklace's parts are switched only by atr_nv_ tags, so a cloak's atr_tv_ tags have to follow
+    /// it into the Neck slot, or its IMC toggles silently stop working. A tag keeps its suffix and so
+    /// its IMC bit: the retargeted IMC group's option masks still line up. Tags of other families,
+    /// suffixes past _j, custom atrx_ tags and the game's own names stay, and so do the parts' masks.
+    /// The model's atrx_ toggles (Atr entries for the item) follow it to the new slot and set.
+    /// </summary>
+    private static void BodyToNeckPartTags()
+    {
+        using var mod = new TempDir();
+        const string root = "chara/equipment/e0100";
+        string[] tags = ["atr_tv_a", "atr_tv_b", "atr_tv_c", "atr_tv_d", "atr_gv_b", "atrx_glow", "atr_nek", "atr_tv_k"];
+        uint[] masks = [1, 2, 4, 8, 16 | 1, 32, 64 | 2, 128];
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Cloak",
+             "DefaultData":{
+              "Files":{
+               "{{{root}}}/model/c0201e0100_top.mdl":"top.mdl",
+               "{{{root}}}/material/v0001/mt_c0201e0100_top_a.mtrl":"top.mtrl"},
+              "Manipulations":[
+               {"Type":"Atr","Manipulation":{"Entry":false,"Slot":"Body","Id":100,"Attribute":"atrx_glow","GenderRaceCondition":"Unknown"}},
+               {"Type":"Atr","Manipulation":{"Entry":false,"Slot":"Body","Id":null,"Attribute":"atrx_all","GenderRaceCondition":"Unknown"}}]},
+             "Groups":[
+              {"Type":"Imc","Id":"{{{G2}}}","Name":"Parts","AllVariants":true,"OnlyAttributes":true,"DefaultSettings":15,
+               "Identifier":{"PrimaryId":100,"SecondaryId":0,"Variant":1,"ObjectType":"Equipment","EquipSlot":"Body","BodySlot":"Unknown"},
+               "DefaultEntry":{"MaterialId":1,"DecalId":0,"VfxId":0,"MaterialAnimationId":0,"AttributeMask":0,"SoundId":1},
+               "Options":[{"Id":"{{{O1}}}","Name":"A","AttributeMask":1},{"Id":"{{{O2}}}","Name":"B","AttributeMask":2},
+                          {"Id":"{{{O3}}}","Name":"C","AttributeMask":4},{"Id":"{{{O4}}}","Name":"D","AttributeMask":8}]},
+              {"Type":"Multi","Id":"{{{G3}}}","Name":"Glow","Options":[{"Id":"{{{O5}}}","Name":"On","Manipulations":[
+               {"Type":"Atr","Manipulation":{"Entry":true,"Slot":"Body","Id":100,"Attribute":"atrx_glow","GenderRaceCondition":"Unknown"}}]}]}]}
+            """);
+        mod.File("top.mdl", TestAssets.CreateMultiMeshMdl(["/mt_c0201e0100_top_a.mtrl"], partsPerMesh: tags.Length,
+            attributes: tags, partMasks: masks));
+        mod.File("top.mtrl", Mtrl("chara/common/texture/white.tex"));
+        var game = StandardGame();
+        game.Files["chara/accessory/a0060/a0060.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+        game.Files["chara/common/texture/white.tex"] = [1];
+
+        var request = new GearConversionRequest(new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Neck, 60, 1),
+            ConversionOutputMode.InPlace);
+        var plan = new GearConversionPlanner(game).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { "atr_tv_a>atr_nv_a", "atr_tv_b>atr_nv_b", "atr_tv_c>atr_nv_c", "atr_tv_d>atr_nv_d" },
+            plan.Changes.Where(c => c.Category == "Part tag").Select(c => $"{c.From}>{c.To}").ToArray());
+        // The game itself switches only _a on an accessory; the rest relies on Penumbra.
+        var note = plan.Diagnostics.Single(d => d.Code == "accessory_part_tags").Message;
+        Assert.True(note.Contains("atr_nv_b, atr_nv_c, atr_nv_d") && !note.Contains("atr_nv_a") &&
+                    note.Contains("Enable Custom Shape and Attribute Support"), note);
+
+        GearConversionExecutor.ApplyInPlace(plan, mod.Path);
+        var result = PenumbraMod.Load(mod.Path);
+        var files = result.Default.FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
+        var model = MdlFile.Read(File.ReadAllBytes(Path.Combine(mod.Path,
+            GamePath.ToLocal(files["chara/accessory/a0060/model/c0201a0060_nek.mdl"]))));
+        Assert.Equal(new[] { "atr_nv_a", "atr_nv_b", "atr_nv_c", "atr_nv_d", "atr_gv_b", "atrx_glow", "atr_nek", "atr_tv_k" },
+            model.Attributes.ToArray());
+        Assert.Equal(masks, model.Submeshes.Select(s => s.AttributeMask).ToArray());
+        Assert.Equal("/mt_c0201a0060_nek_a.mtrl", model.Materials.Single());
+        Assert.True(model.Strings.All(s => !s.StartsWith("atr_tv_", StringComparison.Ordinal) || s == "atr_tv_k"),
+            string.Join(", ", model.Strings));
+
+        // The IMC group now drives the necklace with the same option masks.
+        var parts = result.Groups.Single(g => g.IsImc).Node;
+        Assert.Equal("Accessory|Neck|60", $"{parts["Identifier"]!["ObjectType"]}|{parts["Identifier"]!["EquipSlot"]}|{parts["Identifier"]!["PrimaryId"]}");
+        Assert.Equal(new[] { 1, 2, 4, 8 }, parts["Options"]!.AsArray().Select(o => o!["AttributeMask"]!.GetValue<int>()).ToArray());
+
+        // Atr entries for the item move with it, in the default data and in options alike; one for
+        // every body in the game is not about this item and stays.
+        static string[] Atr(ModContainer container)
+            => (container.Manipulations?.OfType<JsonObject>() ?? [])
+                .Where(m => m["Type"]!.GetValue<string>() == "Atr").Select(m => m["Manipulation"]!)
+                .Select(m => $"{m["Slot"]} {(m["Id"] is { } id ? id.ToJsonString() : "any")} {m["Attribute"]} {m["Entry"]}")
+                .Order(StringComparer.Ordinal).ToArray();
+        Assert.Equal(new[] { "Body any atrx_all false", "Neck 60 atrx_glow false" }, Atr(result.Default));
+        Assert.Equal(new[] { "Neck 60 atrx_glow true" }, Atr(result.Groups.Single(g => g.Name == "Glow").Containers.Single()));
+
+        var issues = GearConversionVerifier.Verify(mod.Path, request.Target, request.Source, game);
+        Assert.True(issues.Count == 0, string.Join("; ", issues.Select(i => i.Message)));
+    }
+
+    /// <summary>
+    /// The other way round: an earring's atr_ev_ tags become a top's atr_tv_ tags, in every model the
+    /// mod ships. An old version 5 model is renamed too: the names are equally long, so its string
+    /// table is edited in place. A top switches all ten suffixes itself, so Penumbra is not needed.
+    /// </summary>
+    private static void AccessoryToGearPartTags()
+    {
+        using var mod = new TempDir();
+        const string root = "chara/accessory/a0050";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Earring",
+             "DefaultData":{"Files":{
+              "{{{root}}}/model/c0201a0050_ear.mdl":"ear.mdl",
+              "{{{root}}}/material/v0001/mt_c0201a0050_ear_a.mtrl":"ear.mtrl"}},
+             "Groups":[
+              {"Type":"Imc","Id":"{{{G2}}}","Name":"Parts",
+               "Identifier":{"PrimaryId":50,"SecondaryId":0,"Variant":1,"ObjectType":"Accessory","EquipSlot":"Ears","BodySlot":"Unknown"},
+               "DefaultEntry":{"MaterialId":1,"DecalId":0,"VfxId":0,"MaterialAnimationId":0,"AttributeMask":1,"SoundId":0},
+               "Options":[{"Id":"{{{O1}}}","Name":"Chain","AttributeMask":2}]},
+              {"Type":"Single","Id":"{{{G3}}}","Name":"Men","Options":[{"Id":"{{{O2}}}","Name":"On","Files":{
+               "{{{root}}}/model/c0101a0050_ear.mdl":"ear_m.mdl"}}]}]}
+            """);
+        string[] tags = ["atr_ev_a", "atr_ev_b", "atr_rv_a", "atr_ear"];
+        uint[] masks = [1, 2, 4 | 1, 8];
+        mod.File("ear.mdl", TestAssets.CreateMultiMeshMdl(["/mt_c0201a0050_ear_a.mtrl"], partsPerMesh: tags.Length,
+            attributes: tags, partMasks: masks));
+        var old = TestAssets.CreateMultiMeshMdl(["/mt_c0201a0050_ear_a.mtrl"], partsPerMesh: tags.Length,
+            attributes: tags, partMasks: masks);
+        BinaryPrimitives.WriteUInt32LittleEndian(old, MdlFile.Version5);
+        mod.File("ear_m.mdl", old);
+        mod.File("ear.mtrl", Mtrl("chara/common/texture/white.tex"));
+        var game = StandardGame();
+        game.Files[$"{root}/a0050.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+        game.Files["chara/common/texture/white.tex"] = [1];
+
+        var request = new GearConversionRequest(new GearItem(GearSlot.Ears, 50, 1), new GearItem(GearSlot.Body, 300, 1),
+            ConversionOutputMode.NewMod);
+        var plan = new GearConversionPlanner(game).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.True(plan.Diagnostics.All(d => d.Code is not ("accessory_part_tags" or "part_tags_not_merged")),
+            string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { "atr_ev_a>atr_tv_a", "atr_ev_b>atr_tv_b", "atr_ev_a>atr_tv_a", "atr_ev_b>atr_tv_b" },
+            plan.Changes.Where(c => c.Category == "Part tag").Select(c => $"{c.From}>{c.To}").ToArray());
+
+        using var output = new TempDir(create: false);
+        GearConversionExecutor.WriteNewMod(plan, mod.Path, output.Path, "Earring Top");
+        var converted = PenumbraMod.Load(output.Path);
+        var model = MdlFile.Read(File.ReadAllBytes(Path.Combine(output.Path, GamePath.ToLocal(converted.Default.FileEntries()
+            .Single(e => GamePath.Normalize(e.Key) == "chara/equipment/e0300/model/c0201e0300_top.mdl").Local))));
+        Assert.Equal(new[] { "atr_tv_a", "atr_tv_b", "atr_rv_a", "atr_ear" }, model.Attributes.ToArray());
+        Assert.Equal(masks, model.Submeshes.Select(s => s.AttributeMask).ToArray());
+
+        var oldModel = File.ReadAllBytes(Path.Combine(output.Path, GamePath.ToLocal(converted.Groups.Single(g => g.Name == "Men")
+            .Containers.Single().FileEntries()
+            .Single(e => GamePath.Normalize(e.Key) == "chara/equipment/e0300/model/c0101e0300_top.mdl").Local)));
+        Assert.Equal(MdlFile.Version5, BinaryPrimitives.ReadUInt32LittleEndian(oldModel));
+        Assert.Equal(old.Length, oldModel.Length);
+        Assert.Equal(new[] { "atr_tv_a", "atr_tv_b", "atr_rv_a", "atr_ear" },
+            ResourceReferences.ReadMdlStrings(oldModel).Where(s => s.StartsWith("atr", StringComparison.Ordinal)).ToArray());
+
+        var parts = converted.Groups.Single(g => g.IsImc).Node;
+        Assert.Equal("Equipment|Body|300", $"{parts["Identifier"]!["ObjectType"]}|{parts["Identifier"]!["EquipSlot"]}|{parts["Identifier"]!["PrimaryId"]}");
+        Assert.Equal(1, parts["DefaultEntry"]!["AttributeMask"]!.GetValue<int>());
+        Assert.Equal(2, parts["Options"]![0]!["AttributeMask"]!.GetValue<int>());
+        var issues = GearConversionVerifier.Verify(output.Path, request.Target, request.Source, game);
+        Assert.True(issues.Count == 0, string.Join("; ", issues.Select(i => i.Message)));
+    }
+
+    /// <summary>
+    /// A model with the target slot's tag beside the source's ends up with it once: every part that
+    /// had either carries it, so the IMC bit switches all of them. Only a rebuilt model can merge
+    /// two attributes, which a version 5 one cannot be; it keeps that tag and the plan says so.
+    /// </summary>
+    private static void PartTagMerge()
+    {
+        using var mod = new TempDir();
+        const string root = "chara/equipment/e0100";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Both",
+             "DefaultData":{"Files":{
+              "{{{root}}}/model/c0201e0100_top.mdl":"top.mdl",
+              "{{{root}}}/material/v0001/mt_c0201e0100_top_a.mtrl":"top.mtrl"}},
+             "Groups":[{"Type":"Single","Id":"{{{G2}}}","Name":"Men","Options":[{"Id":"{{{O1}}}","Name":"On","Files":{
+              "{{{root}}}/model/c0101e0100_top.mdl":"top_m.mdl"}}]}]}
+            """);
+        string[] tags = ["atr_tv_a", "atr_nv_a", "atr_tv_b"];
+        uint[] masks = [1, 2, 4, 1 | 2 | 4];
+        var current = TestAssets.CreateMultiMeshMdl(["/mt_c0201e0100_top_a.mtrl"], partsPerMesh: masks.Length,
+            attributes: tags, partMasks: masks);
+        mod.File("top.mdl", current);
+        var old = TestAssets.CreateMultiMeshMdl(["/mt_c0201e0100_top_a.mtrl"], partsPerMesh: masks.Length,
+            attributes: tags, partMasks: masks);
+        BinaryPrimitives.WriteUInt32LittleEndian(old, MdlFile.Version5);
+        mod.File("top_m.mdl", old);
+        mod.File("top.mtrl", Mtrl("chara/common/texture/white.tex"));
+        var game = StandardGame();
+        game.Files["chara/accessory/a0060/a0060.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+        game.Files["chara/common/texture/white.tex"] = [1];
+
+        var request = new GearConversionRequest(new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Neck, 60, 1),
+            ConversionOutputMode.NewMod);
+        var plan = new GearConversionPlanner(game).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        var renames = plan.Changes.Where(c => c.Category == "Part tag").Select(c => $"{c.From}>{c.To}")
+            .Order(StringComparer.Ordinal).ToArray();
+        Assert.Equal(new[] { "atr_tv_a>atr_nv_a (merged with the atr_nv_a the model already had)", "atr_tv_b>atr_nv_b",
+            "atr_tv_b>atr_nv_b" }, renames);
+        var kept = plan.Diagnostics.Single(d => d.Code == "part_tags_not_merged").Message;
+        Assert.True(kept.Contains("top_m.mdl") && kept.Contains("atr_tv_a") && kept.Contains("version 5"), kept);
+        Assert.True(plan.Diagnostics.Single(d => d.Code == "accessory_part_tags").Message.Contains("atr_nv_b"));
+
+        using var output = new TempDir(create: false);
+        GearConversionExecutor.WriteNewMod(plan, mod.Path, output.Path, "Both Necklace");
+        var converted = PenumbraMod.Load(output.Path);
+        var merged = MdlFile.Read(File.ReadAllBytes(Path.Combine(output.Path, GamePath.ToLocal(converted.Default.FileEntries()
+            .Single(e => GamePath.Normalize(e.Key) == "chara/accessory/a0060/model/c0201a0060_nek.mdl").Local))));
+        Assert.Equal(new[] { "atr_nv_a", "atr_nv_b" }, merged.Attributes.ToArray());
+        Assert.Equal(new uint[] { 1, 1, 2, 3 }, merged.Submeshes.Select(s => s.AttributeMask).ToArray());
+        Assert.Equal(1, merged.Strings.Count(s => s == "atr_nv_a"));
+        Assert.True(merged.Strings.All(s => !s.StartsWith("atr_tv_", StringComparison.Ordinal)), string.Join(", ", merged.Strings));
+        Assert.True(merged.Write().AsSpan(merged.DataOffset).SequenceEqual(current.AsSpan(MdlFile.Read(current).DataOffset)),
+            "vertex and index data are unchanged");
+
+        var oldModel = File.ReadAllBytes(Path.Combine(output.Path, GamePath.ToLocal(converted.Groups.Single()
+            .Containers.Single().FileEntries()
+            .Single(e => GamePath.Normalize(e.Key) == "chara/accessory/a0060/model/c0101a0060_nek.mdl").Local)));
+        Assert.Equal(new[] { "atr_tv_a", "atr_nv_a", "atr_nv_b" },
+            ResourceReferences.ReadMdlStrings(oldModel).Where(s => s.StartsWith("atr", StringComparison.Ordinal)).ToArray());
     }
 
     private static void EqdpForRaceModels()

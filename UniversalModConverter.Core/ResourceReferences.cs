@@ -77,6 +77,9 @@ public static partial class ResourceReferences
             .ToArray();
     }
 
+    /// <summary>Every string of an MDL's (v5 or v6) string table, in order: attribute, bone, material and shape names.</summary>
+    public static IReadOnlyList<string> ReadMdlStrings(byte[] data) => ReadMdlStringTable(data).Strings;
+
     /// <summary>
     /// Rewrites MDL material names for MDL v5 and v6. Same-length edits are written in place.
     /// Length changes rebuild the string table: each replaced name takes the place of the name it

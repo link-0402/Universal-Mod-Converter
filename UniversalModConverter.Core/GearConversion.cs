@@ -135,6 +135,9 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         private readonly SortedSet<int> _optionMaterialIds = [];
         private readonly SortedDictionary<ushort, ImcEntry> _targetImc = new();
 
+        /// <summary>Part tags past <c>_a</c> that a gear model brings to an accessory, which only Penumbra switches.</summary>
+        private readonly SortedSet<string> _accessoryTags = new(StringComparer.Ordinal);
+
         public Session(IGameFileProvider game, ModPlanContext context, GearConversionRequest request)
         {
             _game = game;
@@ -540,6 +543,12 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                 if (_generated.TryGetValue(path, out var generated))
                     Rewrite(path, $"game file {path}", path, generated);
             }
+
+            if (_accessoryTags.Count > 0)
+                Warn("accessory_part_tags",
+                    $"The converted model has parts tagged {string.Join(", ", _accessoryTags)}. On an accessory the game " +
+                    "itself only switches parts tagged _a; the others are switched by Penumbra through its \"Enable Custom " +
+                    "Shape and Attribute Support\" setting (under Advanced in its settings, on by default).");
             return result;
 
             void Rewrite(string id, string origin, string path, byte[] bytes)
@@ -556,8 +565,11 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                     var output = replacements.Count > 0 ? ResourceReferences.Rewrite(path, bytes, replacements) : bytes;
                     foreach (var (from, to) in replacements)
                         _plan.Changes.Add(new GearPlanChange("Reference", origin, from, to));
-                    if (_tgt.IsAccessory && path.EndsWith(".mdl", StringComparison.Ordinal))
-                        output = ForAccessory(origin, path, output);
+                    if (path.EndsWith(".mdl", StringComparison.Ordinal))
+                    {
+                        output = RetagParts(origin, output);
+                        if (_tgt.IsAccessory) output = ForAccessory(origin, path, output);
+                    }
                     if (!ReferenceEquals(output, bytes)) result[id] = output;
                 }
                 catch (Exception ex)
@@ -565,6 +577,57 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                     Block("rewrite_failed", $"{origin} cannot be rewritten: {ex.Message}");
                 }
             }
+        }
+
+        /// <summary>
+        /// The game shows or hides a model's parts by tags named for the slot it is worn in
+        /// (<c>atr_tv_a</c> on a top, <c>atr_nv_a</c> on a necklace), from the same bit of that slot's
+        /// IMC attribute mask. A model that changes slots keeps its toggles only when its tags change
+        /// family with it, as Penumbra's item swap does; the suffix stays, so the IMC entries and
+        /// groups carried over bit for bit still line up.
+        /// </summary>
+        private byte[] RetagParts(string origin, byte[] data)
+        {
+            var strings = ResourceReferences.ReadMdlStrings(data);
+            var renames = PartTags.Renames(strings, _src.Slot, _tgt.Slot);
+            if (renames.Count == 0) return data;
+
+            // Both names are equally long, so the string table is edited in place, in a model of any
+            // version. Only a model that already has the new name too needs rebuilding, to merge them.
+            var clashes = renames.Where(r => strings.Contains(r.Value)).Select(r => r.Key).ToList();
+            IReadOnlyList<string> merged = [];
+            byte[] output;
+            if (clashes.Count == 0) output = ResourceReferences.RewriteMdlStrings(data, renames);
+            else
+            {
+                try
+                {
+                    var model = MdlFile.Read(data);
+                    merged = model.RenameAttributes(renames);
+                    output = model.WriteRebuilt();
+                }
+                catch (Exception ex) when (ex is UnsupportedMdlVersionException or InvalidDataException)
+                {
+                    var reason = ex is UnsupportedMdlVersionException { Version: MdlFile.Version5 }
+                        ? "as an MDL version 5 model it cannot be edited here"
+                        : $"it cannot be rebuilt ({ex.Message})";
+                    Warn("part_tags_not_merged",
+                        $"{origin} has parts tagged {string.Join(", ", clashes)} as well as parts tagged " +
+                        $"{string.Join(", ", clashes.Select(c => renames[c]))}. Those would have to be merged, but {reason}, " +
+                        $"so the parts tagged {string.Join(", ", clashes)} keep their old tags and the {_tgt.Slot.Label()} cannot " +
+                        "switch them. Re-export the model with a current tool, then convert it again.");
+                    foreach (var clash in clashes) renames.Remove(clash);
+                    if (renames.Count == 0) return data;
+                    output = ResourceReferences.RewriteMdlStrings(data, renames);
+                }
+            }
+
+            foreach (var (from, to) in renames)
+                _plan.Changes.Add(new GearPlanChange("Part tag", origin, from,
+                    merged.Contains(to) ? $"{to} (merged with the {to} the model already had)" : to));
+            if (_tgt.IsAccessory && !_src.IsAccessory)
+                _accessoryTags.UnionWith(renames.Values.Where(t => !t.EndsWith("_a", StringComparison.Ordinal)));
+            return output;
         }
 
         /// <summary>

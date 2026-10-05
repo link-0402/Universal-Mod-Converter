@@ -144,9 +144,13 @@ internal static class TestAssets
     /// <summary>
     /// An MDL v6 with one LOD and one single-triangle mesh per material (in order). Mesh 0's
     /// submesh carries the attribute "atr_test"; <paramref name="shapeMesh"/> gets a shape.
+    /// <paramref name="attributes"/> replaces "atr_test", and <paramref name="partMasks"/> gives
+    /// every part (submesh, mesh by mesh) its own attribute mask.
     /// </summary>
-    public static byte[] CreateMultiMeshMdl(string[] materials, int? shapeMesh = null, int partsPerMesh = 1)
+    public static byte[] CreateMultiMeshMdl(string[] materials, int? shapeMesh = null, int partsPerMesh = 1,
+        string[]? attributes = null, uint[]? partMasks = null)
     {
+        attributes ??= ["atr_test"];
         var meshCount = materials.Length;
         var parts = partsPerMesh;
         var indexCount = meshCount * parts * 3;
@@ -165,10 +169,10 @@ internal static class TestAssets
             writer.Write(new byte[136 - 6 * 8]);
         }
 
-        // Strings: bone, materials, attribute, optional shape name.
+        // Strings: bone, materials, attributes, optional shape name.
         var strings = new List<string> { "j_root" };
         strings.AddRange(materials);
-        strings.Add("atr_test");
+        strings.AddRange(attributes);
         if (hasShape) strings.Add("shp_test");
         var offsets = new List<uint>();
         using (var text = new MemoryStream())
@@ -184,7 +188,7 @@ internal static class TestAssets
         uint Offset(string value) => offsets[strings.IndexOf(value)];
 
         writer.Write(1f);
-        writer.Write((ushort)meshCount); writer.Write((ushort)1); writer.Write((ushort)(meshCount * parts));
+        writer.Write((ushort)meshCount); writer.Write((ushort)attributes.Length); writer.Write((ushort)(meshCount * parts));
         writer.Write((ushort)meshCount); writer.Write((ushort)1); writer.Write((ushort)1);
         writer.Write((ushort)(hasShape ? 1 : 0)); writer.Write((ushort)(hasShape ? 1 : 0)); writer.Write((ushort)(hasShape ? 1 : 0));
         writer.Write((byte)1); writer.Write((byte)0); writer.Write((ushort)0);
@@ -205,11 +209,12 @@ internal static class TestAssets
             writer.Write((uint)(m * vertexSize)); writer.Write((uint)(m * vertexSize + vertexStride0)); writer.Write(0u);
             writer.Write((byte)vertexStride0); writer.Write((byte)vertexStride1); writer.Write((byte)0); writer.Write((byte)2);
         }
-        writer.Write(Offset("atr_test"));
+        foreach (var attribute in attributes) writer.Write(Offset(attribute));
         for (var m = 0; m < meshCount; m++)
         for (var p = 0; p < parts; p++)
         {
-            writer.Write((uint)((m * parts + p) * 3)); writer.Write(3u); writer.Write(m == 0 && p == 0 ? 1u : 0u);
+            writer.Write((uint)((m * parts + p) * 3)); writer.Write(3u);
+            writer.Write(partMasks?[m * parts + p] ?? (m == 0 && p == 0 ? 1u : 0u));
             writer.Write((ushort)0); writer.Write((ushort)1);
         }
         foreach (var material in materials) writer.Write(Offset(material));
