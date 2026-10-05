@@ -291,7 +291,9 @@ internal sealed class ConversionCards(ConverterSession session)
         var hide = session.HideModdedTargets;
         if (Widgets.SectionTitle("To", FontAwesomeIcon.Bullseye, "Hide modded##HideModded", ref hide,
                 "Leave out targets another mod already changes in your collection (the ones shown in red). " +
-                "Whatever is selected or ticked always stays."))
+                "Whatever is selected or ticked always stays. An idle's slots and the races to retarget to are left " +
+                "out only for what the mod itself has, so ticking in one of those lists never hides anything in the " +
+                "other; other conflicts there still show in red."))
             session.SetHideModdedTargets(hide);
         if (session.Source is not { } source)
         {
