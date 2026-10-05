@@ -24,6 +24,11 @@ internal static class AnimationTests
         ("Adding slots to the mod keeps the original, and each option its own version", IdleSlotsKeepOriginal),
         ("A swap retargets on the way: the target races get it in every slot", IdleSlotsRetargeted),
         ("An expression where the idle is gets a group that switches it for every race", IdleExpressionAtSource),
+        ("Several slots become the options of a group per race, in slot order, starting on \"-\"", IdleSlotGroups),
+        ("Slot groups give every race written its own options, only where the game has its file", IdleSlotGroupsRetargeted),
+        ("Slot groups added to this mod take the original out of its option too", IdleSlotGroupsAdded),
+        ("Slot groups hold the version of the idle chosen among several options", IdleSlotGroupsVersions),
+        ("Slot groups count the idle's own slot while it stays there, as adding to the mod does", IdleSlotGroupsCountTheOwnSlot),
         ("Swapped files follow game-path layouts and reuse unchanged files", SwapLocalNames),
         ("A swap writes nothing for a race without the destination of its own", SwapSkipsRaceWithoutFile),
         ("A swap that would write nothing is refused instead of removing the mod's animation", SwapWritingNothingIsRefused),
@@ -980,6 +985,232 @@ internal static class AnimationTests
         Assert.True(faced.Values.All(local => Faces(local).SequenceEqual(["cfxf_smile"])), "the group plays the face for both races");
         Assert.True(!string.Equals(GamePath.NormalizeLocal(faced[lala3]), GamePath.NormalizeLocal(files[lala3]), StringComparison.Ordinal),
             "the Lalafell idle with the face is a file of its own");
+    }
+
+    /// <summary>The slots of a slot-group request: the default idle, the idle's own slot 3 (ticked) and slot 5.</summary>
+    private static AnimationConversionRequest SlotGroupRequest(ConversionOutputMode mode)
+        => SlotRequest(mode, ("Standing idle (default)", Idle0, null), ("Standing idle 3", Loop3, Start3), ("Standing idle 5", Loop5, Start5)) with
+        {
+            SlotGroupName = "Standing idle",
+            StaysAtSource = true,
+        };
+
+    /// <summary>
+    /// Slot groups are made when the idle plays in more than one slot once converted. Its own
+    /// slot counts while ticked, and always when adding to the mod, which keeps it there; one
+    /// other slot alone is a plain move otherwise.
+    /// </summary>
+    private static void IdleSlotGroupsCountTheOwnSlot()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"anim\\loop.pap","{{{Start3}}}":"anim\\start.pap"}}""");
+        mod.File("anim/loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        mod.File("anim/start.pap", BuildPap([("cbem_pose03_1st", 0)]));
+        // As the window asks for slot 5 alone: its own slot is among the variants, unticked.
+        var toFive = SlotRequest(ConversionOutputMode.InPlace, ("Standing idle 3", Loop3, Start3), ("Standing idle 5", Loop5, Start5)) with
+        {
+            SlotGroupName = "Standing idle",
+        };
+        Assert.True(!toFive.InSlotGroups, "one slot in place is a move");
+        Assert.True(toFive.ForMode(ConversionOutputMode.AddToMod).InSlotGroups, "added to the mod, its own slot plays too");
+
+        var moved = Planner(Game()).Plan(mod.Path, toFive);
+        Assert.True(!moved.HasBlockers, string.Join(" ", moved.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(0, moved.Result.Groups.Count);
+        Assert.Equal(new[] { Loop5, Start5 }.Order().ToArray(),
+            moved.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
+
+        var added = Planner(Game()).Plan(mod.Path, toFive.ForMode(ConversionOutputMode.AddToMod));
+        Assert.True(!added.HasBlockers, string.Join(" ", added.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(0, added.Result.Default.FileEntries().Count());
+        var options = SlotOptions(added.Result.Groups.Single());
+        Assert.Equal(new[] { "-", "Standing idle 3", "Standing idle 5" }, options.Keys.ToArray());
+        Assert.Equal(@"anim\loop.pap", options["Standing idle 3"][Loop3]);
+
+        // Two other slots in place: its own slot, unticked, is no option, and its files go.
+        var elsewhere = SlotRequest(ConversionOutputMode.InPlace,
+            ("Standing idle (default)", Idle0, null), ("Standing idle 3", Loop3, Start3), ("Standing idle 5", Loop5, Start5)) with
+        {
+            SlotGroupName = "Standing idle",
+        };
+        var away = Planner(Game()).Plan(mod.Path, elsewhere);
+        Assert.True(!away.HasBlockers, string.Join(" ", away.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { "-", "Standing idle (default)", "Standing idle 5" }, SlotOptions(away.Result.Groups.Single()).Keys.ToArray());
+        Assert.Equal(new[] { "anim/loop.pap", "anim/start.pap" }, away.Files.Where(f => f.Operation == LocalFileOperation.Delete)
+            .Select(f => f.Destination.Replace('\\', '/')).Order().ToArray());
+    }
+
+    /// <summary>A slot group's options by name, each with the game paths it maps and their files.</summary>
+    private static Dictionary<string, Dictionary<string, string>> SlotOptions(ModGroup group)
+        => group.Containers.ToDictionary(c => Json.GetString(c.Node["Name"])!,
+            c => c.FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => GamePath.NormalizeLocal(e.Local)));
+
+    /// <summary>
+    /// Ticked in several slots, an idle moves into a single-select group with "-" and an option
+    /// per slot in slot order, its own in its place, starting on "-"; its own slot reuses its
+    /// unchanged files, and the mod's containers no longer play it. A part a slot has no
+    /// counterpart for is left out of that option.
+    /// </summary>
+    private static void IdleSlotGroups()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"anim\\loop.pap","{{{Start3}}}":"anim\\start.pap","chara/other.tex":"x.tex"}}""");
+        mod.File("anim/loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        mod.File("anim/start.pap", BuildPap([("cbem_pose03_1st", 0)]));
+        mod.File("x.tex", [1]);
+
+        var plan = Planner(Game()).Plan(mod.Path, SlotGroupRequest(ConversionOutputMode.InPlace));
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { "chara/other.tex" }, plan.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
+
+        var group = plan.Result.Groups.Single();
+        Assert.Equal("Standing idle (Midlander Male)", group.Name);
+        Assert.Equal("Single", group.Type);
+        Assert.Equal(0, Json.GetInt(group.Node["DefaultSettings"], -1));
+        var options = SlotOptions(group);
+        Assert.Equal(new[] { "-", "Standing idle (default)", "Standing idle 3", "Standing idle 5" }, options.Keys.ToArray());
+        Assert.Equal(0, options["-"].Count);
+        Assert.Equal(new[] { Idle0 }, options["Standing idle (default)"].Keys.ToArray());
+        Assert.Equal(new[] { Loop3, Start3 }.Order().ToArray(), options["Standing idle 3"].Keys.Order().ToArray());
+        Assert.Equal(@"anim\loop.pap", options["Standing idle 3"][Loop3]);
+        Assert.Equal(new[] { Loop5, Start5 }.Order().ToArray(), options["Standing idle 5"].Keys.Order().ToArray());
+        string Played(string local) => new PapFile(plan.Files.Single(f => f.Operation == LocalFileOperation.Write &&
+            GamePath.NormalizeLocal(f.Destination) == local).Content!).Entries.Single().Name;
+        Assert.Equal("cbnm_id0", Played(options["Standing idle (default)"][Idle0]));
+        Assert.Equal("cbem_pose05_1st", Played(options["Standing idle 5"][Start5]));
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "unpaired" && d.Message.Contains("left out there")),
+            "the default idle has no start, so the start is left out of that option");
+        Assert.True(plan.Files.All(f => f.Operation != LocalFileOperation.Delete), "the idle's own files play in its own option");
+
+        GearConversionExecutor.ApplyInPlace(plan, mod.Path);
+        Assert.Equal(0, AnimationConversionVerifier.Verify(mod.Path, plan).Count);
+    }
+
+    /// <summary>
+    /// Retargeting into slot groups, every race written gets a group of its own, holding the
+    /// slots the game has a file of its own for that race in; a new mod holds nothing else.
+    /// </summary>
+    private static void IdleSlotGroupsRetargeted()
+    {
+        using var mod = new TempDir();
+        using var output = new TempDir(create: false);
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Identifier":"{{{Guid.NewGuid()}}}","Name":"Idle",
+             "DefaultData":{"Files":{"{{{Loop3}}}":"c0101\\loop.pap","chara/other.tex":"x.tex"} } }
+            """);
+        mod.File("c0101/loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
+        var game = Game();
+        game.Files[PapPath.BaseSkeletonPath(101)] = [1];
+        game.Files[PapPath.BaseSkeletonPath(1101)] = [2];
+        var lala3 = Loop3.Replace("c0101", "c1101");
+        var lala5 = Loop5.Replace("c0101", "c1101");
+        game.Files[lala3] = BuildPap([("cbem_pose03_1lp", 0)], model: 1101);
+        game.Files[lala5] = BuildPap([("cbem_pose05_1lp", 0)], model: 1101);
+        var request = SlotGroupRequest(ConversionOutputMode.NewMod) with { SourceRace = 101, TargetRaces = [1101] };
+
+        var plan = new AnimationConversionPlanner(game, _ => null, new FakeRetargeter()).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        GearConversionExecutor.WriteNewMod(plan, mod.Path, output.Path, "Idle (slots)");
+
+        var result = PenumbraMod.Load(output.Path);
+        Assert.Equal(0, result.Default.FileEntries().Count());
+        Assert.Equal(new[] { "Standing idle (Midlander Male)", "Standing idle (Lalafell Male)" }, result.Groups.Select(g => g.Name).ToArray());
+        Assert.Equal(new[] { "-", "Standing idle (default)", "Standing idle 3", "Standing idle 5" }, SlotOptions(result.Groups[0]).Keys.ToArray());
+        var lalafell = SlotOptions(result.Groups[1]);
+        Assert.Equal(new[] { "-", "Standing idle 3", "Standing idle 5" }, lalafell.Keys.ToArray());
+        Assert.Equal(new[] { lala3 }, lalafell["Standing idle 3"].Keys.ToArray());
+        Assert.Equal(new[] { lala5 }, lalafell["Standing idle 5"].Keys.ToArray());
+        Assert.True(result.Groups.All(g => Json.GetInt(g.Node["DefaultSettings"], -1) == 0), "every group starts on \"-\"");
+        var rebuilt = new PapFile(File.ReadAllBytes(Path.Combine(output.Path, lalafell["Standing idle 5"][lala5])));
+        Assert.Equal((ushort)1101, rebuilt.ModelId);
+        Assert.Equal("cbem_pose05_1lp", rebuilt.Entries.Single().Name);
+        Assert.Equal(0, AnimationConversionVerifier.Verify(output.Path, plan).Count);
+
+        // Left out of the new mod, the source race gets no group.
+        var without = new AnimationConversionPlanner(game, _ => null, new FakeRetargeter()).Plan(mod.Path, request with { IncludeSourceRace = false });
+        Assert.True(!without.HasBlockers, string.Join(" ", without.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { "Standing idle (Lalafell Male)" }, without.Result.Groups.Select(g => g.Name).ToArray());
+
+        // Converting in place, the source race keeps a group of its own, whatever the request says.
+        var moved = new AnimationConversionPlanner(game, _ => null, new FakeRetargeter())
+            .Plan(mod.Path, request with { Mode = ConversionOutputMode.InPlace, IncludeSourceRace = false });
+        Assert.True(!moved.HasBlockers, string.Join(" ", moved.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { "Standing idle (Midlander Male)", "Standing idle (Lalafell Male)" }, moved.Result.Groups.Select(g => g.Name).ToArray());
+        Assert.Equal(@"c0101\loop.pap", SlotOptions(moved.Result.Groups[0])["Standing idle 3"][Loop3]);
+        Assert.Equal(new[] { "chara/other.tex" }, moved.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
+    }
+
+    /// <summary>
+    /// Added to this mod, the idle leaves its own option for the groups all the same: its files
+    /// become the option for its own slot, for its own races and the target races alike, and an
+    /// expression goes into every option.
+    /// </summary>
+    private static void IdleSlotGroupsAdded()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"c0101\\loop.pap"}}""");
+        mod.File("c0101/loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
+        var game = Game();
+        game.Files["chara/human/c0101/animation/f0002/nonresident/smile.pap"] = BuildPap([("cfxf_smile", 1)]);
+        game.Files[PapPath.BaseSkeletonPath(101)] = [1];
+        game.Files[PapPath.BaseSkeletonPath(1101)] = [2];
+        var lala3 = Loop3.Replace("c0101", "c1101");
+        game.Files[lala3] = BuildPap([("cbem_pose03_1lp", 0)], model: 1101);
+        var request = SlotGroupRequest(ConversionOutputMode.AddToMod) with { KeepOriginal = true, SourceRace = 101, TargetRaces = [1101] };
+
+        var plan = new AnimationConversionPlanner(game, race => race == 1101 ? (ushort)101 : null, new FakeRetargeter()).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(0, plan.Result.Default.FileEntries().Count());
+        var midlander = plan.Result.Groups.Single(g => g.Name == "Standing idle (Midlander Male)");
+        var options = SlotOptions(midlander);
+        Assert.Equal(new[] { "-", "Standing idle (default)", "Standing idle 3", "Standing idle 5" }, options.Keys.ToArray());
+        Assert.Equal(@"c0101\loop.pap", options["Standing idle 3"][Loop3]);
+        Assert.Equal(0, Json.GetInt(midlander.Node["DefaultSettings"], -1));
+        var lalafell = plan.Result.Groups.Single(g => g.Name == "Standing idle (Lalafell Male)");
+        Assert.Equal(new[] { "-", "Standing idle 3" }, SlotOptions(lalafell).Keys.ToArray());
+        Assert.Equal(0, Json.GetInt(lalafell.Node["DefaultSettings"], -1));
+        Assert.True(plan.Files.All(f => f.Operation != LocalFileOperation.Delete), "the original file plays in its own slot's option");
+        GearConversionExecutor.ApplyInPlace(plan, mod.Path);
+        Assert.Equal(0, AnimationConversionVerifier.Verify(mod.Path, plan).Count);
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"c0101\\loop.pap"}}""");
+
+        var faced = new AnimationConversionPlanner(game, race => race == 1101 ? (ushort)101 : null, new FakeRetargeter())
+            .Plan(mod.Path, request with { Expression = new ExpressionDonor("/Smile", Pose: "smile") });
+        Assert.True(!faced.HasBlockers, string.Join(" ", faced.Diagnostics.Select(d => d.Message)));
+        Assert.True(faced.Result.Groups.All(g => g.Name != AnimationConversionPlanner.ExpressionGroupName), "the options carry the face");
+        var ownGroup = faced.Result.Groups.Single(g => g.Name == "Standing idle (Midlander Male)");
+        var own = SlotOptions(ownGroup);
+        Assert.Equal(new[] { "-", "Standing idle (default)", "Standing idle 3", "Standing idle 5" }, own.Keys.ToArray());
+        Assert.Equal(0, Json.GetInt(ownGroup.Node["DefaultSettings"], -1));
+        var file = faced.Files.Single(f => f.Operation == LocalFileOperation.Write &&
+                                           GamePath.NormalizeLocal(f.Destination) == own["Standing idle 3"][Loop3]);
+        Assert.Equal(["cfxf_smile"], TmbTimeline.Parse(new PapFile(file.Content!).Timeline(0)).Faces);
+    }
+
+    /// <summary>
+    /// One group holds one file per game path: where options of the mod each have their own
+    /// version, the plan asks which one, then holds it, and says the others are left out.
+    /// </summary>
+    private static void IdleSlotGroupsVersions()
+    {
+        using var mod = new TempDir();
+        Definition(mod, """{"Files":{}}""",
+            $$$"""[{"Name":"Style","Type":"Single","Options":[{"Name":"A","Files":{"{{{Loop3}}}":"a.pap"} },{"Name":"B","Files":{"{{{Loop3}}}":"b.pap"} } ] } ]""");
+        mod.File("a.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        mod.File("b.pap", BuildPap([("cbem_pose03_1lp", 0)], havokSize: 24));
+        var request = SlotGroupRequest(ConversionOutputMode.InPlace);
+
+        var asks = Planner(Game()).Plan(mod.Path, request);
+        Assert.True(asks.Diagnostics.Any(d => d.IsBlocker && d.Code == "several_sources"), "the plan asks which version to use");
+
+        var b = PenumbraMod.Load(mod.Path).Groups.Single().Containers[1].Address;
+        var plan = Planner(Game()).Plan(mod.Path, request with { SourceContainer = b });
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "versions_left_out" && d.Message.Contains("A'")), "the version left out is named");
+        var style = plan.Result.Groups.Single(g => g.Name == "Style");
+        Assert.True(style.Containers.All(c => c.FileEntries().All(e => GamePath.Normalize(e.Key) != Loop3)), "the options no longer play it");
+        Assert.Equal("b.pap", SlotOptions(plan.Result.Groups.Single(g => g.Name == "Standing idle (Midlander Male)"))["Standing idle 3"][Loop3]);
+        Assert.True(plan.Files.Any(f => f.Operation == LocalFileOperation.Delete && f.Destination == "a.pap"), "the unused version is removed");
     }
 
     private static void SwapSkipsRaceWithoutFile()

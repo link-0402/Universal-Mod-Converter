@@ -53,14 +53,15 @@ public sealed partial class ConverterSession
     }
 
     /// <summary>
-    /// Whether a queued expression, attached where the animation is, still needs the version its
-    /// option group uses: it is added to this mod, several options have their own version of the
-    /// animation, and none was chosen when it was added to the plan (it was then going into a new
-    /// mod or in place).
+    /// Whether a queued animation still needs the version a new option group uses, which none was
+    /// chosen for when it was added to the plan because the output mode was another then: an
+    /// expression attached where the animation is, added to this mod, or an idle that now plays
+    /// in more than one slot (slot groups), while several options have their own version of it.
     /// </summary>
     public bool NeedsSourceChoice(QueuedConversion entry)
-        => entry.SourceChoices.Length > 1 && EffectiveOutputMode == ConversionOutputMode.AddToMod &&
-           entry.Task.AnimationRequest is { ExpressionAtSource: true, SourceContainer: null };
+        => entry.SourceChoices.Length > 1 && entry.Task.AnimationRequest is { SourceContainer: null } request &&
+           (EffectiveOutputMode == ConversionOutputMode.AddToMod && request.ExpressionAtSource ||
+            request.ForMode(PlanOutputMode).InSlotGroups);
 
     /// <summary>Chooses the version a queued expression's option group uses; see <see cref="NeedsSourceChoice"/>.</summary>
     public void ChooseQueueEntrySource(Guid id, AnimationProvider provider)
@@ -92,8 +93,10 @@ public sealed partial class ConverterSession
             Source        = SideOf(source),
             Target        = TargetSide(source),
             Task          = task,
-            // The output mode may still change to one that puts the expression into an option group.
-            SourceChoices = source.Animation is { HasVariants: true } animation && ExpressionAtSource(animation)
+            // The output mode may still change to one that puts the expression, or the idle's slots,
+            // into an option group.
+            SourceChoices = source.Animation is { HasVariants: true } animation &&
+                            (ExpressionAtSource(animation) || animation.Kind == AnimationSourceKind.Idle)
                 ? animation.Providers
                 : [],
         });

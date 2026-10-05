@@ -37,7 +37,10 @@ public enum PlanContents
     /// <summary>An expression attached where the animation is: "Only add an expression", or an idle kept in its slot.</summary>
     AnimationExpression = 16,
 
-    Animation = AnimationSwap | AnimationRetarget | AnimationExpression,
+    /// <summary>An idle ticked in several slots: an option per slot, in a single-select group per race.</summary>
+    AnimationSlotGroups = 32,
+
+    Animation = AnimationSwap | AnimationRetarget | AnimationExpression | AnimationSlotGroups,
 }
 
 /// <summary>The outcome of the last conversion or revert, shown above the plan.</summary>
@@ -698,7 +701,7 @@ public sealed partial class ConverterSession
                 ? source.Animation is { } animation ? SelectionContents(animation) : ContentsOf(source.Kind, null)
                 : PlanContents.None;
 
-    private static PlanContents ContentsOf(AssetKind kind, AnimationConversionRequest? request) => kind switch
+    private PlanContents ContentsOf(AssetKind kind, AnimationConversionRequest? request) => kind switch
     {
         AssetKind.Animation => AnimationContents(request),
         _ when CustomizationKinds.IsCustomization(kind) => PlanContents.Customization,

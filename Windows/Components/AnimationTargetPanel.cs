@@ -125,7 +125,21 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         ImGui.AlignTextToFramePadding();
         ImGui.TextUnformatted("Output slots");
         Widgets.Tooltip("Tick every slot the animation should play in. Its current slot keeps it only while ticked: " +
-                        "unticked, converting in place moves it away, while adding to this mod leaves it there as it is.");
+                        "unticked, converting in place moves it away, while adding to this mod leaves it there as it is.\n\n" +
+                        "Ticked in more than one slot, every race gets a single-select option group in Penumbra with an " +
+                        "option for each ticked slot, starting on \"-\", so the slot each race plays it in is chosen there. " +
+                        "The animation's own files move into those groups too, in every output mode.");
+        if (session.AnimationSlotGroups)
+        {
+            ImGui.SameLine();
+            Widgets.Badge("slot choice per race", Theme.Accent);
+            Widgets.Tooltip($"Every race gets a single-select option group, \"{ConverterSession.SlotGroupName(source)} " +
+                            $"({RaceNames.Name(source.Races.FirstOrDefault())})\" and so on, with an option for each ticked slot " +
+                            "in slot order. The animation's own files move out of the options they are in, into the option " +
+                            "for its own slot, in every output mode. Every group starts on \"-\", so the animation plays " +
+                            "nowhere until a slot is chosen in Penumbra. Tick only one slot to place the animation there " +
+                            "directly.");
+        }
 
         var missing = slots.Count(s => s.Index != source.SlotIndex && !session.CanSwapToIdleSlot(source, s));
         using var list = ImRaii.Child("##Slots", new Vector2(-1, -1), true);
@@ -253,9 +267,9 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
     }
 
     /// <summary>
-    /// The version the option group of an expression added to this mod uses, when several options
-    /// of the mod have their own: one group can hold only one file per animation. Nothing is
-    /// preselected, so the choice is always deliberate.
+    /// The version the slot groups, or the option group of an expression added to this mod, use
+    /// when several options of the mod have their own: one group can hold only one file per
+    /// animation. Nothing is preselected, so the choice is always deliberate.
     /// </summary>
     private void DrawSourceContainer(AnimationSource source)
     {
@@ -273,8 +287,15 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
                     if (ImGui.Selectable(provider.Label, provider == chosen)) session.SetAnimationSourceContainer(provider.Address);
                 }
         }
-        Widgets.Tooltip("Several options of this mod have their own version of this animation, and the new option group " +
-                        "can hold only one of them. Choose the one to use; the options themselves stay as they are.");
+        Widgets.Tooltip(!session.AnimationSlotGroups
+            ? "Several options of this mod have their own version of this animation, and the new option group can hold only " +
+              "one of them. Choose the one to use; the options themselves stay as they are."
+            : session.EffectiveOutputMode == ConversionOutputMode.AddToMod
+                ? "Several options of this mod have their own version of this animation, and the slot groups can hold only " +
+                  "one of them. Choose the one to use; the options themselves stay as they are."
+                : "Several options of this mod have their own version of this animation, and the slot groups can hold only " +
+                  "one of them. Choose the one to use: the animation leaves those options for the groups, so the other " +
+                  "versions are left out.");
     }
 
     // ── Emotes ──────────────────────────────────────────────────────────────
@@ -515,8 +536,8 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
 
     /// <summary>
     /// The source race, ticked while the output keeps its animation. Only a new mod leaves that
-    /// to the user: adding to this mod always keeps it, and converting in place always moves it
-    /// to the ticked races.
+    /// to the user: adding to this mod always keeps it, and converting in place moves it to the
+    /// ticked races, unless the idle goes into slot groups, where it keeps a group of its own.
     /// </summary>
     private void DrawSourceRace(ushort race)
     {
@@ -531,7 +552,10 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         }
         Widgets.Tooltip(mode switch
         {
-            ConversionOutputMode.AddToMod => $"{RaceNames.Describe(race)}, the race it is retargeted from. Adding to this mod always " +
+            ConversionOutputMode.InPlace when session.AnimationSlotGroups
+                                          => $"{RaceNames.Describe(race)}, the race it is retargeted from. In slot groups it keeps " +
+                                             "its animation, in a group of its own like the ticked races'.",
+            ConversionOutputMode.AddToMod =>$"{RaceNames.Describe(race)}, the race it is retargeted from. Adding to this mod always " +
                                              "keeps its animation.",
             ConversionOutputMode.InPlace when session.NewModKeepsWholeMod
                                           => $"{RaceNames.Describe(race)}, the race it is retargeted from. A new mod copying the " +

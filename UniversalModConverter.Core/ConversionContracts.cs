@@ -65,6 +65,14 @@ public static class ConversionOutputModes
         ConversionOutputMode.InPlace  => false,
         _                             => asked,
     };
+
+    /// <summary>
+    /// <see cref="KeepsSourceRace(ConversionOutputMode, bool)"/> for an idle that may go into slot
+    /// groups (an option group per race): there the source race keeps a group of its own in place
+    /// too, holding its idle where it was, so only a new mod that leaves it out drops it.
+    /// </summary>
+    public static bool KeepsSourceRace(this ConversionOutputMode mode, bool asked, bool slotGroups)
+        => slotGroups ? !mode.IsNewMod() || asked : mode.KeepsSourceRace(asked);
 }
 
 /// <summary>What kinds of files a mod replaces under a root, for telling the user what a conversion touches.</summary>
