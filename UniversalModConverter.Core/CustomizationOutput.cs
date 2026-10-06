@@ -20,7 +20,7 @@ public static class CustomizationOutput
     {
         var mod = PenumbraMod.Load(directory);
         var before = mod.Clone();
-        var kept = WithDependencies(directory, mod, keys);
+        var kept = WithDependencies(directory, mod, keys.Concat(ExtraSkeletonKeys(mod, target)).ToList());
         var removed = 0;
         foreach (var container in mod.Containers)
         {
@@ -69,7 +69,7 @@ public static class CustomizationOutput
     /// textures from the source's paths, in every option that supplies them. A model's short
     /// material name (/mt_….mtrl) matches the redirect ending in it.
     /// </summary>
-    private static HashSet<string> WithDependencies(string directory, PenumbraMod mod, IReadOnlyCollection<string> keys)
+    internal static HashSet<string> WithDependencies(string directory, PenumbraMod mod, IReadOnlyCollection<string> keys)
     {
         var files = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         var swaps = new Dictionary<string, List<string>>(StringComparer.Ordinal);
@@ -120,6 +120,31 @@ public static class CustomizationOutput
             if (!map.TryGetValue(key, out var list)) map[key] = list = [];
             list.Add(value);
         }
+    }
+
+    /// <summary>
+    /// The mod's redirects into the extra skeletons that EST entries about <paramref name="target"/>
+    /// name. The game loads those by ID, so no file references them.
+    /// </summary>
+    private static IEnumerable<string> ExtraSkeletonKeys(PenumbraMod mod, CustomizationPathEndpoint target)
+    {
+        var (folder, prefix) = target.Kind switch
+        {
+            AssetKind.Hair => ("hair", 'h'),
+            AssetKind.Face => ("face", 'f'),
+            _ => (null, ' '),
+        };
+        if (folder == null) return [];
+        var skeletons = mod.Containers.SelectMany(c => c.Manipulations?.OfType<JsonObject>() ?? [])
+            .Where(m => Json.StringEquals(m["Type"], "Est") && IsAbout(m, target))
+            .Select(m => Json.TryGetInt(m["Manipulation"]?["Entry"], out var id) ? id : 0)
+            .Where(id => id != 0)
+            .Select(id => $"chara/human/c{target.GenderRace:D4}/skeleton/{folder}/{prefix}{id:D4}/")
+            .ToHashSet(StringComparer.Ordinal);
+        return mod.Containers
+            .SelectMany(c => c.FileEntries().Select(e => e.Key).Concat(c.SwapEntries().Select(e => e.Key)))
+            .Select(GamePath.Normalize)
+            .Where(key => skeletons.Any(s => key.StartsWith(s, StringComparison.Ordinal)));
     }
 
     private static int Filter(JsonObject? redirects, HashSet<string> kept)

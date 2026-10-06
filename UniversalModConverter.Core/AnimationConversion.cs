@@ -365,6 +365,8 @@ public sealed class AnimationConversionPlanner(
                 _context.AddFinalizer(_ => DeleteOrphans(
                     providers.Select(p => p.Local).Concat(_movedTimelines).Concat(_replacedLocals)));
             else
+            {
+                AddCompanions(providers);
                 _context.AddFinalizerOnce("new-mod", mod =>
                 {
                     ModGroupPruning.Prune(mod, _mod, group => _plan.Changes.Add(
@@ -372,6 +374,7 @@ public sealed class AnimationConversionPlanner(
                     mod.Meta.Remove("DefaultPreferredItems");
                     mod.Meta["Identifier"] = Guid.NewGuid().ToString();
                 });
+            }
             return _plan;
         }
 
@@ -1308,6 +1311,51 @@ public sealed class AnimationConversionPlanner(
             _plan.Files.Add(new PlannedFileOperation(LocalFileOperation.Write,
                 Path.GetRelativePath(_root, provider.FullPath), local, content, reason));
             return local;
+        }
+
+        /// <summary>
+        /// A new mod also gets what the animations' own timelines play from the mod: effects, the
+        /// sounds and textures those use in turn, and so on. The timelines name them by game path
+        /// and keep doing so wherever the animation moves, so each comes along unchanged, in the
+        /// options it is in. In place, the rest of the mod stays anyway.
+        /// </summary>
+        private void AddCompanions(List<Provider> providers)
+        {
+            var own = providers.Select(p => GamePath.Normalize(p.Key)).ToHashSet(StringComparer.Ordinal);
+            var needed = CustomizationOutput.WithDependencies(_root, _mod, own);
+            needed.ExceptWith(own);
+            if (needed.Count == 0) return;
+
+            foreach (var container in _mod.Containers)
+            {
+                var output = Result.GetContainer(container.Address);
+                foreach (var (key, local) in container.FileEntries())
+                {
+                    var path = GamePath.Normalize(key);
+                    if (!needed.Contains(path) || output.Files is { } existing && GamePath.FindKey(existing, path) != null) continue;
+                    string full;
+                    try { full = PathSafety.ResolveRelative(_root, GamePath.ToLocal(local)); }
+                    catch (InvalidDataException) { continue; }
+                    if (!File.Exists(full)) continue;
+                    if (_context.UnchangedCopy(full) is not { } copy)
+                    {
+                        var relative = Path.GetRelativePath(_root, full);
+                        copy = _locals.Reserve(relative, null);
+                        _plan.Files.Add(new PlannedFileOperation(LocalFileOperation.Copy, relative, copy, null, "played by the animation"));
+                        _context.NoteUnchangedCopy(full, copy);
+                    }
+                    _plan.InputFiles.Add(full);
+                    output.GetOrCreateFiles()[path] = GamePath.ToLocal(copy);
+                    _plan.Changes.Add(new GearPlanChange("Reference", container.Label, path, "kept: the animation plays it"));
+                }
+                foreach (var (key, swapped) in container.SwapEntries())
+                {
+                    var path = GamePath.Normalize(key);
+                    if (!needed.Contains(path) || output.FileSwaps is { } existing && GamePath.FindKey(existing, path) != null) continue;
+                    output.GetOrCreateFileSwaps()[path] = swapped;
+                    _plan.Changes.Add(new GearPlanChange("Reference", container.Label, path, "kept: the animation plays it"));
+                }
+            }
         }
 
         /// <summary>In place, source files no container references any more are removed.</summary>

@@ -171,8 +171,24 @@ public static class GearSlots
     public static string MaterialFolder(GearItem item, int materialId)
         => $"{item.Root}/material/v{materialId:D4}";
 
+    /// <summary>The effect an IMC entry's VFX ID loads: <c>ve</c> files for equipment, <c>va</c> for accessories.</summary>
     public static string VfxPath(GearItem item, int vfxId)
-        => $"{item.Root}/vfx/eff/ve{vfxId:D4}.avfx";
+        => $"{item.Root}/vfx/eff/v{item.PathEndpoint.Prefix}{vfxId:D4}.avfx";
+
+    /// <summary>The decal an equipment IMC entry's decal ID loads; every item shares the folder.</summary>
+    public static string DecalPath(int decalId)
+        => $"chara/common/texture/decal_equip/-decal_{decalId:D3}.tex";
+
+    /// <summary>
+    /// The folder of the extra skeleton (and its physics) that an EST entry of
+    /// <paramref name="slot"/> gives <paramref name="genderRace"/>, or null for a slot without one.
+    /// </summary>
+    public static string? ExtraSkeletonFolder(GearSlot slot, ushort genderRace, int skeletonId) => slot switch
+    {
+        GearSlot.Head => $"chara/human/c{genderRace:D4}/skeleton/met/m{skeletonId:D4}/",
+        GearSlot.Body => $"chara/human/c{genderRace:D4}/skeleton/top/t{skeletonId:D4}/",
+        _ => null,
+    };
 }
 
 /// <summary>

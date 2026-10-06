@@ -7,7 +7,7 @@ namespace UniversalModConverter.Core;
 /// <summary>
 /// Reads and rewrites the resource references stored inside game files. The game only
 /// follows three kinds of edges for gear: MDL → material names, MTRL → texture paths, and
-/// AVFX → texture/model paths.
+/// AVFX → texture, model and sound paths.
 /// </summary>
 public static partial class ResourceReferences
 {
