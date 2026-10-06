@@ -90,6 +90,9 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
     [GeneratedRegex(@"/material/v(?<variant>\d{4})/(?<name>[^/]+)$", RegexOptions.CultureInvariant)]
     internal static partial Regex MaterialPathRegex();
 
+    [GeneratedRegex(@"/vfx/eff/v[ea](?<id>\d{4})\.avfx$", RegexOptions.CultureInvariant)]
+    private static partial Regex VfxPathRegex();
+
     private sealed record FileProvider(ModContainer Container, string Key, string Local, string FullPath);
 
     private sealed record SwapProvider(ModContainer Container, string Key, string Target);
@@ -133,6 +136,12 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
 
         /// <summary>Material folders options switch the source variant to, besides the default one.</summary>
         private readonly SortedSet<int> _optionMaterialIds = [];
+
+        /// <summary>
+        /// IMC entries options and IMC groups can give the source variant instead of the default
+        /// one. Their VFX and decals are loaded by ID, which no file references.
+        /// </summary>
+        private readonly List<ImcEntry> _optionEntries = [];
         private readonly SortedDictionary<ushort, ImcEntry> _targetImc = new();
 
         /// <summary>Part tags past <c>_a</c> that a gear model brings to an accessory, which only Penumbra switches.</summary>
@@ -310,9 +319,17 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             foreach (var container in _mod.Containers.Where(c => !c.Address.IsDefault))
             foreach (var manipulation in container.Manipulations?.OfType<JsonObject>() ?? [])
                 if (GearManipulations.IsImcFor(manipulation, _src, _sourceVariant) &&
-                    ImcEntry.FromJson(manipulation["Manipulation"]?["Entry"]) is { MaterialId: > 0 } optionEntry &&
-                    optionEntry.MaterialId != _sourceEntry.MaterialId)
-                    _optionMaterialIds.Add(optionEntry.MaterialId);
+                    ImcEntry.FromJson(manipulation["Manipulation"]?["Entry"]) is { } optionEntry)
+                {
+                    _optionEntries.Add(optionEntry);
+                    if (optionEntry.MaterialId > 0 && optionEntry.MaterialId != _sourceEntry.MaterialId)
+                        _optionMaterialIds.Add(optionEntry.MaterialId);
+                }
+            foreach (var group in _mod.Groups.Where(g => g.IsImc))
+                if (GearManipulations.ImcGroupMatches(group.Node, _src, _sourceVariant) &&
+                    !(Json.TryGetBool(group.Node["OnlyAttributes"], out var only) && only) &&
+                    ImcEntry.FromJson(group.Node["DefaultEntry"]) is { } groupEntry)
+                    _optionEntries.Add(groupEntry);
 
             foreach (var (variant, entry) in ReadImc(_tgt)) _targetImc[variant] = entry;
             if (_targetImc.Count == 0)
@@ -356,14 +373,61 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                 if (IsOwned(path) && ContainsToken(Path.GetFileName(path), slotToken))
                     Enqueue(path);
 
+            // The item's metadata loads files by ID, not by a reference in another file: the VFX
+            // and decal of every look its entries give it, and the extra skeletons its EST entries
+            // name. Those the mod supplies come along (a VFX colour option, say).
             if (_sourceEntry.VfxId != 0)
             {
                 var vfx = GamePath.Normalize(GearSlots.VfxPath(_src, _sourceEntry.VfxId));
                 if (!ProvidedIn(vfx, _mod.Default) && Game(vfx) is { } vanilla) Generate(vfx, vanilla);
                 Enqueue(vfx);
             }
+            foreach (var vfxId in _optionEntries.Select(e => e.VfxId).Where(id => id != 0 && id != _sourceEntry.VfxId).Distinct())
+            {
+                // Like an option's material folder: the game's copy only when no container supplies it.
+                var vfx = GamePath.Normalize(GearSlots.VfxPath(_src, vfxId));
+                if (!_files.ContainsKey(vfx) && !_swaps.ContainsKey(vfx) && !_generated.ContainsKey(vfx) &&
+                    Game(vfx) is { } vanilla)
+                    Generate(vfx, vanilla);
+                Enqueue(vfx);
+            }
+            foreach (var decalId in _optionEntries.Append(_sourceEntry).Select(e => e.DecalId).Where(id => id != 0).Distinct())
+                Enqueue(GamePath.Normalize(GearSlots.DecalPath(decalId)));
+            foreach (var folder in ExtraSkeletonFolders())
+            foreach (var path in _files.Keys.Concat(_swaps.Keys))
+                if (path.StartsWith(folder, StringComparison.Ordinal))
+                    Enqueue(path);
 
             while (_queue.Count > 0) Visit(_queue.Dequeue());
+        }
+
+        /// <summary>
+        /// The folders of the extra skeletons the converted item uses: those the mod's EST entries
+        /// give the source, and the game's own, which <see cref="InjectDefaults"/> carries over.
+        /// None when the target slot cannot load the source's.
+        /// </summary>
+        private HashSet<string> ExtraSkeletonFolders()
+        {
+            var folders = new HashSet<string>(StringComparer.Ordinal);
+            if (_src.Slot.EstType() is null || _tgt.Slot.EstType() != _src.Slot.EstType()) return folders;
+
+            foreach (var container in _mod.Containers)
+            foreach (var manipulation in container.Manipulations?.OfType<JsonObject>() ?? [])
+                if (GearManipulations.IsEstFor(manipulation, _src) &&
+                    manipulation["Manipulation"] is JsonObject m &&
+                    Json.TryGetInt(m["Entry"], out var skeleton) && skeleton != 0 &&
+                    GenderRaces.TryParse(Json.GetString(m["Race"]), Json.GetString(m["Gender"]), out var race))
+                    folders.Add(GearSlots.ExtraSkeletonFolder(_src.Slot, race, skeleton)!);
+
+            if (_src.Slot.EstFile() is { } estFile && Game(estFile) is { } est)
+                foreach (var race in GenderRaces.Playable)
+                {
+                    ushort skeleton;
+                    try { ExtraSkeletonTable.TryGet(est, race, _src.SetId, out skeleton); }
+                    catch (InvalidDataException) { break; }
+                    if (skeleton != 0) folders.Add(GearSlots.ExtraSkeletonFolder(_src.Slot, race, skeleton)!);
+                }
+            return folders;
         }
 
         private static bool ContainsToken(string fileName, string token)
@@ -524,6 +588,14 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             if (match.Success && path.StartsWith(_srcRoot + "/material/", StringComparison.Ordinal))
                 return $"{_tgt.Root}/material/v{match.Groups["variant"].Value}/" +
                        GamePath.Normalize(GearPaths.RewriteOwnedReference(match.Groups["name"].Value, _srcEp, _tgtEp));
+            // The game names an item's effects by its category (ve0001 for gear, va0001 for an
+            // accessory), so one that changes category is renamed to what the target loads.
+            if (VfxPathRegex().Match(path) is { Success: true } vfx)
+            {
+                var vfxId = int.Parse(vfx.Groups["id"].Value);
+                if (path == GamePath.Normalize(GearSlots.VfxPath(_src, vfxId)))
+                    return GamePath.Normalize(GearSlots.VfxPath(_tgt, vfxId));
+            }
             return GamePath.Normalize(GearPaths.RewriteGamePath(path, _srcEp, _tgtEp));
         }
 

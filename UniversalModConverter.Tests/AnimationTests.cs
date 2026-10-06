@@ -40,6 +40,7 @@ internal static class AnimationTests
         ("An expression added for a new mod stays in every option that plays the file", ExpressionNewModKeepsEveryOption),
         ("An expression added to this mod goes into an option group beside the original", ExpressionAddedAsGroup),
         ("A new mod of an animation leaves the mod's IMC groups behind", AnimationNewModDropsImcGroups),
+        ("A new mod of an animation keeps the sounds its timeline plays from the mod", AnimationNewModKeepsTimelineFiles),
         ("A key written in any case moves", SwapKeyCase),
         ("Every animation conversion of a run removes its own unused files", RunRemovesEveryOrphan),
         ("A face from another mod is checked for every race it plays on", ModFacePerRace),
@@ -668,6 +669,37 @@ internal static class AnimationTests
     }
 
     /// <summary>Writes a Penumbra 1.7+ meta.json holding the given DefaultData and groups.</summary>
+    /// <summary>
+    /// The idle's own timeline plays a sound the mod ships in an option. No game path of the
+    /// conversion names it, but the moved idle still plays it, so the new mod keeps it, in its
+    /// option. A sound nothing plays stays behind.
+    /// </summary>
+    private static void AnimationNewModKeepsTimelineFiles()
+    {
+        const string hum = "sound/custom/idle_hum.scd";
+        using var mod = new TempDir();
+        using var output = new TempDir(create: false);
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"anim\\loop.pap","{{{Start3}}}":"anim\\start.pap","sound/custom/other.scd":"snd\\other.scd"}}""",
+            $$$"""[{"Type":"Single","Name":"Sound","Options":[{"Name":"Off"},{"Name":"On","Files":{"{{{hum}}}":"snd\\hum.scd"}}]}]""");
+        mod.File("anim/loop.pap", BuildPap([("cbem_pose03_1lp", 0)], timeline: name => Timeline(name, sound: hum)));
+        mod.File("anim/start.pap", BuildPap([("cbem_pose03_1st", 0)]));
+        mod.File("snd/hum.scd", [1]);
+        mod.File("snd/other.scd", [2]);
+
+        var plan = Planner(Game()).Plan(mod.Path, SlotRequest(ConversionOutputMode.NewMod, ("Standing idle 5", Loop5, Start5)));
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        GearConversionExecutor.WriteNewMod(plan, mod.Path, output.Path, "Idle 5");
+
+        var result = PenumbraMod.Load(output.Path);
+        Assert.Equal(new[] { Loop5, Start5 }, result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
+        var on = result.Groups.Single(g => g.Name == "Sound").Containers.Single(c => c.Label.EndsWith("On", StringComparison.Ordinal));
+        var local = on.FileEntries().Single(e => GamePath.Normalize(e.Key) == hum).Local;
+        Assert.Equal(new byte[] { 1 }, File.ReadAllBytes(Path.Combine(output.Path, GamePath.ToLocal(local))));
+        var moved = result.Default.FileEntries().Single(e => GamePath.Normalize(e.Key) == Loop5).Local;
+        Assert.True(PapTimeline.ReadStrings(File.ReadAllBytes(Path.Combine(output.Path, GamePath.ToLocal(moved)))).Any(s => s.Value == hum),
+            "the moved idle still plays the sound");
+    }
+
     private static void Definition(TempDir mod, string defaultData, string? groups = null)
         => mod.Json("meta.json", "{\"FileVersion\":4,\"Name\":\"Idle\",\"DefaultData\":" + defaultData +
                                  (groups == null ? "" : ",\"Groups\":" + groups) + "}");
@@ -1445,12 +1477,13 @@ internal static class AnimationTests
     }
 
     /// <summary>A PAP whose Havok section is opaque bytes and whose timelines each play their own entry.</summary>
-    internal static byte[] BuildPap((string Name, int Face)[] entries, ushort model = 101, int havokSize = 16)
+    internal static byte[] BuildPap((string Name, int Face)[] entries, ushort model = 101, int havokSize = 16,
+        Func<string, byte[]>? timeline = null)
     {
         const int header = 26;
         var info = header;
         var havok = info + entries.Length * 40;
-        var timelines = entries.Select(e => Timeline(e.Name)).ToList();
+        var timelines = entries.Select(e => timeline?.Invoke(e.Name) ?? Timeline(e.Name)).ToList();
         var timelineOffset = havok + havokSize;
         var stream = new MemoryStream();
         var writer = new BinaryWriter(stream);
@@ -1483,13 +1516,17 @@ internal static class AnimationTests
 
     /// <summary>
     /// A timeline as the game lays one out: TMDH, TMAL, one actor (TMAC) with one track (TMTR)
-    /// playing <paramref name="motion"/> in a C009, then the id lists and the string.
+    /// playing <paramref name="motion"/> in a C009 (and <paramref name="sound"/> in a C063), then
+    /// the id lists and the strings.
     /// </summary>
-    internal static byte[] Timeline(string motion, int duration = 40)
+    internal static byte[] Timeline(string motion, int duration = 40, string? sound = null)
     {
-        const int tmal = 28, tmac = 44, tmtr = 72, c009 = 96, lists = 120, text = 126;
+        const int tmal = 28, tmac = 44, tmtr = 72, c009 = 96, c063 = 120;
+        var lists = sound == null ? 120 : 152;
+        var text = lists + (sound == null ? 6 : 8);
         var name = Encoding.ASCII.GetBytes(motion + "\0");
-        var bytes = new byte[text + name.Length];
+        var soundName = sound == null ? [] : Encoding.ASCII.GetBytes(sound + "\0");
+        var bytes = new byte[text + name.Length + soundName.Length];
         void Item(int at, string magic, int size, short id = -1)
         {
             Encoding.ASCII.GetBytes(magic).CopyTo(bytes, at);
@@ -1505,7 +1542,7 @@ internal static class AnimationTests
 
         "TMLB"u8.CopyTo(bytes);
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4), bytes.Length);
-        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), 5);
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), sound == null ? 5 : 6);
         Item(12, "TMDH", 16, 1);
         BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(12 + 12), (short)duration);
         BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(12 + 14), 3);
@@ -1514,7 +1551,7 @@ internal static class AnimationTests
         Item(tmac, "TMAC", 28, 2);
         Pointer(tmac, 20, lists + 2, 1);
         Item(tmtr, "TMTR", 24, 3);
-        Pointer(tmtr, 12, lists + 4, 1);
+        Pointer(tmtr, 12, lists + 4, sound == null ? 1 : 2);
         Item(c009, "C009", 24, 4);
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(c009 + 12), duration);
         Pointer(c009, 20, text);
@@ -1522,6 +1559,13 @@ internal static class AnimationTests
         BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(lists + 2), 3);
         BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(lists + 4), 4);
         name.CopyTo(bytes, text);
+        if (sound != null)
+        {
+            Item(c063, "C063", 32, 5);
+            Pointer(c063, 20, text + name.Length);
+            BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(lists + 6), 5);
+            soundName.CopyTo(bytes, text + name.Length);
+        }
         return bytes;
     }
 

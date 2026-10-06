@@ -68,10 +68,8 @@ public static class GearManipulations
                 }).ToArray());
 
             case "est":
-                if (source.Slot.EstType() is not { } estType || !IsSet(m["SetId"], source) ||
-                    !Json.StringEquals(m["Slot"], estType))
-                    return RetargetOutcome.Unrelated;
-                if (target.Slot.EstType() != estType)
+                if (!IsEstFor(manipulation, source)) return RetargetOutcome.Unrelated;
+                if (target.Slot.EstType() != source.Slot.EstType())
                     return NotTransferable(manipulation, $"extra skeletons for {source.Slot} cannot apply to {target.Slot}");
                 return Single(manipulation, c => c["SetId"] = Json.SameKindNumber(c["SetId"], target.SetId));
 
@@ -123,6 +121,14 @@ public static class GearManipulations
            manipulation["Manipulation"] is JsonObject m &&
            ImcIdentifierMatches(m, item) &&
            (variant == null || Json.GetInt(m["Variant"], -1) == variant);
+
+    /// <summary>True when an EST entry gives the item's set an extra skeleton.</summary>
+    public static bool IsEstFor(JsonObject manipulation, GearItem item)
+        => Json.StringEquals(manipulation["Type"], "Est") &&
+           manipulation["Manipulation"] is JsonObject m &&
+           item.Slot.EstType() is { } estType &&
+           IsSet(m["SetId"], item) &&
+           Json.StringEquals(m["Slot"], estType);
 
     /// <summary>True when an IMC group applies to the item's given variant.</summary>
     public static bool ImcGroupMatches(JsonObject group, GearItem item, ushort variant)

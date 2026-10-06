@@ -43,6 +43,8 @@ internal static class GearConversionTests
         ("A longer material name checks the LOD's edge geometry, not its polygon count", EdgeGeometryGuard),
         ("An option's own material folder comes along for the target", OptionMaterialFolders),
         ("Verification follows a swap to the mod's own file", VerifyFollowsSwaps),
+        ("VFX options of an item that only an option gives a VFX come along, renamed for an accessory", OptionVfxComesAlong),
+        ("Extra skeletons and decals the item's metadata loads come along into a new mod", MetadataLoadedFilesComeAlong),
     ];
 
     /// <summary>
@@ -161,6 +163,116 @@ internal static class GearConversionTests
         var issues = GearConversionVerifier.Verify(mod.Path, new GearItem(GearSlot.Body, 300, 1), null, new FakeGame());
         Assert.True(issues.Any(i => i.IsError && i.Message.Contains("chara/common/umc/nowhere_d.tex")),
             string.Join("; ", issues.Select(i => i.Message)));
+    }
+
+    /// <summary>
+    /// Issue #3: a head whose own option switches on VFX 1, with the effect's colours in a group of
+    /// their own. No file references the effect, only the option's IMC entry, so a new mod of just
+    /// the converted item used to leave the colour group behind. As earrings, the effect is the
+    /// accessory's va0001 file, which is the one the game loads for them.
+    /// </summary>
+    private static void OptionVfxComesAlong()
+    {
+        using var mod = new TempDir();
+        const string root = "chara/equipment/e0306";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Crown",
+             "Groups":[
+              {"Type":"Multi","Id":"{{{G1}}}","Name":"Horns","Options":[{"Id":"{{{O1}}}","Name":"Ultima Horns",
+               "Files":{
+                "{{{root}}}/model/c0101e0306_met.mdl":"horns\\met.mdl",
+                "{{{root}}}/material/v0001/mt_c0101e0306_met_b.mtrl":"horns\\met.mtrl"},
+               "Manipulations":[{"Type":"Imc","Manipulation":{"ObjectType":"Equipment","PrimaryId":306,"Variant":1,"EquipSlot":"Head",
+                "Entry":{"MaterialId":1,"DecalId":0,"VfxId":1,"MaterialAnimationId":0,"AttributeMask":1023,"SoundId":0} } } ]} ]},
+              {"Type":"Single","Id":"{{{G2}}}","Name":"VFX","Options":[
+               {"Name":"Disabled"},
+               {"Name":"White","Files":{"{{{root}}}/vfx/eff/ve0001.avfx":"vfx\\white\\ve0001.avfx","sound/crown/hum.scd":"vfx\\white\\hum.scd"}},
+               {"Name":"Blue","Files":{"{{{root}}}/vfx/eff/ve0001.avfx":"vfx\\blue\\ve0001.avfx"}}]}]}
+            """);
+        mod.File("horns/met.mdl", TestAssets.CreateMdl(material: "/mt_c0101e0306_met_b.mtrl"));
+        mod.File("horns/met.mtrl", Mtrl("chara/common/texture/white.tex"));
+        mod.File("vfx/white/ve0001.avfx", Encoding.ASCII.GetBytes("white\0sound/crown/hum.scd\0"));
+        mod.File("vfx/white/hum.scd", [7]);
+        mod.File("vfx/blue/ve0001.avfx", Encoding.ASCII.GetBytes("blue"));
+        var game = StandardGame();
+        game.Files[$"{root}/e0306.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+        game.Files["chara/accessory/a0053/a0053.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+        game.Files["chara/common/texture/white.tex"] = [1];
+        const string effect = "chara/accessory/a0053/vfx/eff/va0001.avfx";
+
+        foreach (var mode in new[] { ConversionOutputMode.NewMod, ConversionOutputMode.InPlace })
+        {
+            var plan = new GearConversionPlanner(game).Plan(mod.Path, new GearConversionRequest(
+                new GearItem(GearSlot.Head, 306, 1), new GearItem(GearSlot.Ears, 53, 1), mode));
+            Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+            var colours = plan.Result.Groups.SingleOrDefault(g => g.Name == "VFX");
+            Assert.True(colours != null, $"{mode}: the VFX group is kept");
+            foreach (var colour in new[] { "White", "Blue" })
+            {
+                var keys = colours!.Containers.Single(c => c.Label.EndsWith(colour, StringComparison.Ordinal)).FileEntries()
+                    .Select(e => GamePath.Normalize(e.Key)).ToArray();
+                Assert.True(keys.Contains(effect), $"{mode}: {colour} redirects the earrings' effect: {string.Join(", ", keys)}");
+            }
+            var horns = plan.Result.Groups.Single(g => g.Name == "Horns").Containers.Single().Manipulations!.OfType<JsonObject>()
+                .Single(m => Json.StringEquals(m["Type"], "Imc"))["Manipulation"]!;
+            Assert.Equal("Accessory|Ears|53|1", $"{horns["ObjectType"]}|{horns["EquipSlot"]}|{horns["PrimaryId"]}|{horns["Entry"]!["VfxId"]}");
+
+            if (!mode.IsNewMod()) continue;
+            using var output = new TempDir(create: false);
+            GearConversionExecutor.WriteNewMod(plan, mod.Path, output.Path, "Crown Earrings");
+            var written = PenumbraMod.Load(output.Path).Groups.Single(g => g.Name == "VFX").Containers
+                .Single(c => c.Label.EndsWith("Blue", StringComparison.Ordinal)).FileEntries()
+                .Single(e => GamePath.Normalize(e.Key) == effect).Local;
+            Assert.Equal("blue", File.ReadAllText(Path.Combine(output.Path, GamePath.ToLocal(written))));
+            // The white effect plays a sound the mod ships, which it needs as much as the effect itself.
+            var white = plan.Result.Groups.Single(g => g.Name == "VFX").Containers
+                .Single(c => c.Label.EndsWith("White", StringComparison.Ordinal));
+            Assert.True(white.FileEntries().Any(e => GamePath.Normalize(e.Key) == "sound/crown/hum.scd"), "the effect's sound is kept");
+        }
+    }
+
+    /// <summary>
+    /// An EST entry names the extra skeleton a body loads, and an IMC entry its decal; the mod
+    /// ships both, and no file references them. A new mod of only the converted body keeps them,
+    /// but not another item's skeleton.
+    /// </summary>
+    private static void MetadataLoadedFilesComeAlong()
+    {
+        using var mod = new TempDir();
+        const string skeleton = "chara/human/c0201/skeleton/top/t9141/skl_c0201t9141.sklb";
+        const string physics = "chara/human/c0201/skeleton/top/t9141/phy_c0201t9141.phyb";
+        const string unrelated = "chara/human/c0201/skeleton/top/t0555/skl_c0201t0555.sklb";
+        const string decal = "chara/common/texture/decal_equip/-decal_003.tex";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Physics top","DefaultData":{
+              "Files":{
+               "chara/equipment/e0100/model/c0201e0100_top.mdl":"top.mdl",
+               "chara/equipment/e0100/material/v0001/mt_c0201e0100_top_a.mtrl":"top.mtrl",
+               "{{{skeleton}}}":"skel\\skl.sklb","{{{physics}}}":"skel\\phy.phyb","{{{unrelated}}}":"skel\\other.sklb",
+               "{{{decal}}}":"decal.tex"},
+              "Manipulations":[
+               {"Type":"Est","Manipulation":{"Gender":"Female","Race":"Midlander","SetId":100,"Slot":"Body","Entry":9141}},
+               {"Type":"Imc","Manipulation":{"ObjectType":"Equipment","PrimaryId":100,"Variant":1,"EquipSlot":"Body",
+                "Entry":{"MaterialId":1,"DecalId":3,"VfxId":0,"MaterialAnimationId":0,"AttributeMask":1023,"SoundId":0} } } ]} }
+            """);
+        mod.File("top.mdl", TestAssets.CreateMdl(material: "/mt_c0201e0100_top_a.mtrl"));
+        mod.File("top.mtrl", Mtrl("chara/common/texture/white.tex"));
+        mod.File("skel/skl.sklb", [1]);
+        mod.File("skel/phy.phyb", [2]);
+        mod.File("skel/other.sklb", [3]);
+        mod.File("decal.tex", [4]);
+        var game = StandardGame();
+        game.Files["chara/common/texture/white.tex"] = [1];
+
+        var plan = new GearConversionPlanner(game).Plan(mod.Path, new GearConversionRequest(
+            new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Body, 300, 1), ConversionOutputMode.NewMod));
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        var keys = plan.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).ToHashSet();
+        Assert.True(keys.Contains(skeleton) && keys.Contains(physics), $"the extra skeleton is kept: {string.Join(", ", keys)}");
+        Assert.True(keys.Contains(decal), $"the decal is kept: {string.Join(", ", keys)}");
+        Assert.True(!keys.Contains(unrelated), "another item's skeleton is left out");
+        var est = plan.Result.Default.Manipulations!.OfType<JsonObject>().Single(m => Json.StringEquals(m["Type"], "Est"))["Manipulation"]!;
+        Assert.Equal("300|9141", $"{est["SetId"]}|{est["Entry"]}");
     }
 
     private static void CrossSlotMeshRemoval()
@@ -304,7 +416,7 @@ internal static class GearConversionTests
     /// <summary>
     /// A hair converted in a copy of its mod, with the rest of the mod still in it: the new mod
     /// keeps the converted hair's paths in the options they are in, the source's textures its
-    /// unchanged material still loads, its own extra skeleton and shape switch, and the files
+    /// unchanged material still loads, its own extra skeleton (entry and files) and shape switch, and the files
     /// those paths load. Another hair, its metadata, a group holding only that, an IMC group and
     /// the files nothing loads any more go.
     /// </summary>
@@ -317,10 +429,13 @@ internal static class GearConversionTests
         const string other = "chara/human/c1801/obj/hair/h0144/model/c1801h0144_hir.mdl";
         const string otherMaterial = "chara/human/c0201/obj/hair/h0144/material/v0001/mt_c0201h0144_hir_b.mtrl";
         const string shared = "chara/human/c0201/obj/hair/h0144/texture/c0201h0144_hir_b_norm.tex";
+        // The extra skeleton the hair's EST entry names, and the one the other hair's names.
+        const string skeleton = "chara/human/c1401/skeleton/hair/h0005/skl_c1401h0005.sklb";
+        const string otherSkeleton = "chara/human/c1801/skeleton/hair/h0007/skl_c1801h0007.sklb";
         mod.Json("meta.json", $$$"""
             {"FileVersion":4,"Identifier":"{{{G1}}}","Name":"Hairs","DefaultData":{
               "Files":{"{{{model}}}":"m/hair.mdl","{{{material}}}":"m/b.mtrl","{{{other}}}":"v/hair.mdl",
-                       "{{{otherMaterial}}}":"m/b.mtrl"},
+                       "{{{otherMaterial}}}":"m/b.mtrl","{{{skeleton}}}":"s/hair.sklb","{{{otherSkeleton}}}":"s/viera.sklb"},
               "FileSwaps":{"chara/human/c1801/obj/hair/h0144/texture/x.tex":"{{{texture}}}"},
               "Manipulations":[
                 {"Type":"Est","Manipulation":{"Entry":5,"Gender":"Female","Race":"AuRa","SetId":135,"Slot":"Hair"}},
@@ -339,21 +454,21 @@ internal static class GearConversionTests
                {"Name":"Variant","Type":"Imc","Identifier":{"PrimaryId":1,"SecondaryId":0,"Variant":1,"ObjectType":"Equipment","EquipSlot":"Head","BodySlot":"Unknown"},
                 "DefaultEntry":{"MaterialId":1},"Options":[{"Name":"On","AttributeMask":1}]}]}
             """);
-        foreach (var file in new[] { "m/hair.mdl", "v/hair.mdl", "v/ear.mdl", "t/dark.tex", "t/viera.tex", "t/ombre.tex", "t/roots.tex", "readme.txt" })
+        foreach (var file in new[] { "m/hair.mdl", "v/hair.mdl", "v/ear.mdl", "t/dark.tex", "t/viera.tex", "t/ombre.tex", "t/roots.tex", "readme.txt", "s/hair.sklb", "s/viera.sklb" })
             mod.File(file, Encoding.ASCII.GetBytes(file));
         mod.File("m/b.mtrl", Mtrl(shared));
 
         CustomizationOutput.KeepOnly(mod.Path, [model, material, texture], new CustomizationPathEndpoint(AssetKind.Hair, 1401, 135));
 
         var result = PenumbraMod.Load(mod.Path);
-        Assert.Equal($"{model}, {material}", string.Join(", ", result.Default.FileEntries().Select(e => e.Key)));
+        Assert.Equal($"{model}, {material}, {skeleton}", string.Join(", ", result.Default.FileEntries().Select(e => e.Key)));
         Assert.True(result.Default.FileSwaps == null, "the other hair's swap is left out");
         Assert.Equal("Est|Shp", string.Join("|", result.Default.Manipulations!.OfType<JsonObject>().Select(m => Json.GetString(m["Type"]))));
         Assert.Equal("Colour, Highlights", string.Join(", ", result.Groups.Select(g => g.Name)));
         Assert.Equal($"{texture} | ", string.Join(" | ", result.Groups[0].Containers.Select(c => string.Join(",", c.FileEntries().Select(e => e.Key)))));
         var files = Directory.EnumerateFiles(mod.Path, "*", SearchOption.AllDirectories)
             .Select(f => System.IO.Path.GetRelativePath(mod.Path, f).Replace(System.IO.Path.DirectorySeparatorChar, '/')).Order(StringComparer.Ordinal);
-        Assert.Equal("m/b.mtrl, m/hair.mdl, meta.json, t/dark.tex, t/ombre.tex, t/roots.tex", string.Join(", ", files));
+        Assert.Equal("m/b.mtrl, m/hair.mdl, meta.json, s/hair.sklb, t/dark.tex, t/ombre.tex, t/roots.tex", string.Join(", ", files));
         Assert.True(!Directory.Exists(System.IO.Path.Combine(mod.Path, "v")), "an emptied folder is removed");
     }
 

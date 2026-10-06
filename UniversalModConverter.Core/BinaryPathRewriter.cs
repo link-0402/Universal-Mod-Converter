@@ -9,8 +9,9 @@ namespace UniversalModConverter.Core;
 /// </summary>
 public static class BinaryPathRewriter
 {
+    // .scd: an effect can play sounds, often ones its mod ships under a path of its own.
     private static readonly string[] SupportedExtensions =
-        [".mdl", ".mtrl", ".tex", ".avfx", ".atex", ".sklb", ".pap", ".tmb"];
+        [".mdl", ".mtrl", ".tex", ".avfx", ".atex", ".sklb", ".pap", ".tmb", ".scd"];
 
     public static IReadOnlyList<string> ExtractPaths(ReadOnlySpan<byte> bytes)
     {
