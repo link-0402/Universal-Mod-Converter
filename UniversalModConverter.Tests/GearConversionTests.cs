@@ -17,6 +17,10 @@ internal static class GearConversionTests
         ("v4 new mod: cross-slot conversion with vanilla dependencies", NewModCrossSlotV4),
         ("In place: shared resources are kept, exclusive ones move", InPlaceSameSlot),
         ("Add to mod: the original keeps working beside the converted item", AddToModKeepsSource),
+        ("Add to mod with its own option: the new files and metadata go into it", OwnOptionTakesTheNewFiles),
+        ("Add to mod with its own option: models that differ per option stay in them", OwnOptionLeavesVariantsInTheirOptions),
+        ("The converted item's own option: group reuse, metadata, nothing new", OwnOptionRules),
+        ("The converted item's own option keeps what the mod's options choose", OwnOptionKeepsWhatTheOptionsChoose),
         ("Two conversions merge into one mod", MergeTwoConversions),
         ("A run answers for every file it read and lets go of what it wrote", MergedPlanInputsAndContents),
         ("A conversion that overlaps another is rejected and rolled back", MergeRejectsOverlap),
@@ -1677,6 +1681,248 @@ internal static class GearConversionTests
         var plan = new GearConversionPlanner(StandardGame()).Plan(mod.Path, new GearConversionRequest(
             new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Body, 300, 1), ConversionOutputMode.InPlace));
         Assert.True(plan.Diagnostics.Any(d => d.Code == "target_conflict" && d.IsBlocker));
+    }
+
+    // ── The converted item's own option ─────────────────────────────────────
+
+    /// <summary>
+    /// Added to the mod with an option of its own, the converted item's new files (its model and
+    /// the material copy it had to patch) and the metadata it added leave the options they were
+    /// added beside for an option of their own beside the original's, switched on. The group held
+    /// only the original's option, so it becomes multi-select with that one still on. The target's
+    /// path to the texture the mod already has stays beside the original's, and the original is
+    /// untouched.
+    /// </summary>
+    private static void OwnOptionTakesTheNewFiles()
+    {
+        using var mod = new TempDir();
+        const string root = "chara/equipment/e0100";
+        const string model = "chara/equipment/e0300/model/c0201e0300_top.mdl";
+        const string material = "chara/equipment/e0300/material/v0001/mt_c0201e0300_top_a.mtrl";
+        const string texture = "chara/equipment/e0300/texture/v01_c0201e0300_top_d.tex";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Own option",
+             "DefaultData":{
+              "Files":{"{{{root}}}/texture/v01_c0201e0100_top_d.tex":"top_d.tex"},
+              "Manipulations":[{"Type":"Eqp","Manipulation":{"Entry":123,"SetId":100,"Slot":"Body"}}]},
+             "Groups":[{"Name":"Body","Type":"Single","Id":"{{{G1}}}","Options":[{"Id":"{{{O1}}}","Name":"On","Files":{
+               "{{{root}}}/model/c0201e0100_top.mdl":"top.mdl",
+               "{{{root}}}/material/v0001/mt_c0201e0100_top_a.mtrl":"top.mtrl"}}]}]}
+            """);
+        mod.File("top.mdl", TestAssets.CreateMdl(material: "/mt_c0201e0100_top_a.mtrl"));
+        mod.File("top.mtrl", Mtrl($"{root}/texture/v01_c0201e0100_top_d.tex"));
+        mod.File("top_d.tex", [1]);
+
+        var request = new GearConversionRequest(new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Body, 300, 1),
+            ConversionOutputMode.AddToMod) { ConvertedOption = new ConvertedOptionRequest("Target body", "Converted.") };
+        var plan = new GearConversionPlanner(StandardGame()).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.True(plan.Diagnostics.All(d => d.Code != "converted_option_refused"),
+            string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+
+        // The Mesh groups tab finds the model in its new option, with the file it came from.
+        var output = GearOutputModels.Collect(plan, mod.Path).Single();
+        Assert.Equal("Body / Target body", output.Options.Single());
+        Assert.Equal(new ConvertedOptionPlacement("Body", "Target body", TurnedMulti: true, NewGroup: false), plan.ConvertedPlacement);
+        Assert.True(output.SourceFile != null, "the model's source file follows it into the option");
+
+        GearConversionExecutor.ApplyInPlace(plan, mod.Path);
+        var result = PenumbraMod.Load(mod.Path);
+        Assert.True(result.Groups.All(g => g.Name != ConvertedOption.GroupName), "the option goes beside the original's");
+        var group = result.Groups.Single(g => g.Name == "Body");
+        Assert.Equal("Multi", group.Type);
+        Assert.Equal(3, group.Node["DefaultSettings"]!.GetValue<int>());
+        Assert.Equal(new[] { "On", "Target body" }, group.Options.Select(o => o["Name"]!.GetValue<string>()).ToArray());
+        var option = group.Containers[1];
+        Assert.Equal("Target body", option.Node["Name"]!.GetValue<string>());
+        var own = option.FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
+        Assert.Equal(new[] { material, model }, own.Keys.Order(StringComparer.Ordinal).ToArray());
+        Assert.True(own.Values.All(local => File.Exists(Path.Combine(mod.Path, local))), "the option loads files that exist");
+        Assert.True(!own.Values.Any(local => local is "top.mdl" or "top.mtrl"), "the option loads the converted copies");
+
+        // The texture needs no change, so the target's path to it stays beside the original's.
+        var defaults = result.Default.FileEntries().ToDictionary(e => GamePath.Normalize(e.Key), e => e.Local);
+        Assert.Equal("top_d.tex", defaults[texture]);
+        Assert.Equal("top_d.tex", defaults[$"{root}/texture/v01_c0201e0100_top_d.tex"]);
+
+        // The original's option keeps the original, and only that.
+        var on = group.Containers[0]
+            .FileEntries().Select(e => GamePath.Normalize(e.Key)).Order(StringComparer.Ordinal).ToArray();
+        Assert.Equal(new[] { $"{root}/material/v0001/mt_c0201e0100_top_a.mtrl", $"{root}/model/c0201e0100_top.mdl" }, on);
+
+        // The target's metadata goes with it; the source's stays.
+        static int[] Eqp(ModContainer container) => (container.Manipulations?.OfType<JsonObject>() ?? [])
+            .Where(m => m["Type"]!.GetValue<string>() == "Eqp")
+            .Select(m => m["Manipulation"]!["SetId"]!.GetValue<int>()).ToArray();
+        Assert.Equal(new[] { 100 }, Eqp(result.Default));
+        Assert.Equal(new[] { 300 }, Eqp(option));
+    }
+
+    /// <summary>
+    /// One option holds one file per path. When the options of the mod each convert into a model
+    /// of their own, they choose between them, so everything stays beside the originals and the
+    /// plan says why.
+    /// </summary>
+    private static void OwnOptionLeavesVariantsInTheirOptions()
+    {
+        using var mod = new TempDir();
+        const string root = "chara/equipment/e0100";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Variants",
+             "Groups":[{"Name":"Style","Type":"Single","Id":"{{{G1}}}","Options":[
+               {"Id":"{{{O1}}}","Name":"A","Files":{"{{{root}}}/model/c0201e0100_top.mdl":"a.mdl"}},
+               {"Id":"{{{O2}}}","Name":"B","Files":{"{{{root}}}/model/c0201e0100_top.mdl":"b.mdl"}}]}]}
+            """);
+        mod.File("a.mdl", TestAssets.CreateMdl(material: "/mt_c0201e0100_top_a.mtrl"));
+        mod.File("b.mdl", TestAssets.CreateMdl(material: "/mt_c0201e0100_top_b.mtrl"));
+
+        var request = new GearConversionRequest(new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Body, 300, 1),
+            ConversionOutputMode.AddToMod) { ConvertedOption = new ConvertedOptionRequest("Target body", "Converted.") };
+        var plan = new GearConversionPlanner(StandardGame()).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "converted_option_refused"), "the plan says why nothing moved");
+
+        GearConversionExecutor.ApplyInPlace(plan, mod.Path);
+        var result = PenumbraMod.Load(mod.Path);
+        Assert.True(result.Groups.All(g => g.Name != ConvertedOption.GroupName), "no group for files that stay");
+        foreach (var option in result.Groups.Single().Containers)
+            Assert.True(option.FileEntries().Any(e => GamePath.Normalize(e.Key) == "chara/equipment/e0300/model/c0201e0300_top.mdl"),
+                $"{option.Label} keeps choosing its own converted model");
+    }
+
+    /// <summary>
+    /// The rules of the move on their own. A hair whose model is the only option of a single-select
+    /// "Races" group gets an option beside it there, and the group becomes multi-select with the
+    /// original still on; an option's metadata wins over the fallback Default holds for it. A model
+    /// in Default goes into the "Converted" group a conversion made before, under a name of its own.
+    /// A conversion that made nothing new makes no option.
+    /// </summary>
+    private static void OwnOptionRules()
+    {
+        static PenumbraMod Mod(string json) => PenumbraMod.FromJson((JsonObject)JsonNode.Parse(json)!);
+        static string Est(int entry, string race = "Miqote")
+            => $$$"""{"Type":"Est","Manipulation":{"Entry":{{{entry}}},"Gender":"Female","Race":"{{{race}}}","SetId":122,"Slot":"Hair"}}""";
+        const string model = "chara/human/c1401/obj/hair/h0122/model/c1401h0122_hir.mdl";
+        var converted = $$$"""
+            {"Type":"Multi","Name":"Converted","Id":"{{{G2}}}","DefaultSettings":1,"Options":[
+              {"Id":"{{{O2}}}","Name":"Miqo'te Female","Files":{}}]}
+            """;
+        var before = $$$"""
+            {"FileVersion":4,"Name":"Hair","Groups":[
+              {"Type":"Single","Name":"Races","Id":"{{{G1}}}","Options":[{"Id":"{{{O1}}}","Name":"Viera","Files":{"a.mdl":"a.mdl"},
+               "Manipulations":[{{{Est(182, "Viera")}}}]}]},
+              {{{converted}}}]}
+            """;
+        // What the conversion added: the converted model and its skeleton beside the original, and
+        // the skeleton Default falls back to when no option sets one.
+        var after = Mod($$$"""
+            {"FileVersion":4,"Name":"Hair","DefaultData":{"Manipulations":[{{{Est(99)}}}]},"Groups":[
+              {"Type":"Single","Name":"Races","Id":"{{{G1}}}","Options":[{"Id":"{{{O1}}}","Name":"Viera",
+               "Files":{"a.mdl":"a.mdl","{{{model}}}":"a_c1401h0122.mdl","chara/shared.tex":"shared.tex"},
+               "Manipulations":[{{{Est(182, "Viera")}}},{{{Est(182)}}}]}]},
+              {{{converted}}}]}
+            """);
+        var outcome = ConvertedOption.Move(Mod(before), after, new HashSet<string> { "a_c1401h0122.mdl" },
+            "Miqo'te Female", "Converted.");
+        Assert.True(outcome.Moved, outcome.Refusal ?? "nothing moved");
+        Assert.Equal("Races / Miqo'te Female", outcome.Label);
+        Assert.Equal(new ConvertedOptionPlacement("Races", "Miqo'te Female", TurnedMulti: true, NewGroup: false), outcome.Placement);
+
+        var group = after.Groups[0];
+        Assert.Equal("Multi", group.Type);
+        Assert.Equal(2, group.Containers.Count);
+        Assert.Equal("3", group.Node["DefaultSettings"]!.ToJsonString());
+        Assert.Equal(1, after.Groups[1].Containers.Count);
+        var option = group.Containers[1];
+        Assert.Equal(new[] { model }, option.FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
+        Assert.Equal(new[] { 182 }, option.Manipulations!.OfType<JsonObject>()
+            .Select(m => m["Manipulation"]!["Entry"]!.GetValue<int>()).ToArray());
+        Assert.True(after.Default.IsEmpty, "Default's fallback skeleton is not needed once the option holds its own");
+
+        var viera = group.Containers[0];
+        Assert.Equal(new[] { "a.mdl", "chara/shared.tex" },
+            viera.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order(StringComparer.Ordinal).ToArray());
+        Assert.Equal("Viera", viera.Manipulations!.OfType<JsonObject>().Single()["Manipulation"]!["Race"]!.GetValue<string>());
+
+        // Nothing new: the added path loads a file the mod already had.
+        var unchanged = Mod(before.Replace("\"a.mdl\":\"a.mdl\"}", "\"a.mdl\":\"a.mdl\",\"chara/shared.tex\":\"a.mdl\"}"));
+        var nothing = ConvertedOption.Move(Mod(before), unchanged, new HashSet<string> { "new.mdl" }, "Miqo'te Female", "Converted.");
+        Assert.True(!nothing.Moved && nothing.Refusal == null, "a conversion that made nothing new makes no option");
+        Assert.Equal(1, unchanged.Groups[1].Containers.Count);
+        Assert.Equal("Single", unchanged.Groups[0].Type);
+
+        // In Default nothing switches the model on, so the option goes into the "Converted" group.
+        var inDefault = Mod(before.Replace("\"Name\":\"Hair\",", "\"Name\":\"Hair\",\"DefaultData\":{\"Files\":{\"" + model + "\":\"d_c1401h0122.mdl\"}},"));
+        var named = ConvertedOption.Move(Mod(before), inDefault, new HashSet<string> { "d_c1401h0122.mdl" }, "Miqo'te Female", "Converted.");
+        Assert.Equal("Converted / Miqo'te Female (2)", named.Label);
+        Assert.Equal(new ConvertedOptionPlacement("Converted", "Miqo'te Female (2)", TurnedMulti: false, NewGroup: false), named.Placement);
+        Assert.Equal("3", inDefault.Groups[1].Node["DefaultSettings"]!.ToJsonString());
+        Assert.Equal("Single", inDefault.Groups[0].Type);
+    }
+
+    /// <summary>
+    /// Only what moving changes nothing else for moves. A material per colour option stays in those
+    /// options while the one converted model moves; a model only some of a group's options load
+    /// would load whatever is chosen once moved, so it stays, and with it the whole option.
+    /// </summary>
+    private static void OwnOptionKeepsWhatTheOptionsChoose()
+    {
+        static PenumbraMod Mod(string json) => PenumbraMod.FromJson((JsonObject)JsonNode.Parse(json)!);
+        const string model = "chara/equipment/e0300/model/c0201e0300_top.mdl";
+        const string material = "chara/equipment/e0300/material/v0001/mt_c0201e0300_top_a.mtrl";
+        var before = $$$"""
+            {"FileVersion":4,"Name":"Colours","DefaultData":{"Files":{"src.mdl":"top.mdl"}},"Groups":[
+              {"Type":"Single","Name":"Colour","Id":"{{{G1}}}","Options":[
+                {"Id":"{{{O1}}}","Name":"Red","Files":{"src.mtrl":"red.mtrl"}},
+                {"Id":"{{{O2}}}","Name":"Blue","Files":{"src.mtrl":"blue.mtrl"}}]}]}
+            """;
+        var colours = Mod($$$"""
+            {"FileVersion":4,"Name":"Colours","DefaultData":{"Files":{"src.mdl":"top.mdl","{{{model}}}":"top_e0300.mdl"}},"Groups":[
+              {"Type":"Single","Name":"Colour","Id":"{{{G1}}}","Options":[
+                {"Id":"{{{O1}}}","Name":"Red","Files":{"src.mtrl":"red.mtrl","{{{material}}}":"red_e0300.mtrl"}},
+                {"Id":"{{{O2}}}","Name":"Blue","Files":{"src.mtrl":"blue.mtrl","{{{material}}}":"blue_e0300.mtrl"}}]}]}
+            """);
+        var made = new HashSet<string> { "top_e0300.mdl", "red_e0300.mtrl", "blue_e0300.mtrl" };
+        var outcome = ConvertedOption.Move(Mod(before), colours, made, "Target", "Converted.");
+        Assert.True(outcome.Moved, outcome.Refusal ?? "nothing moved");
+        Assert.True(outcome.Kept?.Contains(material) == true, outcome.Kept ?? "no note about the material");
+        Assert.Equal(new[] { model }, colours.Groups[1].Containers[0].FileEntries().Select(e => GamePath.Normalize(e.Key)).ToArray());
+        foreach (var colour in colours.Groups[0].Containers)
+            Assert.True(colour.FileEntries().Any(e => GamePath.Normalize(e.Key) == material), $"{colour.Label} keeps its own material");
+        Assert.True(colours.Default.FileEntries().All(e => GamePath.Normalize(e.Key) != model), "the model left Default");
+
+        // The model only Heels loads: moved, it would load with Flats too.
+        var heels = $$$"""
+            {"FileVersion":4,"Name":"Shoes","Groups":[
+              {"Type":"Single","Name":"Style","Id":"{{{G1}}}","Options":[
+                {"Id":"{{{O1}}}","Name":"Flats","Files":{}},
+                {"Id":"{{{O2}}}","Name":"Heels","Files":{"src.mdl":"heels.mdl"MODEL}}]}]}
+            """;
+        var shoes = Mod(heels.Replace("MODEL", $",\"{model}\":\"heels_e0300.mdl\""));
+        var refused = ConvertedOption.Move(Mod(heels.Replace("MODEL", "")), shoes, new HashSet<string> { "heels_e0300.mdl" },
+            "Target", "Converted.");
+        Assert.True(!refused.Moved && refused.Refusal?.Contains("only some") == true, refused.Refusal ?? "it moved");
+        Assert.Equal(1, shoes.Groups.Count);
+
+        // A multi-select option that toggles the item hands the toggle over, with what loads beside the
+        // model; a material another toggle adds stays with that toggle.
+        var toggles = $$$"""
+            {"FileVersion":4,"Name":"Toggles","Groups":[
+              {"Type":"Multi","Name":"Items","Id":"{{{G1}}}","Options":[{"Id":"{{{O1}}}","Name":"Top","Files":{"src.mdl":"top.mdl"MODEL}}]},
+              {"Type":"Multi","Name":"Extras","Id":"{{{G2}}}","Options":[{"Id":"{{{O2}}}","Name":"Glow","Files":{"src.mtrl":"glow.mtrl"GLOW}}]}]}
+            """;
+        var glow = "chara/equipment/e0300/material/v0001/mt_c0201e0300_top_glow.mtrl";
+        var toggled = Mod(toggles.Replace("MODEL", $",\"{model}\":\"top_e0300.mdl\",\"{material}\":\"top_e0300.mtrl\"")
+            .Replace("GLOW", $",\"{glow}\":\"glow_e0300.mtrl\""));
+        var handed = ConvertedOption.Move(Mod(toggles.Replace("MODEL", "").Replace("GLOW", "")), toggled,
+            new HashSet<string> { "top_e0300.mdl", "top_e0300.mtrl", "glow_e0300.mtrl" }, "Target", "Converted.");
+        Assert.True(handed.Moved, handed.Refusal ?? "nothing moved");
+        Assert.Equal("Items / Target", handed.Label);
+        Assert.Equal(2, toggled.Groups.Count);
+        Assert.Equal(new[] { material, model }, toggled.Groups[0].Containers[1].FileEntries()
+            .Select(e => GamePath.Normalize(e.Key)).Order(StringComparer.Ordinal).ToArray());
+        Assert.True(toggled.Groups[1].Containers[0].FileEntries().Any(e => GamePath.Normalize(e.Key) == glow), "the glow stays with its toggle");
+        Assert.True(handed.Kept?.Contains(glow) == true, handed.Kept ?? "no note about the glow");
     }
 
     // ── Fixtures ────────────────────────────────────────────────────────────

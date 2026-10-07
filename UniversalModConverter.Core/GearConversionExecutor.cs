@@ -143,17 +143,24 @@ public static class GearConversionVerifier
                 yield return vanilla;
         }
 
-        // Material folders the target's variants resolve to.
-        var folders = new SortedSet<int>();
-        var imc = game.ReadFile(GearSlots.ImcFile(target)) is { } imcBytes
+        // Material folders the target's variants resolve to: the game's IMC entries, with the mod's on
+        // top. Default's always apply, and an option's apply while it is on, which is whenever the
+        // model it loads is (the converted item's own option holds both, say).
+        var vanilla = game.ReadFile(GearSlots.ImcFile(target)) is { } imcBytes
             ? GameMetadata.ReadImc(imcBytes, target.Slot.ImcPartIndex()).ToDictionary(r => r.Variant, r => r.Entry)
             : [];
-        foreach (var manipulation in mod.Default.Manipulations?.OfType<System.Text.Json.Nodes.JsonObject>() ?? [])
-            if (GearManipulations.IsImcFor(manipulation, target, null) &&
-                ImcEntry.FromJson(manipulation["Manipulation"]?["Entry"]) is { } entry)
-                imc[(ushort)Json.GetInt(manipulation["Manipulation"]!["Variant"], 0)] = entry;
-        folders.UnionWith(imc.Values.Select(e => (int)e.MaterialId).Where(m => m > 0));
-        if (folders.Count == 0) folders.Add(1);
+        SortedSet<int> Folders(ModContainer? holder)
+        {
+            var imc = new Dictionary<ushort, ImcEntry>(vanilla);
+            foreach (var container in holder == null || holder.Address.IsDefault ? [mod.Default] : new[] { mod.Default, holder })
+            foreach (var manipulation in container.Manipulations?.OfType<System.Text.Json.Nodes.JsonObject>() ?? [])
+                if (GearManipulations.IsImcFor(manipulation, target, null) &&
+                    ImcEntry.FromJson(manipulation["Manipulation"]?["Entry"]) is { } entry)
+                    imc[(ushort)Json.GetInt(manipulation["Manipulation"]!["Variant"], 0)] = entry;
+            var folders = new SortedSet<int>(imc.Values.Select(e => (int)e.MaterialId).Where(m => m > 0));
+            if (folders.Count == 0) folders.Add(1);
+            return folders;
+        }
 
         var checkedMaterials = new HashSet<string>(StringComparer.Ordinal);
         var models = 0;
@@ -162,6 +169,9 @@ public static class GearConversionVerifier
             var model = GamePath.Normalize(GearSlots.ModelPath(target, race));
             if (!files.ContainsKey(model) && !swaps.ContainsKey(model)) continue;
             models++;
+            // A swapped model has no option of its own to read metadata from: Default's apply.
+            var holders = mod.Containers.Where(c => c.FileEntries().Any(e => GamePath.Normalize(e.Key) == model)).ToList();
+            var folders = holders.Count == 0 ? Folders(null) : new SortedSet<int>(holders.SelectMany(h => Folders(h)));
             foreach (var bytes in Contents(model))
             foreach (var material in SafeRead(model, bytes, issues))
             {

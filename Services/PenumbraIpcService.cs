@@ -34,6 +34,11 @@ public sealed class PenumbraIpcService : IDisposable
     private readonly ICallGateSubscriber<Guid, Dictionary<string, object?>>                               _getChangedItemsForCollection;
     private readonly ICallGateSubscriber<Func<string, (string, string)[]>>                                _checkCurrentChangedItemFunc;
     private readonly ICallGateSubscriber<Guid, string[], string[], (int, string[], string[][])>           _resolvePaths;
+    private readonly ICallGateSubscriber<Guid, string, string, bool, (int, (bool, int, Dictionary<string, List<string>>, bool)?)> _getCurrentModSettings;
+    private readonly ICallGateSubscriber<Guid, string, string, string, IReadOnlyList<string>, int>        _trySetModSettings;
+    private readonly ICallGateSubscriber<Guid, string, string, bool, int>                                 _tryInheritMod;
+    private readonly ICallGateSubscriber<Guid, string, string, bool, int>                                 _trySetMod;
+    private readonly ICallGateSubscriber<Guid, string, string, int, int>                                  _trySetModPriority;
 
     /// <summary>Penumbra's ApiCollectionType.Current: the collection its own window edits.</summary>
     private const byte CurrentCollectionType = 226;
@@ -84,6 +89,12 @@ public sealed class PenumbraIpcService : IDisposable
         _getChangedItemsForCollection = pi.GetIpcSubscriber<Guid, Dictionary<string, object?>>("Penumbra.GetChangedItemsForCollection");
         _checkCurrentChangedItemFunc  = pi.GetIpcSubscriber<Func<string, (string, string)[]>>("Penumbra.CheckCurrentChangedItemFunc");
         _resolvePaths           = pi.GetIpcSubscriber<Guid, string[], string[], (int, string[], string[][])>("Penumbra.ResolvePaths");
+        _getCurrentModSettings  = pi.GetIpcSubscriber<Guid, string, string, bool, (int, (bool, int, Dictionary<string, List<string>>, bool)?)>(
+            "Penumbra.GetCurrentModSettings.V5");
+        _trySetModSettings      = pi.GetIpcSubscriber<Guid, string, string, string, IReadOnlyList<string>, int>("Penumbra.TrySetModSettings.V5");
+        _tryInheritMod          = pi.GetIpcSubscriber<Guid, string, string, bool, int>("Penumbra.TryInheritMod.V5");
+        _trySetMod              = pi.GetIpcSubscriber<Guid, string, string, bool, int>("Penumbra.TrySetMod.V5");
+        _trySetModPriority      = pi.GetIpcSubscriber<Guid, string, string, int, int>("Penumbra.TrySetModPriority.V5");
 
         // Subscribe to lifecycle events
         try
@@ -296,6 +307,58 @@ public sealed class PenumbraIpcService : IDisposable
         }
     }
 
+    /// <summary>
+    /// The options a collection's own settings for a mod have switched on, per group name; null
+    /// when the collection only inherits them (or has none), or on failure.
+    /// </summary>
+    public (bool Enabled, int Priority, Dictionary<string, List<string>> Groups)? GetOwnModSettings(Guid collection, string modDirectory)
+    {
+        try
+        {
+            var (rc, settings) = _getCurrentModSettings.InvokeFunc(collection, modDirectory, string.Empty, true);
+            if ((PenumbraApiEc)rc != PenumbraApiEc.Success || settings is not { } own || own.Item4) return null;
+            return (own.Item1, own.Item2, own.Item3);
+        }
+        catch (Exception ex) { _log.Warning(ex, "[UMC] GetCurrentModSettings failed"); return null; }
+    }
+
+    /// <summary>Switches exactly <paramref name="options"/> on in a group of a collection's settings for a mod.</summary>
+    public PenumbraApiEc TrySetModSettings(Guid collection, string modDirectory, string group, IReadOnlyList<string> options)
+    {
+        try
+        {
+            var rc = (PenumbraApiEc)_trySetModSettings.InvokeFunc(collection, modDirectory, string.Empty, group, options);
+            if (rc is not (PenumbraApiEc.Success or PenumbraApiEc.NothingDone))
+                _log.Warning($"[UMC] TrySetModSettings returned {rc} for '{modDirectory}' / {group}");
+            return rc;
+        }
+        catch (Exception ex) { _log.Warning(ex, "[UMC] TrySetModSettings failed"); return PenumbraApiEc.UnknownError; }
+    }
+
+    /// <summary>
+    /// Makes a collection inherit a mod's settings (dropping its own), or gives it settings of its
+    /// own again, copied from what it inherits or the mod's defaults.
+    /// </summary>
+    public bool TryInheritMod(Guid collection, string modDirectory, bool inherit)
+        => Call("TryInheritMod", () => _tryInheritMod.InvokeFunc(collection, modDirectory, string.Empty, inherit));
+
+    public bool TrySetMod(Guid collection, string modDirectory, bool enabled)
+        => Call("TrySetMod", () => _trySetMod.InvokeFunc(collection, modDirectory, string.Empty, enabled));
+
+    public bool TrySetModPriority(Guid collection, string modDirectory, int priority)
+        => Call("TrySetModPriority", () => _trySetModPriority.InvokeFunc(collection, modDirectory, string.Empty, priority));
+
+    private bool Call(string name, Func<int> call)
+    {
+        try
+        {
+            var rc = (PenumbraApiEc)call();
+            if (rc is not (PenumbraApiEc.Success or PenumbraApiEc.NothingDone)) _log.Warning($"[UMC] {name} returned {rc}");
+            return rc is PenumbraApiEc.Success or PenumbraApiEc.NothingDone;
+        }
+        catch (Exception ex) { _log.Warning(ex, $"[UMC] {name} failed"); return false; }
+    }
+
     /// <summary>The collection Penumbra's own window currently edits, or null.</summary>
     public (Guid Id, string Name)? GetCurrentCollection()
     {
@@ -356,16 +419,29 @@ public sealed class PenumbraIpcService : IDisposable
 /// <summary>Mirrors Penumbra's PenumbraApiEc enum (int values).</summary>
 public enum PenumbraApiEc : int
 {
-    Success            = 0,
-    NothingDone        = 1,
-    InvalidArgument    = 2,
-    ModMissing         = 3,
-    CollectionMissing  = 4,
-    OptionGroupMissing = 5,
-    OptionMissing      = 6,
-    PathMissing        = 7,
-    Default            = 8,
-    SystemCollection   = 9,
-    Disposed           = 10,
-    UnknownError       = 11,
+    // Penumbra.Api.Enums.PenumbraApiEc as Penumbra 1.7 numbers it; IPC hands these over as ints.
+    Success                      = 0,
+    NothingDone                  = 1,
+    CollectionMissing            = 2,
+    ModMissing                   = 3,
+    OptionGroupMissing           = 4,
+    OptionMissing                = 5,
+    CharacterCollectionExists    = 6,
+    LowerPriority                = 7,
+    InvalidGamePath              = 8,
+    FileMissing                  = 9,
+    InvalidManipulation          = 10,
+    InvalidArgument              = 11,
+    PathRenameFailed             = 12,
+    CollectionExists             = 13,
+    AssignmentCreationDisallowed = 14,
+    AssignmentDeletionDisallowed = 15,
+    InvalidIdentifier            = 16,
+    SystemDisposed               = 17,
+    AssignmentDeletionFailed     = 18,
+    TemporarySettingDisallowed   = 19,
+    TemporarySettingImpossible   = 20,
+    InvalidCredentials           = 21,
+    CollectionInactive           = 22,
+    UnknownError                 = 255,
 }

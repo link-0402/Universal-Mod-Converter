@@ -85,6 +85,7 @@ public sealed class ModConverterService
         task.PlannedMdlChanges.Clear();
         task.PlannedGeneratedFiles.Clear();
         task.CustomizationOutputKeys.Clear();
+        task.ConvertedPlacements.Clear();
         task.AllAssetFiles.Clear();
         task.OutputModels.Clear();
         task.MeshRemovals.Clear();
@@ -134,6 +135,7 @@ public sealed class ModConverterService
             task.Diagnostics.AddRange(plan.Diagnostics);
             if (CrossSlotDiagnostic(request) is { } note) task.Diagnostics.Add(note);
             task.OutputModels.AddRange(GearOutputModels.Collect(plan, task.ModDirectory));
+            if (plan.ConvertedPlacement is { } placement) task.ConvertedPlacements.Add(placement);
             Finish(task, plan);
             _log.Information("[UMC] Planned {0} -> {1} ({2}): {3} path(s), {4} file operation(s), {5} diagnostic(s).",
                 request.Source, request.Target, request.Mode, plan.GamePathMap.Count, plan.Files.Count, plan.Diagnostics.Count);
@@ -173,6 +175,7 @@ public sealed class ModConverterService
 
             entry.Task.OutputMode = task.OutputMode;
             entry.Task.KeepsWholeMod = task.KeepsWholeMod;
+            entry.Task.UsesConvertedOption = task.UsesConvertedOption;
             entry.Task.ModDirectory = task.ModDirectory;
             MergedPlanEntry merged;
             GearConversionRequest? gear = null;
@@ -208,7 +211,10 @@ public sealed class ModConverterService
         // planned and the finalizers have settled the definition.
         foreach (var entry in task.Entries.Where(e => !e.Rejected))
             if (entry.Plan is GearConversionPlan gear)
+            {
                 task.OutputModels.AddRange(GearOutputModels.Collect(gear, task.ModDirectory));
+                if (gear.ConvertedPlacement is { } placement) task.ConvertedPlacements.Add(placement);
+            }
 
         Finish(task, plan);
         _log.Information("[UMC] Planned a run of {0} conversion(s) ({1}): {2} file operation(s), {3} diagnostic(s).",
@@ -334,7 +340,7 @@ public sealed class ModConverterService
         var source = new GearItem(SlotInfo.ToGearSlot(task.Slot), sourceId, (ushort)Math.Max(0, task.SourceVariant));
         var target = new GearItem(SlotInfo.ToGearSlot(task.TargetSlot ?? task.Slot), targetId,
             (ushort)Math.Max(0, task.TargetVariant));
-        return new GearConversionRequest(source, target, task.PlanMode);
+        return new GearConversionRequest(source, target, task.PlanMode) { ConvertedOption = task.OwnOption };
     }
 
     /// <param name="newMod">
@@ -788,6 +794,7 @@ public sealed class ModConverterService
                     OldValue   = c.OldValue,
                     NewValue   = c.NewValue,
                     ChangeType = c.ChangeType,
+                    Data       = c.Data,
                 });
             remapped.PlannedJsonChanges.Add(rc);
         }
@@ -1060,21 +1067,64 @@ public sealed class ModConverterService
     {
         if (jc.Changes.Count == 0) return;
 
-        var raw  = File.ReadAllText(jc.FilePath);
-        var node = JsonNode.Parse(raw, new JsonNodeOptions { PropertyNameCaseInsensitive = false },
-                       new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip })
+        var node = ApplyJsonChanges(File.ReadAllText(jc.FilePath), jc.Changes, out var applied)
                    ?? throw new InvalidDataException($"JSON document is empty: {jc.FilePath}");
-
-        int applied = 0;
-        // Key renames and copies go last so value edits can still find their original key.
-        foreach (var change in jc.Changes.OrderBy(c => c.ChangeType is "path_key" or "path_key_copy" or "path_key_remove" ? 1 : 0))
-            if (ApplyJsonChangeAtPath(node, change)) applied++;
-
         if (applied != jc.Changes.Count)
             throw new InvalidDataException($"Only {applied} of {jc.Changes.Count} planned JSON changes applied in {jc.FilePath}.");
         var opts = new JsonSerializerOptions { WriteIndented = true };
         File.WriteAllText(jc.FilePath, node.ToJsonString(opts), Encoding.UTF8);
         log($"Updated JSON: {Path.GetFileName(jc.FilePath)} ({applied} changes)");
+    }
+
+    /// <summary>
+    /// The JSON document <paramref name="raw"/> with <paramref name="changes"/> made to it, or null
+    /// when it is empty; <paramref name="applied"/> counts the changes that could be made. The
+    /// preview of a customization plan makes them in memory to see what they add up to.
+    /// </summary>
+    internal static JsonNode? ApplyJsonChanges(string raw, IReadOnlyList<JsonFieldChange> changes, out int applied)
+    {
+        applied = 0;
+        var node = ParseJson(raw);
+        if (node == null) return null;
+        // Key renames and copies go last so value edits can still find their original key, and the
+        // converted item's own option after everything, since it moves what the others added.
+        foreach (var change in changes.OrderBy(c => c.ChangeType switch
+                 {
+                     "path_key" or "path_key_copy" or "path_key_remove" => 1,
+                     ConvertedOptionChange => 2,
+                     _ => 0,
+                 }))
+            if (change.ChangeType == ConvertedOptionChange ? ApplyConvertedOption(raw, ref node, change) : ApplyJsonChangeAtPath(node!, change))
+                applied++;
+        return node;
+    }
+
+    private static JsonNode? ParseJson(string raw)
+        => JsonNode.Parse(raw, new JsonNodeOptions { PropertyNameCaseInsensitive = false },
+            new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
+
+    /// <summary>The change that gives the converted item's new files an option of their own.</summary>
+    internal const string ConvertedOptionChange = "converted_option";
+
+    /// <summary>What <see cref="ConvertedOptionChange"/> needs: the option, and the files the conversion makes, mod-relative.</summary>
+    internal sealed record ConvertedOptionData(string Name, string Description, string[] Files);
+
+    /// <summary>
+    /// Moves what the other changes added and made new into the converted item's own option. It
+    /// is worked out again from the definition before (<paramref name="raw"/>) and after them, which
+    /// the source's fingerprint holds to what the preview saw.
+    /// </summary>
+    private static bool ApplyConvertedOption(string raw, ref JsonNode? node, JsonFieldChange change)
+    {
+        if (node is not JsonObject json || change.Data == null ||
+            JsonSerializer.Deserialize<ConvertedOptionData>(change.Data) is not { } data ||
+            ParseJson(raw) is not JsonObject original) return false;
+        var after = PenumbraMod.FromJson((JsonObject)json.DeepClone());
+        var outcome = ConvertedOption.Move(PenumbraMod.FromJson(original), after,
+            data.Files.ToHashSet(StringComparer.Ordinal), data.Name, data.Description);
+        if (!outcome.Moved) return false;
+        node = after.ToJson();
+        return true;
     }
 
     private static bool ApplyJsonChangeAtPath(JsonNode root, JsonFieldChange change)

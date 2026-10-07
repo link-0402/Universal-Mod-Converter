@@ -43,6 +43,8 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         Widgets.Tooltip("The original keeps working, and the converted result is added beside it in this mod. The mod " +
                         "as it is now is kept as a backup.");
         ImGui.SameLine();
+        DrawOwnOption(mode);
+        ImGui.SameLine();
         Widgets.Badge("Keeps the original", Theme.Info);
 
         if (ImGui.RadioButton("Convert in place", mode == ConversionOutputMode.InPlace))
@@ -80,6 +82,29 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
                         "Ticked, the new mod holds only what the plan converts, and everything else in this mod is " +
                         "left out. Unticked, it is a copy of this whole mod, everything else included, with the " +
                         "conversion made in it as converting in place would.");
+    }
+
+    /// <summary>Whether a conversion added to this mod puts its new files into an option of their own.</summary>
+    private void DrawOwnOption(ConversionOutputMode mode)
+    {
+        var own = session.AddToModOwnOption;
+        var applies = session.OwnOptionApplies;
+        using (ImRaii.Disabled(!applies))
+        {
+            if (ImGui.Checkbox("New files in their own option", ref own)) session.SetAddToModOwnOption(own);
+        }
+        Widgets.Tooltip((applies ? string.Empty
+                            : mode == ConversionOutputMode.AddToMod
+                                ? "Applies to gear and to hair, faces, tails and ears. "
+                                : "Applies when adding to this mod. ") +
+                        "Ticked, what the conversion makes new (the converted model, copies it had to change, files " +
+                        "it takes from the game) and the metadata it adds go into an option of their own beside the " +
+                        "original's, switched on, so the converted item is switched on and off by itself. The option " +
+                        "goes into the group whose option holds the original's model; a single-select group with only " +
+                        "that option becomes multi-select, and Penumbra keeps each collection's choices in it. A model " +
+                        $"in Default goes into a '{ConvertedOption.GroupName}' group instead. The target's paths to files " +
+                        "the mod already has are still added beside the original's. Unticked, everything is added " +
+                        "beside the original's, in the same options.");
     }
 
     // What each output mode does depends on what the plan converts. A run can mix gear and
@@ -141,12 +166,22 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
     {
         var contents = session.OutputContents;
         var parts = new List<string>();
+        var own = session.AddToModOwnOption && session.OwnOptionApplies;
         if (contents.HasFlag(PlanContents.Gear))
-            parts.Add("The original item keeps working: the converted one is added beside it, in the same options, so " +
-                      "the toggles this mod already has control both.");
+            parts.Add(own
+                ? "The original item keeps working: the converted one's new files and metadata go into an option of " +
+                  "its own beside the original's, switched on, and its paths to files the mod already has are added " +
+                  "beside the original's paths."
+                : "The original item keeps working: the converted one is added beside it, in the same options, so " +
+                  "the toggles this mod already has control both.");
         if (contents.HasFlag(PlanContents.Customization) && session.OutputCustomizationName is { } kind)
-            parts.Add($"The original {kind} keeps working: the converted one is added beside it, in the same options, " +
-                      "and loads the same textures; only the files the conversion changes are copied.");
+            parts.Add(own
+                ? $"The original {kind} keeps working: the converted one loads the same textures, and only the files " +
+                  "the conversion changes are copied. Those copies (its model, say) and its metadata go into an " +
+                  "option of its own beside the original's, switched on; its other paths are added beside the " +
+                  "original's paths."
+                : $"The original {kind} keeps working: the converted one is added beside it, in the same options, " +
+                  "and loads the same textures; only the files the conversion changes are copied.");
         if (contents.HasFlag(PlanContents.AnimationSwap))
             parts.Add("The animation keeps playing where it is and also plays at every destination, switched by the " +
                       "same options.");
@@ -310,12 +345,12 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
             ConversionOutputMode.AddToMod when session.OutputContents.HasFlag(PlanContents.Customization) &&
                                                session.OutputCustomizationName is { } kind
                 => ($"Add the converted {kind} to this mod?",
-                    $"'{session.ModName}' will be modified, but the original {kind} keeps working. The mod as it is " +
-                    "now is kept as a backup and can be restored with Revert.",
+                    $"'{session.ModName}' will be modified, but the original {kind} keeps working.{OwnOptionSentence} " +
+                    "The mod as it is now is kept as a backup and can be restored with Revert.",
                     "Add"),
             ConversionOutputMode.AddToMod => ("Add the converted item to this mod?",
-                $"'{session.ModName}' will be modified, but the original item keeps working. The mod as it is " +
-                "now is kept as a backup and can be restored with Revert.",
+                $"'{session.ModName}' will be modified, but the original item keeps working.{OwnOptionSentence} The " +
+                "mod as it is now is kept as a backup and can be restored with Revert.",
                 "Add"),
             _ => ("Convert this mod in place?",
                 $"'{session.ModName}' will be modified directly. The original is kept as a backup and can be " +
@@ -324,6 +359,11 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
         };
         confirm.Request(title, what, verb, session.Apply);
     }
+
+    /// <summary>Where the new files go, for the confirmation; empty when they go beside the original's.</summary>
+    private string OwnOptionSentence => session.AddToModOwnOption && session.OwnOptionApplies
+        ? " Its new files go into an option of its own beside the original's."
+        : string.Empty;
 
     private void DrawReadiness()
     {

@@ -34,6 +34,12 @@ public class Configuration : IPluginConfiguration
     /// </summary>
     public bool NewModOnlyConverted { get; set; } = true;
 
+    /// <summary>
+    /// Added to this mod, the converted item's new files (its model, copies the conversion patched)
+    /// go into an option of their own instead of beside the original's.
+    /// </summary>
+    public bool AddToModOwnOption { get; set; }
+
     /// <summary>Write a texture fan-out to a copy of the mod instead of the mod itself.</summary>
     public bool TextureAsNewMod { get; set; }
 
@@ -147,6 +153,12 @@ public class ConversionRecord
     /// separately revertable things.
     /// </summary>
     public List<string> Entries { get; set; } = new();
+
+    /// <summary>
+    /// Added to the mod: the options the converted items got of their own, so reverting can put
+    /// the collections' settings for those groups back the way they were.
+    /// </summary>
+    public List<ConvertedOptionPlacement> ConvertedOptions { get; set; } = new();
 
     public bool IsReverted => RevertedUtc.HasValue;
 }
