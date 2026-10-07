@@ -131,7 +131,61 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         if (keepSource) KeepSourceFiles(task, root, mod, keys, target);
         PlanJson(task, root, descriptor, source, target, resources, materialDependencies, keys, keepSource);
         PlanExtraSkeleton(task, root, mod, descriptor, source, target, resources);
-        task.OutputModels.AddRange(CollectOutputModels(task, root, mod, keys));
+        var models = CollectOutputModels(task, root, mod, keys);
+        if (keepSource && task.OwnOption is { } own && PlanConvertedOption(task, root, descriptor, own) is { Moved: true } moved)
+        {
+            // The models now load from the converted item's own option.
+            var paths = moved.MovedFiles.Select(f => f.GamePath).ToHashSet(StringComparer.Ordinal);
+            models = [.. models.Select(m => m.GamePaths.Any(paths.Contains) ? m with { Options = [moved.Label!] } : m)];
+        }
+        task.OutputModels.AddRange(models);
+    }
+
+    /// <summary>
+    /// Adding to the mod with an option of the converted item's own: the files the conversion
+    /// makes (the copies it changes, the materials it takes from the game) and the metadata it adds
+    /// go into that option rather than beside the source's. Worked out on the definition as the
+    /// other planned changes leave it, and made by a change of its own after them.
+    /// </summary>
+    private static ConvertedOptionOutcome PlanConvertedOption(ConversionTask task, string root,
+        CustomizationKindDescriptor descriptor, ConvertedOptionRequest request)
+    {
+        var file = Path.Combine(root, PenumbraMod.MetaFileName);
+        var newFiles = task.PlannedRenames.Where(r => r.KeepsOriginal).Select(r => r.NewPath)
+            .Concat(task.PlannedGeneratedFiles.Select(g => g.FilePath))
+            .Select(path => GamePath.NormalizeLocal(Path.GetRelativePath(root, path)))
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var planned = task.PlannedJsonChanges.FirstOrDefault(j => string.Equals(j.FilePath, file, StringComparison.OrdinalIgnoreCase));
+        var raw = File.ReadAllText(file);
+        if (ModConverterService.ApplyJsonChanges(raw, planned?.Changes ?? [], out _) is not JsonObject after ||
+            Parse(file) is not JsonObject before)
+            return ConvertedOptionOutcome.Nothing;
+
+        var outcome = ConvertedOption.Move(PenumbraMod.FromJson(before), PenumbraMod.FromJson(after),
+            newFiles.ToHashSet(StringComparer.Ordinal), request.Name, request.Description);
+        if (outcome.Refusal is { } reason)
+            task.Diagnostics.Add(new PlanDiagnostic("converted_option_refused",
+                $"The converted {descriptor.DisplayName.ToLowerInvariant()} gets no option of its own: {reason} " +
+                "Everything is added beside the original's.", false));
+        if (outcome.Kept is { } kept) task.Diagnostics.Add(new PlanDiagnostic("converted_option_kept", kept, false));
+        if (!outcome.Moved) return outcome;
+        if (outcome.Placement is { } placement) task.ConvertedPlacements.Add(placement);
+
+        if (planned == null) task.PlannedJsonChanges.Add(planned = new PlannedJsonChange { FilePath = file });
+        var count = outcome.MovedFiles.Select(f => f.GamePath).Distinct().Count();
+        planned.Changes.Add(new JsonFieldChange
+        {
+            JsonPath   = "<root>.Groups",
+            ChangeType = ModConverterService.ConvertedOptionChange,
+            OldValue   = (count == 1 ? "1 new file" : $"{count} new files") +
+                         (outcome.Manipulations switch { 0 => string.Empty, 1 => ", 1 metadata entry", var n => $", {n} metadata entries" }),
+            NewValue   = $"{outcome.Label} (new option, switched on" +
+                         (outcome.Placement?.TurnedMulti == true ? "; the group becomes multi-select)" : ")"),
+            Data       = JsonSerializer.Serialize(new ModConverterService.ConvertedOptionData(request.Name, request.Description, newFiles)),
+        });
+        return outcome;
     }
 
     /// <summary>

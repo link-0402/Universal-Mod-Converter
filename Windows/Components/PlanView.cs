@@ -417,6 +417,7 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
         "dependency_files"    => "Add",
         "dependency_swaps"    => "Add swap",
         "manipulation_insert" => "Meta",
+        "converted_option"    => "Option",
         _                     => changeType,
     };
 }

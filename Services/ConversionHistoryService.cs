@@ -43,6 +43,7 @@ public sealed class ConversionHistoryService(Configuration configuration)
             SourceModDirectory = Normalize(task.ModDirectory),
             PublishedPath      = Normalize(task.PublishedPath ?? task.ModDirectory),
             RecoveryPath       = task.OutputMode.EditsSourceMod() ? task.RecoveryPath : null,
+            ConvertedOptions   = [.. task.ConvertedPlacements],
         };
         configuration.History.Insert(0, record);
         if (configuration.History.Count > MaxRecords)

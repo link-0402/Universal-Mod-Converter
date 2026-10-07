@@ -4,7 +4,14 @@ using System.Text.RegularExpressions;
 
 namespace UniversalModConverter.Core;
 
-public sealed record GearConversionRequest(GearItem Source, GearItem Target, ConversionOutputMode Mode);
+public sealed record GearConversionRequest(GearItem Source, GearItem Target, ConversionOutputMode Mode)
+{
+    /// <summary>
+    /// Added to the mod: the option the converted item's new files go into instead of beside the
+    /// source's (see <see cref="Core.ConvertedOption"/>), or null to add them beside.
+    /// </summary>
+    public ConvertedOptionRequest? ConvertedOption { get; init; }
+}
 
 public enum LocalFileOperation
 {
@@ -38,6 +45,9 @@ public sealed class GearConversionPlan : ModFilePlan
     public GearConversionRequest Request { get; }
 
     public override ConversionOutputMode Mode => Request.Mode;
+
+    /// <summary>Where the converted item's own option went, when it got one (see <see cref="Core.ConvertedOption"/>).</summary>
+    public ConvertedOptionPlacement? ConvertedPlacement { get; internal set; }
 
     /// <summary>Source game path → target game path for every converted resource.</summary>
     public Dictionary<string, string> GamePathMap { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -171,6 +181,9 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         /// </summary>
         private bool KeepsSource => _request.Mode.KeepsSource();
 
+        /// <summary>The definition before this conversion, when its new files get an option of their own.</summary>
+        private PenumbraMod? _before;
+
         public GearConversionPlan Run()
         {
             if (_src.SetId == _tgt.SetId && _src.Slot == _tgt.Slot && _src.IsAccessory == _tgt.IsAccessory)
@@ -186,6 +199,8 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                 return _plan;
             }
 
+            // In a run, the result already holds what the earlier conversions made.
+            if (KeepsSource && _request.ConvertedOption != null) _before = _plan.Result.Clone();
             IndexContainers();
             ResolveVariants();
             SeedAndWalk();
@@ -853,14 +868,47 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             RetargetManipulations(result, keepUnrelated: true, keepSource: KeepsSource);
             InjectDefaults(result);
             RetargetImcGroups(result);
+            var moved = MoveIntoConvertedOption(result);
 
             // Game files the target needs but the mod does not ship land in the default container,
             // so they apply even when the option holding the converted item is switched off.
-            if (KeepsSource && _generated.Count > 0)
+            if (KeepsSource && !moved && _generated.Count > 0)
                 Warn("additive_default_dependency",
                     $"{_generated.Count} file(s) the game provides were added to the mod's default files so the " +
                     "converted item is complete. They apply whenever the mod is enabled, not only when the " +
                     "option holding the converted item is on.");
+        }
+
+        /// <summary>
+        /// Moves the files this conversion wrote, and the metadata it added, out of the options they
+        /// were added beside and into the converted item's own option, when it is to have one.
+        /// </summary>
+        private bool MoveIntoConvertedOption(PenumbraMod result)
+        {
+            if (_before == null || _request.ConvertedOption is not { } request) return false;
+            // Adding to the mod writes only new files: converted copies and files taken from the game.
+            var written = _plan.Files.Where(f => f.Operation is LocalFileOperation.Write or LocalFileOperation.Copy)
+                .Select(f => GamePath.NormalizeLocal(f.Destination))
+                .ToHashSet(StringComparer.Ordinal);
+            var outcome = Core.ConvertedOption.Move(_before, result, written, request.Name, request.Description);
+            if (outcome.Refusal is { } reason)
+                Warn("converted_option_refused", $"The converted item gets no option of its own: {reason} Everything is added beside the original's.");
+            if (outcome.Kept is { } kept) Warn("converted_option_kept", kept);
+            if (!outcome.Moved) return false;
+
+            foreach (var (from, path) in outcome.MovedFiles)
+                if (_plan.ModelSources.Remove((from, path), out var model))
+                    _plan.ModelSources.TryAdd((outcome.Option, path), model);
+            _plan.ConvertedPlacement = outcome.Placement;
+            _plan.Changes.Add(new GearPlanChange("Group", outcome.Label!,
+                $"{Plural(outcome.MovedFiles.Select(f => f.GamePath).Distinct().Count(), "new file")}" +
+                (outcome.Manipulations > 0 ? $", {Plural(outcome.Manipulations, "metadata entry", "metadata entries")}" : string.Empty),
+                "in the converted item's own option, switched on" +
+                (outcome.Placement?.TurnedMulti == true ? "; the group becomes multi-select" : string.Empty)));
+            return true;
+
+            static string Plural(int count, string one, string? many = null)
+                => count == 1 ? $"1 {one}" : $"{count} {many ?? one + "s"}";
         }
 
         private string InPlaceLocal(FileProvider provider, Dictionary<string, List<bool>> usage,

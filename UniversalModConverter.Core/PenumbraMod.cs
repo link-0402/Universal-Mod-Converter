@@ -90,10 +90,14 @@ public sealed class PenumbraMod
         return true;
     }
 
-    public static PenumbraMod Load(string directory)
+    public static PenumbraMod Load(string directory) => FromJson(ParseObject(Path.Combine(directory, MetaFileName)));
+
+    /// <summary>
+    /// The mod a meta.json holds, read from <paramref name="meta"/>, which becomes part of the
+    /// mod: its DefaultData and Groups are taken out of it.
+    /// </summary>
+    public static PenumbraMod FromJson(JsonObject meta)
     {
-        var metaPath = Path.Combine(directory, MetaFileName);
-        var meta = ParseObject(metaPath);
         var version = Json.GetInt(meta["FileVersion"], 0);
         if (version > UnifiedFileVersion)
             throw new InvalidDataException(
@@ -233,6 +237,16 @@ public sealed class PenumbraMod
 
             writer.WriteEndObject();
         });
+
+    /// <summary>The definition as the meta.json <see cref="Save"/> writes, as a copy.</summary>
+    public JsonObject ToJson()
+    {
+        var json = new JsonObject();
+        foreach (var (key, value) in Meta) json[key] = value?.DeepClone();
+        if (!Default.IsEmpty) json["DefaultData"] = Default.Node.DeepClone();
+        if (Groups.Count > 0) json["Groups"] = new JsonArray([.. Groups.Select(g => (JsonNode)g.Node.DeepClone())]);
+        return json;
+    }
 
     private static void WriteNode(Utf8JsonWriter writer, JsonNode? value)
     {

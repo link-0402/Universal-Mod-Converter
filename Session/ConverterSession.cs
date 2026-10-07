@@ -80,6 +80,7 @@ public sealed partial class ConverterSession
         TextureLayout   = plugin.Configuration.TextureLayout;
         TextureAsNewMod = plugin.Configuration.TextureAsNewMod;
         NewModOnlyConverted = plugin.Configuration.NewModOnlyConverted;
+        AddToModOwnOption = plugin.Configuration.AddToModOwnOption;
         HideModdedTargets = plugin.Configuration.HideModdedTargets;
         Modded          = new ModdedTargets(plugin.PenumbraIpc,
             folder => Mods.FirstOrDefault(m => string.Equals(m.Folder, folder, StringComparison.OrdinalIgnoreCase))?.Name,
@@ -267,6 +268,21 @@ public sealed partial class ConverterSession
     /// What a conversion does to the source follows this, not where it is written.
     /// </summary>
     public ConversionOutputMode PlanOutputMode => NewModKeepsWholeMod ? ConversionOutputMode.InPlace : EffectiveOutputMode;
+
+    /// <summary>
+    /// Whether a conversion added to this mod puts the files it makes new (the converted model,
+    /// copies it patched) into an option of their own, instead of beside the original's.
+    /// </summary>
+    public bool AddToModOwnOption { get; private set; }
+
+    /// <summary>
+    /// Whether <see cref="AddToModOwnOption"/> means anything for the plan: it is added to this
+    /// mod, and holds gear or a hair, face, tail or ear. Animations have option groups of their
+    /// own, and a fan-out only adds paths to the mod's own files.
+    /// </summary>
+    public bool OwnOptionApplies
+        => EffectiveOutputMode == ConversionOutputMode.AddToMod && !UsesTextureOutput &&
+           (OutputContents.HasFlag(PlanContents.Gear) || OutputContents.HasFlag(PlanContents.Customization));
 
     public string NewModName { get; private set; } = string.Empty;
     private bool _newModNameIsDefault = true;
@@ -743,6 +759,15 @@ public sealed partial class ConverterSession
         MarkPlanDirty(); // Keeping the whole mod plans the conversions as in place.
     }
 
+    public void SetAddToModOwnOption(bool ownOption)
+    {
+        if (ownOption == AddToModOwnOption) return;
+        AddToModOwnOption = ownOption;
+        Config.AddToModOwnOption = ownOption;
+        Config.Save();
+        MarkPlanDirty(); // Where the new files go is part of the plan.
+    }
+
     public void SetTextureLayout(TextureFanOutLayout layout)
     {
         if (layout == TextureLayout) return;
@@ -864,7 +889,31 @@ public sealed partial class ConverterSession
             SourceGenderRace        = source.GenderRace,
             TargetGenderRace        = source.IsCustomization ? TargetRace : null,
             TargetSlot              = !source.IsCustomization && TargetSlot != source.Slot ? TargetSlot : null,
+            ConvertedOption         = ConvertedOptionFor(source),
         };
+    }
+
+    /// <summary>
+    /// The option the converted item's new files get when it is added to this mod with one of its
+    /// own: named for what changes, "Miqo'te Female" for a hair moved to another race, the target
+    /// item for gear.
+    /// </summary>
+    private ConvertedOptionRequest ConvertedOptionFor(DetectedItem source)
+    {
+        if (!source.IsCustomization)
+            return TargetItem is { } item
+                ? new ConvertedOptionRequest(item.Name.Length > 0 ? item.Name : item.ModelIdDisplay,
+                    $"{source.ItemName} ({source.ModelIdDisplay}), converted to {item.Name} ({item.ModelIdDisplay}).")
+                : new ConvertedOptionRequest(source.ItemName, $"{source.ItemName} ({source.ModelIdDisplay}), converted.");
+
+        var sourceRace = source.GenderRace ?? 0;
+        var sameItem = TargetCustomizationKind == source.Kind &&
+                       ushort.TryParse(source.ModelIdPadded, out var sourceId) && sourceId == TargetCustomizationId;
+        var name = TargetRace == sourceRace ? TargetOptionLabel
+            : sameItem ? RaceLabel(TargetRace)
+            : $"{RaceLabel(TargetRace)} {TargetOptionLabel}";
+        return new ConvertedOptionRequest(name,
+            $"{RaceLabel(sourceRace)} {source.ItemName}, converted to {RaceLabel(TargetRace)} {TargetOptionLabel}.");
     }
 
     public void Preview()
@@ -881,6 +930,7 @@ public sealed partial class ConverterSession
             task = enabled[0].Task.CloneInputs();
             task.OutputMode = EffectiveOutputMode;
             task.KeepsWholeMod = NewModKeepsWholeMod;
+            task.UsesConvertedOption = AddToModOwnOption;
             // Like the output mode, the layout is chosen for the plan, not per entry.
             if (task.TextureRequest is { } fanOut) task.TextureRequest = fanOut with { Layout = TextureLayout };
             description = enabled[0].Description;
@@ -892,6 +942,7 @@ public sealed partial class ConverterSession
                 ModDirectory  = ModDirectory,
                 OutputMode    = EffectiveOutputMode,
                 KeepsWholeMod = NewModKeepsWholeMod,
+                UsesConvertedOption = AddToModOwnOption,
             };
             // Planning runs off the framework thread, so it works on copies; the queue's own
             // entries get the results once it is done.
@@ -1168,6 +1219,8 @@ public sealed partial class ConverterSession
                     $"{task.MeshRemovals.Values.Sum(r => r.PartsOrEmpty.Length)} single part(s) from {task.MeshRemovals.Count} model(s).");
 
         void Post(string message) => Runner.Post(() => Log.Add(message));
+        // Read before the mod changes on disk: reloading it is what loses them.
+        var kept = isNewMod ? null : CaptureSettings(task.ModDirectory);
 
         Runner.TryRun("Converting", () =>
         {
@@ -1201,7 +1254,7 @@ public sealed partial class ConverterSession
 
             var problems = ReportVerification(result.Issues);
             if (isNewMod) FinishNewMod(task, result.Output, newModName, sourceName, description, problems);
-            else FinishInPlace(task, sourceName, description, problems);
+            else FinishInPlace(task, sourceName, description, problems, kept!);
         }, ex =>
         {
             // As above: the spent plan is previewed afresh rather than offered again without its contents.
@@ -1261,19 +1314,23 @@ public sealed partial class ConverterSession
         ActivateNewMod(folder, Path.GetFileName(path), path, record?.Id ?? Guid.Empty, 0);
     }
 
-    private void FinishInPlace(ConversionTask task, string sourceName, string description, int problems)
+    /// <summary>A mod's folder name, as Penumbra names the mod.</summary>
+    private static string ModFolder(string directory) => Path.GetFileName(directory.TrimEnd('\\', '/'));
+
+    private void FinishInPlace(ConversionTask task, string sourceName, string description, int problems, KeptSettings kept)
     {
-        var folder = Path.GetFileName(task.ModDirectory.TrimEnd('\\', '/'));
+        var folder = ModFolder(task.ModDirectory);
         // A folder Penumbra does not manage (opened through "Other folder") has nothing to reload,
         // and Penumbra failing to reload it says nothing about the conversion.
         var managed = PenumbraAvailable && Mods.Any(m => SamePath(m.Directory, task.ModDirectory));
         if (managed)
         {
-            if (!_plugin.PenumbraIpc.ReloadMod(folder))
+            if (!ReloadKeepingSettings(task.ModDirectory, kept))
             {
                 Log.Add(LogLevel.Error, $"Penumbra could not reload '{folder}'. Rolling back.");
                 var restored = _plugin.Converter.RollbackInPlace(task, Log.Add);
-                if (restored) _plugin.PenumbraIpc.ReloadMod(folder);
+                if (restored) ReloadKeepingSettings(task.ModDirectory, kept);
+                PutSettingsBack(kept, (_, _) => null);
                 Result = new ResultBanner(BannerKind.Error, "Conversion rolled back",
                     restored
                         ? "Penumbra could not load the converted mod, so the original was restored."
@@ -1282,6 +1339,7 @@ public sealed partial class ConverterSession
                 Rescan();
                 return;
             }
+            PutSettingsBack(kept, AddOptions(task.ConvertedPlacements));
         }
 
         _plugin.Converter.ConfirmInPlace(task, Log.Add, managed);
@@ -1371,6 +1429,8 @@ public sealed partial class ConverterSession
         Log.BeginOperation(isConversion: false);
         Log.Add($"Reverting {record.Description}");
         Result = null;
+        // The mod goes back to how it was, which a reload alone can get wrong (see ReloadKeepingSettings).
+        var kept = record.Mode.IsNewMod() ? null : CaptureSettings(record.PublishedPath);
         Runner.TryRun("Reverting", () => History.Revert(record, msg => Runner.Post(() => Log.Add(msg))), result =>
         {
             History.MarkReverted(record, result);
@@ -1385,9 +1445,12 @@ public sealed partial class ConverterSession
             {
                 // The new mod's folder was already moved away, so this only unregisters it.
                 // A restored in-place mod is reloaded so Penumbra picks up the original again.
-                var updated = record.Mode.IsNewMod() && !Directory.Exists(record.PublishedPath)
-                    ? _plugin.PenumbraIpc.DeleteMod(folder)
-                    : _plugin.PenumbraIpc.ReloadMod(folder);
+                var updated = kept != null
+                    ? ReloadKeepingSettings(record.PublishedPath, kept)
+                    : record.Mode.IsNewMod() && !Directory.Exists(record.PublishedPath)
+                        ? _plugin.PenumbraIpc.DeleteMod(folder)
+                        : _plugin.PenumbraIpc.ReloadMod(folder);
+                if (kept != null) PutSettingsBack(kept, RemoveOptions(record.ConvertedOptions));
                 if (!updated)
                     Log.Add(LogLevel.Warning, $"Penumbra could not update '{folder}'. Use 'Rediscover Mods' in Penumbra.");
                 RefreshMods();

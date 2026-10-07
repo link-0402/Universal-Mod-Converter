@@ -24,6 +24,21 @@ public class ConversionTask
     /// </summary>
     public ConversionOutputMode PlanMode => KeepsWholeMod && OutputMode.IsNewMod() ? ConversionOutputMode.InPlace : OutputMode;
 
+    /// <summary>
+    /// The option the converted item's new files get when it is added to the mod with an option of
+    /// its own: what it is named and says. Set with the conversion, whatever the output mode.
+    /// </summary>
+    public ConvertedOptionRequest? ConvertedOption { get; set; }
+
+    /// <summary>Added to the mod, the new files go into <see cref="ConvertedOption"/> instead of beside the original's.</summary>
+    public bool UsesConvertedOption { get; set; }
+
+    /// <summary>Where the planned conversions put the converted items' own options; empty when none got one.</summary>
+    public List<ConvertedOptionPlacement> ConvertedPlacements { get; } = new();
+
+    /// <summary>The option the planners put the new files into, or null when they go beside the original's.</summary>
+    public ConvertedOptionRequest? OwnOption => UsesConvertedOption && PlanMode.KeepsSource() ? ConvertedOption : null;
+
     /// <summary>The complete gear conversion plan; null for customization conversions.</summary>
     public GearConversionPlan? GearPlan { get; set; }
 
@@ -183,6 +198,8 @@ public class ConversionTask
             Kind                    = Kind,
             OutputMode              = OutputMode,
             KeepsWholeMod           = KeepsWholeMod,
+            ConvertedOption         = ConvertedOption,
+            UsesConvertedOption     = UsesConvertedOption,
             AnimationRequest        = AnimationRequest,
             TextureRequest          = TextureRequest,
             TargetCustomizationKind = TargetCustomizationKind,
@@ -233,6 +250,9 @@ public class JsonFieldChange
     public string OldValue  { get; set; } = string.Empty;
     public string NewValue  { get; set; } = string.Empty;
     public string ChangeType{ get; set; } = string.Empty; // "path_key", "path_value", "numeric_id"
+
+    /// <summary>What applying the change needs beyond the values the preview shows, as JSON; null for most.</summary>
+    public string? Data { get; set; }
 }
 
 /// <summary>A binary resource with planned path replacements; MDL/MTRL string tables are rebuilt.</summary>
