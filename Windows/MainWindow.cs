@@ -21,6 +21,7 @@ public sealed class MainWindow : Window, IDisposable
     private const float MinBrowserWidth = 160f;
     private const float MaxBrowserWidth = 520f;
     private const string KofiUrl = "https://ko-fi.com/luci_xiv";
+    private const string DiscordUrl = "https://discord.gg/w5vzsPXsE7";
 
     private readonly Plugin           _plugin;
     private readonly ConverterSession _session;
@@ -67,22 +68,28 @@ public sealed class MainWindow : Window, IDisposable
         TitleBarButtons.Add(new TitleBarButton
         {
             Icon = FontAwesomeIcon.Heart,
-            Click = _ => OpenKofiPage(),
+            Click = _ => OpenPage(KofiUrl, "Ko-fi"),
             ShowTooltip = () => ImGui.SetTooltip("♥ Support me on Ko-fi"),
+        });
+        TitleBarButtons.Add(new TitleBarButton
+        {
+            Icon = FontAwesomeIcon.Comments,
+            Click = _ => OpenPage(DiscordUrl, "Discord"),
+            ShowTooltip = () => ImGui.SetTooltip("Join the Discord"),
         });
     }
 
     public void Dispose() { }
 
-    private void OpenKofiPage()
+    private static void OpenPage(string url, string name)
     {
         try
         {
-            Util.OpenLink(KofiUrl);
+            Util.OpenLink(url);
         }
         catch (Exception e)
         {
-            Plugin.Log.Error(e, "Could not open the Universal Mod Converter Ko-fi page.");
+            Plugin.Log.Error(e, $"Could not open the Universal Mod Converter {name} page.");
         }
     }
 
