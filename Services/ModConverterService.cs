@@ -155,6 +155,14 @@ public sealed class ModConverterService
     /// </summary>
     private void PlanQueue(ConversionTask task)
     {
+        // Customization conversions patch their files on disk rather than producing a file plan,
+        // so they cannot share a definition with gear and animations; they run among themselves.
+        if (task.Entries.Any(e => e.Enabled && CustomizationKinds.IsCustomization(e.Kind)))
+        {
+            PlanCustomizationRun(task);
+            return;
+        }
+
         var context = new ModPlanContext(task.ModDirectory, task.PlanMode, shared: true);
         var merger  = new ModPlanMerger(context);
 
@@ -162,16 +170,6 @@ public sealed class ModConverterService
         {
             entry.ResetPlan();
             if (!entry.Enabled) continue;
-            if (CustomizationKinds.IsCustomization(entry.Kind))
-            {
-                // Customization conversions patch their files on disk rather than producing a
-                // file plan, so they cannot share a definition with the others yet.
-                entry.Diagnostics.Add(new PlanDiagnostic("queue_unsupported_kind",
-                    $"{entry.Description}: hair, face, tail, Viera ear and skin conversions cannot be converted " +
-                    "together with others yet. Convert this one on its own.", true));
-                entry.Rejected = true;
-                continue;
-            }
 
             entry.Task.OutputMode = task.OutputMode;
             entry.Task.KeepsWholeMod = task.KeepsWholeMod;
@@ -219,6 +217,139 @@ public sealed class ModConverterService
         Finish(task, plan);
         _log.Information("[UMC] Planned a run of {0} conversion(s) ({1}): {2} file operation(s), {3} diagnostic(s).",
             plan.Entries.Count(e => !e.Rejected), task.OutputMode, plan.Files.Count, task.Diagnostics.Count);
+    }
+
+    /// <summary>
+    /// Plans a run of hair, face, tail, ear and skin conversions, which only run together when
+    /// added to this mod (a hair converted to several races at once, say). Each is planned on its
+    /// own against the mod as it is on disk, like a single conversion: added to the mod, a
+    /// conversion only makes new files (copies under its target's name, materials from the game)
+    /// and adds paths, so the others' plans still hold once it is written. What could still
+    /// collide is checked here: two conversions writing the same file, and a metadata change that
+    /// no longer applies once the conversions before it are made. Applying writes them one after
+    /// another into one staged copy of the mod; a rejected one blocks the run.
+    /// </summary>
+    private void PlanCustomizationRun(ConversionTask task)
+    {
+        foreach (var entry in task.Entries) entry.ResetPlan();
+        var entries = task.Entries.Where(e => e.Enabled).ToList();
+        if (entries.Any(e => !CustomizationKinds.IsCustomization(e.Kind) || e.CanFanOut))
+            task.Diagnostics.Add(new PlanDiagnostic("queue_unsupported_kind",
+                "Hair, face, tail, Viera ear and skin conversions can only run together with each other, and retextures " +
+                "only on their own. Convert them separately.", true));
+        else if (task.PlanMode != ConversionOutputMode.AddToMod)
+            task.Diagnostics.Add(new PlanDiagnostic("customization_run_mode",
+                "Several hair, face, tail, Viera ear and skin conversions only run together when they are added to this " +
+                "mod, which leaves the originals as they are. Choose \"Add to this mod\", or convert them one at a time.", true));
+        else
+        {
+            foreach (var entry in entries) PlanRunEntry(task, entry);
+            CheckRunEntries(task, entries);
+        }
+
+        foreach (var entry in entries)
+            task.Diagnostics.AddRange(entry.Diagnostics.Select(d => d with { Message = $"{entry.Description}: {d.Message}" }));
+        var accepted = entries.Where(e => !e.Rejected && e.Task.IsPlanned).ToList();
+        task.OutputModels.AddRange(accepted.SelectMany(e => e.Task.OutputModels));
+        task.ConvertedPlacements.AddRange(accepted.SelectMany(e => e.Task.ConvertedPlacements));
+        task.SourceFingerprint = ConversionPlanValidator.RecomputeSourceFingerprint(task);
+        task.PlanFingerprint = ModFingerprint.ComputePlan(
+            accepted.Select(e => new ConversionOperation("conversion", e.Description, e.Task.PlanFingerprint)),
+            string.Join("\n", accepted.Select(e => e.Description)));
+        task.IsPlanned = true;
+        task.ErrorMessage = task.HasBlockers
+            ? string.Join(" ", task.Diagnostics.Where(d => d.IsBlocker).Select(d => d.Message))
+            : null;
+        _log.Information("[UMC] Planned a run of {0} customization conversion(s) ({1}): {2} file(s) copied, {3} diagnostic(s).",
+            accepted.Count, task.OutputMode, accepted.Sum(e => e.Task.PlannedRenames.Count), task.Diagnostics.Count);
+    }
+
+    /// <summary>Plans one conversion of a customization run the way it would be planned on its own.</summary>
+    private void PlanRunEntry(ConversionTask run, QueuedConversion entry)
+    {
+        var task = entry.Task;
+        task.OutputMode = run.OutputMode;
+        task.KeepsWholeMod = run.KeepsWholeMod;
+        task.UsesConvertedOption = run.UsesConvertedOption;
+        task.ModDirectory = run.ModDirectory;
+        try
+        {
+            _customizationPlanner.Plan(task);
+            ConversionPlanValidator.Finalize(task);
+        }
+        catch (Exception ex)
+        {
+            task.Diagnostics.Add(new PlanDiagnostic("planning_failed", ex.Message, true));
+            _log.Error(ex, "[UMC] Planning {0} failed", entry.Description);
+        }
+        entry.Diagnostics.AddRange(task.Diagnostics);
+        entry.Rejected = task.HasBlockers || !task.IsPlanned;
+    }
+
+    /// <summary>
+    /// Goes through the run's conversions in the order they are written, rejecting one that writes
+    /// a file an earlier one writes, or whose metadata changes no longer apply to the definition
+    /// the earlier ones leave. Each converted item's own option is worked out again on that
+    /// definition too: the second one goes into the group the first one made or turned
+    /// multi-select, which is where Penumbra's settings have to tick it.
+    /// </summary>
+    private static void CheckRunEntries(ConversionTask run, IReadOnlyList<QueuedConversion> entries)
+    {
+        var written = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var definitions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in entries.Where(e => !e.Rejected))
+        {
+            var task = entry.Task;
+            var writes = task.PlannedRenames.Select(r => r.NewPath)
+                .Concat(task.PlannedGeneratedFiles.Select(g => g.FilePath))
+                .Select(Path.GetFullPath)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (writes.FirstOrDefault(written.ContainsKey) is { } clash)
+            {
+                Reject(entry, "queue_conflict",
+                    $"{written[clash]} writes {RelativePath(run.ModDirectory, clash)} too. Convert this one on its own.");
+                continue;
+            }
+
+            var replayed = new Dictionary<string, string>(definitions, StringComparer.OrdinalIgnoreCase);
+            var outcomes = new List<(JsonFieldChange Change, ConvertedOptionOutcome Outcome)>();
+            string? problem = null;
+            foreach (var json in task.PlannedJsonChanges.Where(j => j.Changes.Count > 0))
+            {
+                var file = Path.GetFullPath(json.FilePath);
+                var before = replayed.TryGetValue(file, out var text) ? text : File.ReadAllText(file);
+                var after = ApplyJsonChanges(before, json.Changes, out var applied, (change, outcome) => outcomes.Add((change, outcome)));
+                if (after == null || applied != json.Changes.Count)
+                {
+                    problem = $"Only {applied} of its {json.Changes.Count} changes to {Path.GetFileName(file)} still apply once " +
+                              "the conversions before it are made. Convert this one on its own.";
+                    break;
+                }
+                replayed[file] = after.ToJsonString();
+            }
+            if (problem != null)
+            {
+                Reject(entry, "queue_conflict", problem);
+                continue;
+            }
+
+            foreach (var path in writes) written[path] = entry.Description;
+            foreach (var (file, text) in replayed) definitions[file] = text;
+            if (outcomes.Count == 0) continue;
+            task.ConvertedPlacements.Clear();
+            foreach (var (change, outcome) in outcomes)
+            {
+                change.NewValue = CustomizationPlanner.ConvertedOptionSummary(outcome);
+                if (outcome.Placement is { } placement) task.ConvertedPlacements.Add(placement);
+            }
+        }
+
+        static void Reject(QueuedConversion entry, string code, string message)
+        {
+            entry.Diagnostics.Add(new PlanDiagnostic(code, message, true));
+            entry.Rejected = true;
+        }
     }
 
     /// <summary>
@@ -398,6 +529,13 @@ public sealed class ModConverterService
             CopyDirectory(sourceDir, stageDir);
             if (task.FilePlan is { } plan)
                 GearConversionExecutor.ApplyInPlace(plan, stageDir, Log);
+            else if (task.IsQueue)
+                // A customization run: each conversion added in turn, as its plan was checked.
+                foreach (var entry in task.Entries.Where(e => e.Enabled && !e.Rejected))
+                {
+                    Log($"Adding {entry.Description}");
+                    ApplyConversionCore(RemapTask(entry.Task, stageDir), Log);
+                }
             else
             {
                 var stagedTask = RemapTask(task, stageDir);
@@ -658,6 +796,8 @@ public sealed class ModConverterService
             }
             else if (task.FilePlan is { } plan)
                 GearConversionExecutor.WriteNewMod(plan, task.ModDirectory, stageDir, modDisplayName, Log);
+            else if (task.IsQueue)
+                throw new InvalidOperationException("Several hair, face, tail, ear and skin conversions can only be added to this mod.");
             else
             {
                 // A customization patches the files of its mod, so it is converted in a copy of
@@ -873,6 +1013,18 @@ public sealed class ModConverterService
                 return hits;
             }
 
+            if (task.IsQueue)
+            {
+                // A customization run, added to this mod: each conversion's added paths must load a file.
+                foreach (var entry in task.Entries.Where(e => e.Enabled && !e.Rejected))
+                foreach (var hit in VerifyAddedCustomization(entry.Task, modDirectory, []))
+                {
+                    hit.Detail = $"{entry.Description}: {hit.Detail}";
+                    hits.Add(hit);
+                }
+                return hits;
+            }
+
             if (CustomizationKinds.IsCustomization(task.Kind))
             {
                 // Added beside the source, the source's paths stay on purpose; what matters is
@@ -1081,7 +1233,9 @@ public sealed class ModConverterService
     /// when it is empty; <paramref name="applied"/> counts the changes that could be made. The
     /// preview of a customization plan makes them in memory to see what they add up to.
     /// </summary>
-    internal static JsonNode? ApplyJsonChanges(string raw, IReadOnlyList<JsonFieldChange> changes, out int applied)
+    /// <param name="onConvertedOption">Told where each converted item's own option went.</param>
+    internal static JsonNode? ApplyJsonChanges(string raw, IReadOnlyList<JsonFieldChange> changes, out int applied,
+        Action<JsonFieldChange, ConvertedOptionOutcome>? onConvertedOption = null)
     {
         applied = 0;
         var node = ParseJson(raw);
@@ -1094,8 +1248,16 @@ public sealed class ModConverterService
                      ConvertedOptionChange => 2,
                      _ => 0,
                  }))
-            if (change.ChangeType == ConvertedOptionChange ? ApplyConvertedOption(raw, ref node, change) : ApplyJsonChangeAtPath(node!, change))
-                applied++;
+        {
+            if (change.ChangeType != ConvertedOptionChange)
+            {
+                if (ApplyJsonChangeAtPath(node!, change)) applied++;
+                continue;
+            }
+            if (ApplyConvertedOption(raw, ref node, change) is not { } outcome) continue;
+            applied++;
+            onConvertedOption?.Invoke(change, outcome);
+        }
         return node;
     }
 
@@ -1112,19 +1274,19 @@ public sealed class ModConverterService
     /// <summary>
     /// Moves what the other changes added and made new into the converted item's own option. It
     /// is worked out again from the definition before (<paramref name="raw"/>) and after them, which
-    /// the source's fingerprint holds to what the preview saw.
+    /// the source's fingerprint holds to what the preview saw. Null when nothing moved.
     /// </summary>
-    private static bool ApplyConvertedOption(string raw, ref JsonNode? node, JsonFieldChange change)
+    private static ConvertedOptionOutcome? ApplyConvertedOption(string raw, ref JsonNode? node, JsonFieldChange change)
     {
         if (node is not JsonObject json || change.Data == null ||
             JsonSerializer.Deserialize<ConvertedOptionData>(change.Data) is not { } data ||
-            ParseJson(raw) is not JsonObject original) return false;
+            ParseJson(raw) is not JsonObject original) return null;
         var after = PenumbraMod.FromJson((JsonObject)json.DeepClone());
         var outcome = ConvertedOption.Move(PenumbraMod.FromJson(original), after,
             data.Files.ToHashSet(StringComparer.Ordinal), data.Name, data.Description);
-        if (!outcome.Moved) return false;
+        if (!outcome.Moved) return null;
         node = after.ToJson();
-        return true;
+        return outcome;
     }
 
     private static bool ApplyJsonChangeAtPath(JsonNode root, JsonFieldChange change)

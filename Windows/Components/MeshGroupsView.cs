@@ -58,8 +58,12 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
             return;
         }
         var conversions = task.GearConversions().ToList();
-        // Hair, face, tail and ear conversions patch the mod's files instead of producing a file plan.
-        var customization = task.FilePlan == null && CustomizationKinds.IsCustomization(task.Kind);
+        // Hair, face, tail and ear conversions patch the mod's files instead of producing a file plan,
+        // one conversion's or each of a run's in its own task.
+        var run = task.FilePlan == null
+            ? task.Entries.Where(e => e.Enabled && !e.Rejected && e.Task.IsPlanned && CustomizationKinds.IsCustomization(e.Kind)).ToList()
+            : [];
+        var customization = task.FilePlan == null && (CustomizationKinds.IsCustomization(task.Kind) || run.Count > 0);
         if (conversions.Count == 0 && !customization)
         {
             Widgets.MutedWrapped("Mesh groups can be edited for gear, facewear, hair, face, tail and ear conversions.");
@@ -67,13 +71,15 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         }
 
         // A single conversion says what changing slots does up front; a run says it under each conversion.
-        var single = conversions.Count <= 1;
+        var single = run.Count > 0 ? run.Count == 1 : conversions.Count <= 1;
         if (conversions.Count == 1 && CrossSlotNote(conversions[0].Plan.Request) is { } note)
             DrawCrossSlotNotice(conversions[0].Plan.Request.Source.Slot, conversions[0].Plan.Request.Target.Slot, note);
 
         if (task.OutputModels.Count == 0)
         {
-            Widgets.MutedWrapped(customization
+            Widgets.MutedWrapped(run.Count > 0
+                ? "The output contains no model for the converted items."
+                : customization
                 ? $"The output contains no model for the converted {CustomizationKinds.Get(task.Kind).DisplayName.ToLowerInvariant()}."
                 : single
                 ? "The output contains no model for the target item."
@@ -81,7 +87,7 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
             return;
         }
 
-        EnsureSections(task, conversions, customization);
+        EnsureSections(task, conversions, customization, run);
         Widgets.MutedWrapped("Untick a mesh group to leave it out of the converted model, or open it with the arrow to " +
                              "keep or remove its parts one by one. " +
                              (customization ? string.Empty
@@ -427,11 +433,19 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
     }
 
     private void EnsureSections(ConversionTask task, List<(string Description, GearConversionPlan Plan)> conversions,
-        bool customization)
+        bool customization, List<QueuedConversion> run)
     {
         if (ReferenceEquals(task, _builtFor)) return;
         _builtFor = task;
         _expanded.Clear();
+        if (run.Count > 0)
+        {
+            // A section per conversion of the run, each model its own family as for a single one.
+            _sections = run.Select(entry => new Section(entry.Description, null,
+                entry.Task.OutputModels.Where(m => m.Editable).Select(m => new Family(FamilyTitle([m]), [m])).ToList(),
+                entry.Task.OutputModels.Where(m => !m.Editable).ToList())).ToList();
+            return;
+        }
         if (customization)
         {
             // Every model is for the one target race, so each file is its own family, named after itself.

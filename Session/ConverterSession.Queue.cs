@@ -33,14 +33,24 @@ public sealed partial class ConverterSession
         {
             if (SelectionBlockReason is { } reason) return reason;
             if (Source is not { } source) return "Select a source item first.";
-            // Hair, face, tail, ear and skin conversions (retextures included) run on their own:
-            // most patch files on disk instead of producing a file plan, so they cannot be merged.
-            if (_queue.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind)) is { } lone)
-                return $"The plan holds a {CustomizationKinds.Get(lone.Kind).DisplayName.ToLowerInvariant()} conversion, " +
+            // Hair, face, tail, ear and skin conversions patch files on disk instead of producing a
+            // file plan, so they cannot be merged with gear or animations. Added to this mod they
+            // only add files and paths, so several of them can run together (see
+            // ModConverterService.PlanCustomizationRun); a retexture fan-out still runs on its own.
+            if (_queue.FirstOrDefault(e => e.CanFanOut) is { } fanOut)
+                return $"The plan holds a {CustomizationKinds.Get(fanOut.Kind).DisplayName.ToLowerInvariant()} retexture, " +
                        "which has to run on its own. Convert it first, or remove it.";
-            if (source.IsCustomization && _queue.Count > 0)
-                return $"{CustomizationKinds.Get(source.Kind).DisplayName} conversions have to run on their own. " +
-                       "Clear the plan first.";
+            if (source.IsCustomization && source.CanFanOut && _queue.Count > 0)
+                return $"{CustomizationKinds.Get(source.Kind).DisplayName} retextures have to run on their own. Clear the plan first.";
+            if (_queue.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind)) is { } customization && !source.IsCustomization)
+                return $"The plan holds a {CustomizationKinds.Get(customization.Kind).DisplayName.ToLowerInvariant()} conversion, " +
+                       "which can only run together with other hair, face, tail, ear and skin conversions. Convert it first, or remove it.";
+            if (source.IsCustomization && _queue.Any(e => !CustomizationKinds.IsCustomization(e.Kind)))
+                return $"{CustomizationKinds.Get(source.Kind).DisplayName} conversions can only run together with other hair, face, " +
+                       "tail, ear and skin conversions. Clear the plan first.";
+            if (source.IsCustomization && _queue.Any(e => SameCustomizationTarget(e.Task)))
+                return $"The plan already converts something into {RaceLabel(TargetRace)} {TargetOptionLabel}; " +
+                       "two conversions cannot add the same target.";
             // Choosing the version here would add the same expression a second time, overlapping the first.
             if (source.Animation is { } animation && ExpressionAtSource(animation) &&
                 _queue.Any(e => NeedsSourceChoice(e) && e.Task.AnimationRequest!.SourceLocations.SequenceEqual(animation.Locations)))
@@ -51,6 +61,12 @@ public sealed partial class ConverterSession
             return null;
         }
     }
+
+    /// <summary>Whether a queued customization conversion adds the target the cards have chosen.</summary>
+    private bool SameCustomizationTarget(ConversionTask task)
+        => CustomizationKinds.IsCustomization(task.Kind) && task.TextureRequest == null &&
+           (task.TargetCustomizationKind ?? task.Kind) == TargetCustomizationKind && task.TargetGenderRace == TargetRace &&
+           ushort.TryParse(task.NewIdPadded, out var id) && id == TargetCustomizationId;
 
     /// <summary>
     /// Whether a queued animation still needs the version a new option group uses, which none was

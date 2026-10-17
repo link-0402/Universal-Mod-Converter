@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using UniversalModConverter.Core;
@@ -41,14 +42,7 @@ internal static class ConversionPlanValidator
             task.Diagnostics.Add(new PlanDiagnostic("unsafe_path", ex.Message, true));
         }
 
-        var inputFiles = task.AllAssetFiles
-            .Concat(task.PlannedJsonChanges.Select(j => j.FilePath))
-            .Concat(task.PlannedBinaryPatches.Select(b => b.FilePath))
-            .Concat(task.PlannedMdlChanges.Select(m => m.FilePath))
-            .Where(File.Exists)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        task.SourceFingerprint = ModFingerprint.Compute(root, inputFiles);
+        task.SourceFingerprint = ModFingerprint.Compute(root, InputFiles(task));
 
         var operations = task.PlannedRenames.Select(r => new ConversionOperation(r.KeepsOriginal ? "copy" : "rename", r.OldPath, r.NewPath))
             .Concat(task.PlannedGeneratedFiles.Select(f => new ConversionOperation("dependency", f.FilePath,
@@ -67,14 +61,16 @@ internal static class ConversionPlanValidator
             : null;
     }
 
+    /// <summary>The fingerprint of what a customization plan reads: one conversion's, or every one of a run.</summary>
     public static string RecomputeSourceFingerprint(ConversionTask task)
-    {
-        var inputs = task.AllAssetFiles
+        => ModFingerprint.Compute(task.ModDirectory,
+            InputFiles(task).Concat(task.Entries.Where(e => e.Enabled).SelectMany(e => InputFiles(e.Task))));
+
+    private static IEnumerable<string> InputFiles(ConversionTask task)
+        => task.AllAssetFiles
             .Concat(task.PlannedJsonChanges.Select(j => j.FilePath))
             .Concat(task.PlannedBinaryPatches.Select(b => b.FilePath))
             .Concat(task.PlannedMdlChanges.Select(m => m.FilePath))
             .Where(File.Exists)
             .Distinct(StringComparer.OrdinalIgnoreCase);
-        return ModFingerprint.Compute(task.ModDirectory, inputs);
-    }
 }
