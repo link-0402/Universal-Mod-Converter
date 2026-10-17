@@ -183,12 +183,16 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             ChangeType = ModConverterService.ConvertedOptionChange,
             OldValue   = (count == 1 ? "1 new file" : $"{count} new files") +
                          (outcome.Manipulations switch { 0 => string.Empty, 1 => ", 1 metadata entry", var n => $", {n} metadata entries" }),
-            NewValue   = $"{outcome.Label} (new option, switched on" +
-                         (outcome.Placement?.TurnedMulti == true ? "; the group becomes multi-select)" : ")"),
+            NewValue   = ConvertedOptionSummary(outcome),
             Data       = JsonSerializer.Serialize(new ModConverterService.ConvertedOptionData(request.Name, request.Description, newFiles)),
         });
         return outcome;
     }
+
+    /// <summary>What the preview says of the converted item's own option: "Converted / Miqo'te Female (new option, switched on)".</summary>
+    internal static string ConvertedOptionSummary(ConvertedOptionOutcome outcome)
+        => $"{outcome.Label} (new option, switched on" +
+           (outcome.Placement?.TurnedMulti == true ? "; the group becomes multi-select)" : ")");
 
     /// <summary>
     /// Adding to the mod leaves the source's files as they are. A file the conversion changes is

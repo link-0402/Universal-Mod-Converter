@@ -97,6 +97,7 @@ internal static class DiagnosticText
         // Converting several things at once
         ["queue_conflict"]               = "Overlaps another conversion",
         ["queue_unsupported_kind"]       = "Cannot be converted together",
+        ["customization_run_mode"]       = "Only together when added to this mod",
         ["source_unreadable"]            = "A source file cannot be read",
         ["malformed_mtrl"]               = "Material cannot be read",
 

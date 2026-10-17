@@ -323,6 +323,8 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
     /// </summary>
     private static List<Section> BuildRun(ConversionTask task)
     {
+        if (task.Entries.Any(e => CustomizationKinds.IsCustomization(e.Kind))) return BuildCustomizationRun(task);
+
         var changes = new List<GearPlanChange>();
         var files   = new List<PlannedFileOperation>();
         var gear    = false;
@@ -363,6 +365,21 @@ internal sealed class PlanView(ConverterSession session, Configuration config)
                 f.Destination,
                 f.Reason,
             }).ToList()));
+        return sections;
+    }
+
+    /// <summary>A run of customization conversions: the tables of one, with a column saying which conversion each row is from.</summary>
+    private static List<Section> BuildCustomizationRun(ConversionTask task)
+    {
+        var sections = new List<Section>();
+        foreach (var entry in task.Entries.Where(e => e.Enabled && !e.Rejected && e.Task.IsPlanned))
+        foreach (var section in BuildCustomization(entry.Task))
+        {
+            var merged = sections.FirstOrDefault(s => s.Title == section.Title);
+            if (merged == null)
+                sections.Add(merged = new Section(section.Title, ["Conversion", .. section.Headers], [Cell.Muted, .. section.Styles], []));
+            merged.Rows.AddRange(section.Rows.Select(row => (string[])[entry.Description, .. row]));
+        }
         return sections;
     }
 

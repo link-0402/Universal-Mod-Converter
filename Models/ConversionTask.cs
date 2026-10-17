@@ -66,6 +66,8 @@ public class ConversionTask
         FilePlan?.ReleaseContents();
         for (var i = 0; i < PlannedGeneratedFiles.Count; i++)
             PlannedGeneratedFiles[i] = PlannedGeneratedFiles[i] with { Data = [] };
+        // A customization run holds what it writes in its conversions' own tasks.
+        foreach (var entry in Entries) entry.Task.ReleaseContents();
     }
 
     /// <summary>Target customization kind; null means the same kind as <see cref="Kind"/>.</summary>
@@ -170,7 +172,10 @@ public class ConversionTask
     /// </summary>
     public List<QueuedConversion> Entries { get; } = new();
 
-    /// <summary>The plan the whole run produced; set only when <see cref="Entries"/> is used.</summary>
+    /// <summary>
+    /// The plan the whole run produced; set only when <see cref="Entries"/> is used. A run of
+    /// hair, face, tail, ear and skin conversions has none: each conversion's task holds its plan.
+    /// </summary>
     public MergedModPlan? MergedPlan { get; set; }
 
     public bool IsQueue => Entries.Count > 0;

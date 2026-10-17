@@ -729,9 +729,12 @@ public sealed partial class ConverterSession
     {
         get
         {
-            var kind = _queue.Count > 0
-                ? RunEntries.FirstOrDefault(e => CustomizationKinds.IsCustomization(e.Kind))?.Kind
-                : Source is { IsCustomization: true } source ? source.Kind : null;
+            var kinds = _queue.Count > 0
+                ? RunEntries.Where(e => CustomizationKinds.IsCustomization(e.Kind)).Select(e => e.Kind).Distinct().ToList()
+                : Source is { IsCustomization: true } source ? [source.Kind] : [];
+            // A run of several kinds (a hair and a tail) has no one name.
+            if (kinds.Count > 1) return "customization";
+            var kind = kinds.Count == 1 ? kinds[0] : (AssetKind?)null;
             return kind switch
             {
                 null                => null,
@@ -975,6 +978,10 @@ public sealed partial class ConverterSession
                     ? $"{animationPlan.Changes.Count} change(s), {animationPlan.Files.Count} file operation(s)"
                     : planned.TexturePlan is { } texturePlan
                     ? $"{texturePlan.Outputs.Count} path(s) added, {texturePlan.Files.Count} material file(s) written"
+                    : planned.IsQueue
+                    ? $"{planned.Entries.Count(e => e.Enabled && !e.Rejected)} conversion(s), " +
+                      $"{planned.Entries.Sum(e => e.Task.PlannedRenames.Count)} file(s) copied, " +
+                      $"{planned.Entries.Sum(e => e.Task.PlannedJsonChanges.Sum(j => j.Changes.Count))} metadata change(s)"
                     : $"{planned.PlannedRenames.Count(r => !r.KeepsOriginal)} rename(s), {planned.PlannedRenames.Count(r => r.KeepsOriginal)} file(s) copied, {planned.PlannedJsonChanges.Sum(j => j.Changes.Count)} metadata change(s), " +
                       $"{planned.PlannedBinaryPatches.Sum(b => b.Patches.Count)} binary patch(es), {planned.PlannedMdlChanges.Count} model rewrite(s)";
                 Log.Add(planned.HasBlockers ? LogLevel.Warning : LogLevel.Info,
