@@ -1185,7 +1185,7 @@ public sealed partial class ConverterSession
         {
             var (race, id) = _textureTargets.First();
             return TargetCustomizationKind == AssetKind.Body
-                ? RaceLabel(race)
+                ? RaceLabel(race) + (CustomizationPaths.SkinBodies(race).Count > 1 ? $" ({(id == CustomizationPaths.XaelaBody ? "Xaela" : "Raen")})" : string.Empty)
                 : $"{RaceLabel(race)} {GameDataService.OptionLabel(TargetCustomizationKind, id)}";
         }
         var races = _textureTargets.Select(t => t.Race).Distinct().Count();

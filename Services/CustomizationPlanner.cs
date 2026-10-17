@@ -129,7 +129,8 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         // copies, and the target's paths are added beside the source's rather than moved.
         var keepSource = task.PlanMode.KeepsSource();
         if (keepSource) KeepSourceFiles(task, root, mod, keys, target);
-        PlanJson(task, root, descriptor, source, target, resources, materialDependencies, keys, keepSource);
+        PlanJson(task, root, descriptor, source, target, resources, materialDependencies, keys, keepSource,
+            FaceSkeletons(task, source, target, resources));
         PlanExtraSkeleton(task, root, mod, descriptor, source, target, resources);
         var models = CollectOutputModels(task, root, mod, keys);
         if (keepSource && task.OwnOption is { } own && PlanConvertedOption(task, root, descriptor, own) is { Moved: true } moved)
@@ -525,10 +526,12 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
     /// Add the target's paths beside the source's instead of moving them, and add the target's
     /// own metadata beside the source's instead of editing it.
     /// </param>
+    /// <param name="skeletonFor">The skeleton the target's EST entry names in place of the one the source's names, or null to keep it.</param>
     private static void PlanJson(ConversionTask task, string root,
         CustomizationKindDescriptor descriptor, CustomizationPathEndpoint source,
         CustomizationPathEndpoint target, ModResourceIndex resources,
-        IReadOnlyDictionary<string, Dictionary<string, string>> materialDependencies, KeyRules keys, bool keepSource)
+        IReadOnlyDictionary<string, Dictionary<string, string>> materialDependencies, KeyRules keys, bool keepSource,
+        Func<ushort, ushort?> skeletonFor)
     {
         var renameMap = task.PlannedRenames.ToDictionary(
             rename => Normalize(Path.GetRelativePath(root, rename.OldPath)),
@@ -560,8 +563,9 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         if (dropped.Count > 0)
             task.Diagnostics.Add(new PlanDiagnostic("xaela_material_dropped",
-                $"The target has no Xaela material, so the source's {dropped.Count} Xaela path(s), such as {dropped.First()}, " +
-                "are removed: nothing loads them once the tail's model has moved.", false));
+                $"The target has no {CustomizationPaths.SecondClan(source.GenderRace)} material, so the source's {dropped.Count} " +
+                $"{CustomizationPaths.SecondClan(source.GenderRace)} path(s), such as {dropped.First()}, are removed: nothing loads " +
+                $"them once the {descriptor.DisplayName.ToLowerInvariant()}'s model has moved.", false));
 
         void Walk(JsonNode? node, string path, List<JsonFieldChange> changes)
         {
@@ -736,6 +740,9 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             if (Json.GetString(est["Gender"]) is { } gender && !gender.Equals(sourceNames.Gender, StringComparison.OrdinalIgnoreCase)) return edits;
             edits.Add(new JsonFieldChange { JsonPath = "SetId", OldValue = source.ModelId.ToString("D4"), NewValue = target.ModelId.ToString("D4"),
                 ChangeType = est["SetId"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
+            if (Json.TryGetInt(est["Entry"], out var entry) && skeletonFor((ushort)entry) is { } replacement && replacement != entry)
+                edits.Add(new JsonFieldChange { JsonPath = "Entry", OldValue = entry.ToString(), NewValue = replacement.ToString(),
+                    ChangeType = est["Entry"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
             // Only real edits: an unchanged value would count as a failed change at apply time.
             if (est["Race"] is not null && sourceNames.Race != targetNames.Race)
                 edits.Add(new JsonFieldChange { JsonPath = "Race", OldValue = sourceNames.Race, NewValue = targetNames.Race, ChangeType = "path_string" });
@@ -792,11 +799,12 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             .ToList();
         var prefix = source.Kind == AssetKind.Hair ? 'h' : 'f';
         var directory = source.Kind == AssetKind.Hair ? "hair" : "face";
-        string SkeletonPath(ushort skeleton) => $"chara/human/c{target.GenderRace:D4}/skeleton/{directory}/{prefix}{skeleton:D4}/" +
-                                                $"skl_c{target.GenderRace:D4}{prefix}{skeleton:D4}.sklb";
-        bool Exists(ushort skeleton) => SkeletonPath(skeleton) is var path &&
-                                        (resources.Files.ContainsKey(path) || resources.FileSwaps.ContainsKey(path) ||
-                                         gameData is not IGameFileProvider files || files.FileExists(path));
+        string SkeletonPath(ushort skeleton, ushort race) => $"chara/human/c{race:D4}/skeleton/{directory}/{prefix}{skeleton:D4}/" +
+                                                             $"skl_c{race:D4}{prefix}{skeleton:D4}.sklb";
+        bool ExistsFor(ushort skeleton, ushort race) => SkeletonPath(skeleton, race) is var path &&
+                                                        (resources.Files.ContainsKey(path) || resources.FileSwaps.ContainsKey(path) ||
+                                                         gameData is not IGameFileProvider files || files.FileExists(path));
+        bool Exists(ushort skeleton) => ExistsFor(skeleton, target.GenderRace);
 
         var defaultSource = FindEst(mod.Default, source);
         if (defaultSource == null && FindEst(mod.Default, target) is { } definedTarget)
@@ -835,22 +843,27 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         }
 
         // The skeleton an option sets for the source (the last one the mod defines, should several options
-        // set different ones) and the default must exist for the target race.
+        // set different ones) and the default must exist for the target race. One the source race does
+        // not have either is no skeleton at all: the game's table says so with entry 1, for instance.
         var used = resources.EstOverrides
             .Where(o => o.Key == new EstOverrideKey(source.Kind, source.GenderRace, source.ModelId))
             .Select(o => o.Value)
             .Append(defaultSkeleton)
-            .Where(id => id != 0)
+            .Where(id => id != 0 && ExistsFor(id, source.GenderRace))
             .Distinct();
         var defaultAvailable = true;
         foreach (var skeleton in used)
         {
             if (Exists(skeleton)) continue;
-            var skeletonPath = SkeletonPath(skeleton);
+            var skeletonPath = SkeletonPath(skeleton, target.GenderRace);
             if (skeleton == defaultSkeleton) defaultAvailable = false;
+            // A face's option entries name the target's own skeleton instead (see FaceSkeletons).
+            if (source.Kind == AssetKind.Face && skeleton != defaultSkeleton) continue;
             task.Diagnostics.Add(new PlanDiagnostic("extra_skeleton_missing",
                 $"The source uses extra skeleton {prefix}{skeleton:D4}, which does not exist for {RaceNames.Describe(target.GenderRace)} " +
-                $"({skeletonPath}); physics bones of the converted {descriptor.DisplayName.ToLowerInvariant()} may not move.", false));
+                $"({skeletonPath}); " + (source.Kind == AssetKind.Face
+                    ? "the converted face keeps the race's own face skeleton."
+                    : $"physics bones of the converted {descriptor.DisplayName.ToLowerInvariant()} may not move."), false));
         }
 
         // An explicit default entry is retargeted with the rest of the metadata, and a target whose own
@@ -886,6 +899,41 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                        $"(target vanilla {prefix}{targetVanilla:D4}, source default {prefix}{defaultSkeleton:D4})",
             NewValue = manipulation.ToJsonString(),
         });
+    }
+
+    /// <summary>
+    /// Across races, the face skeleton an EST entry of the source names may not exist for the target
+    /// race (every Miqo'te woman's face uses f0002, for instance). The face skeleton carries the
+    /// face's bones and expressions, so such an entry names the target's own skeleton for the
+    /// target face instead, and the plan says so once per skeleton. Null keeps the entry as it is.
+    /// </summary>
+    private Func<ushort, ushort?> FaceSkeletons(ConversionTask task, CustomizationPathEndpoint source,
+        CustomizationPathEndpoint target, ModResourceIndex resources)
+    {
+        if (source.Kind != AssetKind.Face || target.Kind != AssetKind.Face || source.GenderRace == target.GenderRace ||
+            gameData is not IGameFileProvider files)
+            return _ => null;
+        const string estPath = "chara/xls/charadb/faceskeletontemplate.est";
+        ushort own = 0;
+        try
+        {
+            var est = resources.Files.TryGetValue(estPath, out var local) ? File.ReadAllBytes(local) : files.ReadFile(estPath);
+            if (est == null || !ExtraSkeletonTable.TryGet(est, target.GenderRace, target.ModelId, out own) || own == 0) return _ => null;
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException) { return _ => null; }
+
+        var reported = new HashSet<ushort>();
+        return skeleton =>
+        {
+            if (skeleton == 0) return null;
+            var path = $"chara/human/c{target.GenderRace:D4}/skeleton/face/f{skeleton:D4}/skl_c{target.GenderRace:D4}f{skeleton:D4}.sklb";
+            if (resources.Files.ContainsKey(path) || resources.FileSwaps.ContainsKey(path) || files.FileExists(path)) return null;
+            if (reported.Add(skeleton))
+                task.Diagnostics.Add(new PlanDiagnostic("face_skeleton_replaced",
+                    $"The mod gives the face skeleton f{skeleton:D4}, which {RaceNames.Describe(target.GenderRace)} does not have; " +
+                    $"the converted face uses the race's own skeleton for face {target.ModelId} (f{own:D4}) instead.", false));
+            return own;
+        };
     }
 
     /// <summary>
@@ -1027,13 +1075,13 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         {
             _source = source;
             _target = target;
-            var sourceXaela = CustomizationPaths.XaelaMaterialEndpoint(source);
-            var targetXaela = CustomizationPaths.XaelaMaterialEndpoint(target);
+            var sourceXaela = CustomizationPaths.ClanMaterialEndpoint(source);
+            var targetXaela = CustomizationPaths.ClanMaterialEndpoint(target);
             _droppedXaela = targetXaela == null ? sourceXaela : null;
             _sharedXaela = sourceXaela == null ? targetXaela : null;
-            // Hrothgar tails keep the same material in up to five variant folders. A target
-            // with a single folder receives one of them: the tail's own number when present.
-            if (!CustomizationPaths.IsHrothgarTail(source) || CustomizationPaths.IsHrothgarTail(target)) return;
+            // Hrothgar tails and skins keep the same material in up to five variant folders. A
+            // target with a single folder receives one of them: the tail's own number when present.
+            if (!CustomizationPaths.HasFurFolders(source) || CustomizationPaths.HasFurFolders(target)) return;
             var root = CustomizationPaths.GetMaterialEndpoint(source);
             var prefix = CustomizationKinds.Get(root.Kind).Root(root.GenderRace, root.ModelId) + "/material/";
             var candidates = resources.Files.Keys.Concat(resources.FileSwaps.Keys)
@@ -1077,7 +1125,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         public bool IsSharedMaterialFile(string localPath) => IsShared(localPath);
 
         /// <summary>
-        /// A Hrothgar tail target may load any of v0001-v0005; the other folders get the same file.
+        /// A Hrothgar tail or skin target may load any of v0001-v0005; the other folders get the same file.
         /// Xaela load an Au Ra tail's material from a root of their own, which gets the same file
         /// too unless the source's own Xaela material moves there.
         /// </summary>
@@ -1086,7 +1134,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             if (!newKey.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase)) yield break;
             if (_sharedXaela is { } xaela && CustomizationPaths.Contains(newKey, _target))
                 yield return CustomizationPaths.Rewrite(newKey, _target, xaela);
-            if (!CustomizationPaths.IsHrothgarTail(_target)) yield break;
+            if (!CustomizationPaths.HasFurFolders(_target)) yield break;
             var match = MaterialVariant().Match(newKey);
             if (!match.Success) yield break;
             var current = int.Parse(match.Groups["v"].Value);

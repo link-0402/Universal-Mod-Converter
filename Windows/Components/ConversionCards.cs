@@ -447,15 +447,22 @@ internal sealed class ConversionCards(ConverterSession session)
     /// </summary>
     private bool DrawTextureTargetRace(AssetKind kind, ushort race)
     {
-        var options = kind == AssetKind.Body ? null : session.GameData.TryGetCustomizationOptions(kind, race);
+        if (kind == AssetKind.Body)
+        {
+            // Every race wears body 1; Au Ra also body 101, the Xaela skin, which no other race has.
+            var bodies = CustomizationPaths.SkinBodies(race);
+            if (bodies.Count == 1) return DrawTextureTargetCheckbox(SkinLabel(race), $"{race}", race, bodies[0]);
+            var drawn = false;
+            foreach (var body in bodies)
+                drawn |= DrawTextureTargetCheckbox($"{SkinLabel(race)} ({SkinClan(body)})", $"{race}_{body}", race, body);
+            return drawn;
+        }
+
+        var options = session.GameData.TryGetCustomizationOptions(kind, race);
         if (options is not { Count: > 1 })
         {
-            // A skin keeps the source's body ID; there is one per race.
-            var id = kind == AssetKind.Body && ushort.TryParse(session.Source?.ModelIdPadded, out var bodyId)
-                ? bodyId
-                : options is { Count: > 0 } list ? list[0].Id : (ushort)1;
-            var label = kind == AssetKind.Body ? SkinLabel(race) : ConverterSession.RaceLabel(race);
-            return DrawTextureTargetCheckbox(label, $"{race}", race, id);
+            var id = options is { Count: > 0 } list ? list[0].Id : (ushort)1;
+            return DrawTextureTargetCheckbox(ConverterSession.RaceLabel(race), $"{race}", race, id);
         }
 
         var selected = session.TextureTargetCount(race);
@@ -503,6 +510,9 @@ internal sealed class ConversionCards(ConverterSession session)
         Widgets.Tooltip(tooltip, modded);
         return true;
     }
+
+    /// <summary>Which Au Ra wear a skin: Raen body 1, Xaela body 101.</summary>
+    internal static string SkinClan(ushort body) => body == CustomizationPaths.XaelaBody ? "Xaela" : "Raen";
 
     /// <summary>"Midlander Female — also Elezen, Miqo'te": every race that wears this skin.</summary>
     private static string SkinLabel(ushort race)
@@ -637,8 +647,8 @@ internal sealed class ConversionCards(ConverterSession session)
     private string XaelaNote(DetectedItem source)
     {
         if (source.GenderRace is not { } sourceRace || !ushort.TryParse(source.ModelIdPadded, out var sourceId)) return string.Empty;
-        var sourceXaela = CustomizationPaths.XaelaMaterialEndpoint(new CustomizationPathEndpoint(source.Kind, sourceRace, sourceId));
-        var targetXaela = CustomizationPaths.XaelaMaterialEndpoint(new CustomizationPathEndpoint(
+        var sourceXaela = CustomizationPaths.ClanMaterialEndpoint(new CustomizationPathEndpoint(source.Kind, sourceRace, sourceId));
+        var targetXaela = CustomizationPaths.ClanMaterialEndpoint(new CustomizationPathEndpoint(
             session.TargetCustomizationKind, session.TargetRace, (ushort)session.TargetCustomizationId));
         return (sourceXaela, targetXaela) switch
         {

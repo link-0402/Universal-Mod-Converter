@@ -14,6 +14,7 @@ internal static class CustomizationRuleTests
         ("Hrothgar tail to other race tail", HrothgarToOtherTail),
         ("Other race tail to Hrothgar tail", OtherToHrothgarTail),
         ("Hrothgar tail to Hrothgar tail keeps shared materials", HrothgarToHrothgarTail),
+        ("Face, tail and ear materials are named as the game reads them", GameMaterialIdentity),
         ("Face and ear materials have no variant folder", FaceAndEarFolders),
         ("Au Ra tails own a Xaela material root at ID + 100", AuRaXaelaRoots),
         ("Au Ra tail to Au Ra tail moves both clans' materials", AuRaToAuRaTail),
@@ -158,11 +159,17 @@ internal static class CustomizationRuleTests
     {
         var source = Tail(801, 5);
         var target = Tail(1601, 3);
-        // The target folder is the shared root, but the name is the target's own so the
-        // materials every Hrothgar tail shares are never replaced.
-        Assert.Equal("chara/human/c1601/obj/tail/t0001/material/v0001/mt_c1601t0003_a.mtrl",
+        // The target folder is the shared root. The game writes mt_c1601t0001 over the first 13
+        // characters of the name, so it starts with that; the tail's own ID after it keeps the
+        // materials every Hrothgar tail shares from being replaced.
+        const string converted = "chara/human/c1601/obj/tail/t0001/material/v0001/mt_c1601t0001_t0003_a.mtrl";
+        Assert.Equal(converted,
             CustomizationPaths.Rewrite("chara/human/c0801/obj/tail/t0005/material/v0001/mt_c0801t0005_a.mtrl", source, target));
-        Assert.Equal("/mt_c1601t0003_a.mtrl", CustomizationPaths.RewriteOwnedReference("/mt_c0801t0005_a.mtrl", source, target));
+        var reference = CustomizationPaths.RewriteOwnedReference("/mt_c0801t0005_a.mtrl", source, target);
+        Assert.Equal("/mt_c1601t0001_t0003_a.mtrl", reference);
+        Assert.Equal(converted, CustomizationPaths.MaterialPath(target, reference));
+        // Tail 1 is a tail of its own as well.
+        Assert.Equal("/mt_c1601t0001_t0001_a.mtrl", CustomizationPaths.RewriteOwnedReference("/mt_c0801t0005_a.mtrl", source, Tail(1601, 1)));
     }
 
     private static void HrothgarToHrothgarTail()
@@ -171,9 +178,56 @@ internal static class CustomizationRuleTests
         Assert.Equal(material, CustomizationPaths.Rewrite(material, Tail(1501, 3), Tail(1501, 4)));
         Assert.Equal("/mt_c1501t0001_til_a.mtrl",
             CustomizationPaths.RewriteOwnedReference("/mt_c1501t0001_til_a.mtrl", Tail(1501, 3), Tail(1501, 4)));
-        // Across genders the folder variant is kept and the name becomes the target's own.
-        Assert.Equal("chara/human/c1601/obj/tail/t0001/material/v0002/mt_c1601t0004_til_a.mtrl",
+        // Across genders the folder variant is kept and the name becomes the target's own, as the game reads it.
+        Assert.Equal("chara/human/c1601/obj/tail/t0001/material/v0002/mt_c1601t0001_t0004_til_a.mtrl",
             CustomizationPaths.Rewrite(material, Tail(1501, 3), Tail(1601, 4)));
+        Assert.Equal("/mt_c1601t0001_t0004_til_a.mtrl",
+            CustomizationPaths.RewriteOwnedReference("/mt_c1501t0001_til_a.mtrl", Tail(1501, 3), Tail(1601, 4)));
+    }
+
+    /// <summary>
+    /// The game writes the root's identity over the first 13 characters of a face, tail or ear
+    /// material's name. A model naming another tail's material loads its own; converted, it loads
+    /// the converted one. A second clan's face loads from its own root, but Veena take their face
+    /// skin from the first clan's.
+    /// </summary>
+    private static void GameMaterialIdentity()
+    {
+        var tail = Tail(1401, 2);
+        Assert.Equal("chara/human/c1401/obj/tail/t0002/material/v0001/mt_c1401t0002_a.mtrl",
+            CustomizationPaths.MaterialPath(tail, "/mt_c1401t0001_a.mtrl"));
+        Assert.Equal("/mt_c0801t0003_a.mtrl", CustomizationPaths.RewriteOwnedReference("/mt_c1401t0001_a.mtrl", tail, Tail(801, 3)));
+        // A skin material keeps its own name.
+        Assert.Equal("/mt_c1401b0001_a.mtrl", CustomizationPaths.RewriteOwnedReference("/mt_c1401b0001_a.mtrl", tail, Tail(801, 3)));
+
+        var veena = new CustomizationPathEndpoint(AssetKind.Face, 1801, 101);
+        Assert.Equal("chara/human/c1801/obj/face/f0101/material/mt_c1801f0101_iri_a.mtrl",
+            CustomizationPaths.MaterialPath(veena, "/mt_c1801f0001_iri_a.mtrl"));
+        Assert.Equal("chara/human/c1801/obj/face/f0001/material/mt_c1801f0001_fac_a.mtrl",
+            CustomizationPaths.MaterialPath(veena, "/mt_c1801f0001_fac_a.mtrl"));
+        var lost = new CustomizationPathEndpoint(AssetKind.Face, 1501, 102);
+        Assert.Equal("chara/human/c1501/obj/face/f0002/material/mt_c1501f0002_etc_a.mtrl",
+            CustomizationPaths.MaterialPath(lost, "/mt_c1501f0002_etc_a.mtrl"));
+        Assert.Equal("chara/human/c1501/obj/face/f0102/material/mt_c1501f0102_fac_a.mtrl",
+            CustomizationPaths.MaterialPath(lost, "/mt_c1501f0002_fac_a.mtrl"));
+        var xaela = new CustomizationPathEndpoint(AssetKind.Face, 1401, 101);
+        Assert.Equal("chara/human/c1401/obj/face/f0101/material/mt_c1401f0101_fac_a.mtrl",
+            CustomizationPaths.MaterialPath(xaela, "/mt_c1401f0001_fac_a.mtrl"));
+
+        // The model keeps naming the first clan's materials: each clan's root is read from the name by the game.
+        Assert.Equal("/mt_c1401f0002_fac_a.mtrl", CustomizationPaths.RewriteOwnedReference("/mt_c1401f0001_fac_a.mtrl",
+            new CustomizationPathEndpoint(AssetKind.Face, 1401, 1), new CustomizationPathEndpoint(AssetKind.Face, 1401, 2)));
+        Assert.Equal("/mt_c1401t0002_a.mtrl", CustomizationPaths.RewriteOwnedReference("/mt_c1401t0001_a.mtrl", Tail(1401, 1), Tail(1401, 2)));
+
+        // Face roots of a second clan belong to the first clan's face, and move with it.
+        Assert.Equal(new CustomizationPathEndpoint(AssetKind.Face, 1401, 1), CustomizationPaths.Owner(xaela));
+        Assert.Equal("chara/human/c1401/obj/face/f0102/material/mt_c1401f0102_fac_a.mtrl",
+            CustomizationPaths.Rewrite("chara/human/c1401/obj/face/f0101/material/mt_c1401f0101_fac_a.mtrl",
+                new CustomizationPathEndpoint(AssetKind.Face, 1401, 1), new CustomizationPathEndpoint(AssetKind.Face, 1401, 2)));
+        Assert.Equal(new[] { 1, 101 }, CustomizationPaths.MovedRoots(new CustomizationPathEndpoint(AssetKind.Face, 1401, 1),
+            new CustomizationPathEndpoint(AssetKind.Face, 1401, 2)).Select(r => (int)r.ModelId).ToArray());
+        Assert.Equal(1, CustomizationPaths.MovedRoots(new CustomizationPathEndpoint(AssetKind.Face, 1401, 1),
+            new CustomizationPathEndpoint(AssetKind.Face, 801, 2)).Count);
     }
 
     private static void FaceAndEarFolders()
@@ -191,10 +245,10 @@ internal static class CustomizationRuleTests
 
     private static void AuRaXaelaRoots()
     {
-        Assert.Equal(Tail(1401, 103), CustomizationPaths.XaelaMaterialEndpoint(Tail(1401, 3)));
-        Assert.Equal(Tail(1301, 101), CustomizationPaths.XaelaMaterialEndpoint(Tail(1301, 1)));
-        Assert.Equal(null, CustomizationPaths.XaelaMaterialEndpoint(Tail(801, 3)));
-        Assert.Equal(null, CustomizationPaths.XaelaMaterialEndpoint(Tail(1401, 103)));
+        Assert.Equal(Tail(1401, 103), CustomizationPaths.ClanMaterialEndpoint(Tail(1401, 3)));
+        Assert.Equal(Tail(1301, 101), CustomizationPaths.ClanMaterialEndpoint(Tail(1301, 1)));
+        Assert.Equal(null, CustomizationPaths.ClanMaterialEndpoint(Tail(801, 3)));
+        Assert.Equal(null, CustomizationPaths.ClanMaterialEndpoint(Tail(1401, 103)));
         Assert.Equal(Tail(1401, 3), CustomizationPaths.Owner(Tail(1401, 103)));
         Assert.Equal(Tail(801, 103), CustomizationPaths.Owner(Tail(801, 103)));
         Assert.True(CustomizationPaths.Owns(XaelaTexture, Tail(1401, 3)));

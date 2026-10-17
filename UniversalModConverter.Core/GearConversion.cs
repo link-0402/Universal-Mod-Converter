@@ -128,6 +128,8 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
 
         /// <summary>Source path → target path for resources under the source root.</summary>
         private readonly Dictionary<string, string> _map = new(StringComparer.Ordinal);
+        /// <summary>Material paths a model of the source loads (the rest are retextures of its own models).</summary>
+        private readonly HashSet<string> _modelMaterials = new(StringComparer.Ordinal);
 
         /// <summary>Mod-supplied resources outside the source root the conversion needs unchanged.</summary>
         private readonly HashSet<string> _dependencies = new(StringComparer.Ordinal);
@@ -212,6 +214,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                 return _plan;
             }
 
+            RenameLeftRingRetextures();
             foreach (var (source, target) in _map) _plan.GamePathMap[source] = target;
             foreach (var (source, target) in _map)
                 if (source.EndsWith(".mdl", StringComparison.Ordinal) && _files.TryGetValue(source, out var models))
@@ -387,6 +390,16 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             foreach (var path in _files.Keys.Concat(_swaps.Keys))
                 if (IsOwned(path) && ContainsToken(Path.GetFileName(path), slotToken))
                     Enqueue(path);
+            // A left ring has no material of its own: every one of the game's left ring models
+            // loads the right ring's, so a left ring retexture is a _rir material.
+            if (_src.Slot == GearSlot.LFinger)
+            {
+                var rightToken = $"{_srcEp.Token}_{GearSlot.RFinger.Suffix()}";
+                foreach (var path in _files.Keys.Concat(_swaps.Keys))
+                    if (path.StartsWith(_srcRoot + "/material/", StringComparison.Ordinal) &&
+                        path.EndsWith(".mtrl", StringComparison.Ordinal) && ContainsToken(Path.GetFileName(path), rightToken))
+                        Enqueue(path);
+            }
 
             // The item's metadata loads files by ID, not by a reference in another file: the VFX
             // and decal of every look its entries give it, and the extra skeletons its EST entries
@@ -445,6 +458,34 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             return folders;
         }
 
+        /// <summary>
+        /// The game's left ring models load the right ring's material (every one names
+        /// <c>mt_..._rir_a.mtrl</c>; no <c>_ril</c> material exists). A converted model names its
+        /// own material, but a material none of them loads retextures the target's own left ring,
+        /// so it takes the right ring's name, which that ring shares.
+        /// </summary>
+        private void RenameLeftRingRetextures()
+        {
+            if (_tgt.Slot != GearSlot.LFinger) return;
+            var right = _tgtEp with { Slot = GearSlot.RFinger.Suffix() };
+            var renamed = false;
+            foreach (var path in _map.Keys.ToList())
+            {
+                if (_modelMaterials.Contains(path) || !path.StartsWith(_srcRoot + "/material/", StringComparison.Ordinal) ||
+                    MaterialPathRegex().Match(path) is not { Success: true } match ||
+                    !match.Groups["name"].Value.EndsWith(".mtrl", StringComparison.Ordinal))
+                    continue;
+                var target = $"{_tgt.Root}/material/v{match.Groups["variant"].Value}/" +
+                             GamePath.Normalize(GearPaths.RewriteOwnedReference(match.Groups["name"].Value, _srcEp, right));
+                renamed |= target != _map[path];
+                _map[path] = target;
+            }
+            if (renamed)
+                Warn("left_ring_shared_material",
+                    $"The game's left ring {_tgt.PathEndpoint.Token} loads the right ring's material, so the converted material " +
+                    $"is named for the right ring and changes the right ring {_tgt.PathEndpoint.Token} too.");
+        }
+
         private static bool ContainsToken(string fileName, string token)
         {
             var index = fileName.IndexOf(token, StringComparison.Ordinal);
@@ -459,6 +500,20 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                     Json.TryGetInt(manipulation["Manipulation"]?["Entry"], out var entry))
                     return (ushort)entry;
             return Game(_src.Slot.EqdpFile(race)) is { } bytes ? GameMetadata.ReadEqdp(bytes, _src.SetId) : null;
+        }
+
+        /// <summary>
+        /// The race whose source model the game shows <paramref name="race"/>: its own, or the
+        /// first one down its fallback chain the source has a model for. Null when that is not known.
+        /// </summary>
+        private ushort? SourceModelRace(ushort race)
+        {
+            for (ushort? current = race; current is { } r; current = GenderRaces.ModelFallback(r))
+            {
+                if (SourceEqdp(r) is not { } entry) return null;
+                if (GameMetadata.EqdpHasModel(entry, _src.Slot)) return r;
+            }
+            return null;
         }
 
         private void Enqueue(string path)
@@ -505,6 +560,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             if (ResourceReferences.IsSkinMaterial(material)) return;
             if (material.TrimStart('/').Contains('/'))
             {
+                _modelMaterials.Add(GamePath.Normalize(material));
                 Enqueue(GamePath.Normalize(material));
                 return;
             }
@@ -534,6 +590,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                             $"{origin} uses '{material}', but {path} exists neither in the mod nor in the game." +
                             " If a separate modpack supplies it (a base mod this one builds on, for example), combine the two with Merge modpacks first.");
                 }
+                _modelMaterials.Add(path);
                 Enqueue(path);
             }
         }
@@ -720,11 +777,11 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         /// <summary>
         /// An accessory slot looks every material up in the item's own folder; only equipment
         /// slots send body materials (skin, bibo, pubes, piercings) to the character's body. So
-        /// such a material in a model moved to an accessory is never found, and since the game
-        /// loads every listed material before drawing a model, the whole model stays invisible.
-        /// Unused ones are dropped here; mesh groups still using one are switched off by the
+        /// such a material in a model moved to an accessory is never found. Unused ones are
+        /// dropped here; mesh groups with geometry still using one are switched off by the
         /// session, which leaves the parts in place so the Mesh groups tab lines up with the
-        /// source model.
+        /// source model. Groups without vertices are left alone: working accessory mods carry
+        /// them (a ring with empty bibo groups still shows).
         /// </summary>
         private byte[] ForAccessory(string origin, string path, byte[] data)
         {
@@ -743,12 +800,14 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                 return data;
             }
 
-            var skin = model.Meshes.Select(m => m.MaterialIndex < model.Materials.Length ? model.Materials[m.MaterialIndex] : null)
+            // Parts without vertices draw nothing, whatever their material (see GearOutputModel.IsForcedOff).
+            var skin = model.Meshes.Where(m => m.VertexCount > 0)
+                .Select(m => m.MaterialIndex < model.Materials.Length ? model.Materials[m.MaterialIndex] : null)
                 .OfType<string>().Where(ResourceReferences.IsSkinMaterial).Distinct().ToList();
             if (skin.Count > 0)
                 Warn("accessory_skin_material",
                     $"{origin} has parts with body materials ({string.Join(", ", skin)}): skin, bibo, pubes or piercings. " +
-                    "An accessory cannot load these, and the game would not show the model at all, so those mesh groups " +
+                    "An accessory looks for its materials in its own folder and cannot load these, so those mesh groups " +
                     "are switched off in the Mesh groups tab.");
 
             var unused = model.RemoveUnusedMaterials();
@@ -1197,29 +1256,47 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                 _plan.Changes.Add(new GearPlanChange("Metadata", "Default", note, GearManipulations.Describe(manipulation)));
             }
 
-            // EQDP: which races have their own model and material for the slot. Only races the
-            // output ships a model for are touched: each is marked as having one, or the game never
-            // asks for the file and loads the model of the race it falls back to instead (an item
-            // with no female model shows the male one). Every other race keeps the target's own.
+            // EQDP: which races have their own model and material for the slot. Races the output
+            // ships a model for are marked as having one, or the game never asks for the file and
+            // loads the model of the race it falls back to instead (an item with no female model
+            // shows the male one). A race the source had no model for saw the mod that way, through
+            // its fallback; where the target has a model of its own for it, that is switched off so
+            // the race keeps falling back to the converted one. Every other race keeps the target's.
             foreach (var race in GenderRaces.Playable)
             {
                 var model = GamePath.Normalize(GearSlots.ModelPath(_tgt, race));
                 var holders = result.Containers.Where(c => Redirects(c, model)).ToList();
-                if (holders.Count == 0) continue;
+                ushort bits;
+                string note;
+                if (holders.Count > 0)
+                {
+                    // The source's own entry says whether its materials are per race; without a
+                    // model bit it says nothing, so the shipped files decide.
+                    bits = SourceEqdp(race) is { } source &&
+                           GameMetadata.EqdpHasModel(GameMetadata.RepositionEqdp(source, _src.Slot, _tgt.Slot), _tgt.Slot)
+                        ? GameMetadata.EqdpBits(GameMetadata.RepositionEqdp(source, _src.Slot, _tgt.Slot), _tgt.Slot)
+                        : (ushort)(2 | (ShipsRaceMaterial(result, race) ? 1 : 0));
+                    note = $"{RaceNames.Name(race)} model shipped by the mod";
+                }
+                else if (SourceModelRace(race) is { } shown && shown != race &&
+                         result.Containers.Where(c => Redirects(c, GamePath.Normalize(GearSlots.ModelPath(_tgt, shown)))).ToList()
+                             is { Count: > 0 } fallbackHolders)
+                {
+                    // A material of the race's own is only looked for when the output ships one.
+                    holders = fallbackHolders;
+                    bits = (ushort)(SourceEqdp(race) is { } source &&
+                                    (GameMetadata.EqdpBits(GameMetadata.RepositionEqdp(source, _src.Slot, _tgt.Slot), _tgt.Slot) & 1) != 0 &&
+                                    ShipsRaceMaterial(result, race) ? 1 : 0);
+                    note = $"{RaceNames.Name(race)} shows the mod's {RaceNames.Name(shown)} model";
+                }
+                else continue;
 
                 var targetBits = Game(_tgt.Slot.EqdpFile(race)) is { } bytes
                     ? GameMetadata.EqdpBits(GameMetadata.ReadEqdp(bytes, _tgt.SetId), _tgt.Slot)
                     : (ushort)0;
-                // The source's own entry says whether its materials are per race; without a
-                // model bit it says nothing, so the shipped files decide.
-                var bits = SourceEqdp(race) is { } source &&
-                           GameMetadata.EqdpHasModel(GameMetadata.RepositionEqdp(source, _src.Slot, _tgt.Slot), _tgt.Slot)
-                    ? GameMetadata.EqdpBits(GameMetadata.RepositionEqdp(source, _src.Slot, _tgt.Slot), _tgt.Slot)
-                    : (ushort)(2 | (ShipsRaceMaterial(result, race) ? 1 : 0));
                 if (bits == targetBits) continue;
 
                 var entry = GearManipulations.Eqdp(_tgt, race, (ushort)(bits << _tgt.Slot.EqdpShift()));
-                var note = $"{RaceNames.Name(race)} model shipped by the mod";
                 if (holders.Any(c => c.Address.IsDefault))
                 {
                     Add(entry, note);

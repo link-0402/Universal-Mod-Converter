@@ -132,7 +132,15 @@ internal sealed class SkeletonHierarchyService(
                 estBytes = null;
             }
 
-            if (skeletonId != 0) return ExtraSkeletonPath(current, kind, skeletonId);
+            if (skeletonId != 0)
+            {
+                // An entry naming a skeleton nobody has (entry 1, mostly) means none.
+                var path = ExtraSkeletonPath(current, kind, skeletonId);
+                string resolved;
+                try { resolved = FollowFileSwaps(path, resources.FileSwaps); }
+                catch (InvalidDataException) { return path; } // TryLoad reports the cycle.
+                return resources.Files.ContainsKey(resolved) || ((IGameFileProvider)gameData).FileExists(resolved) ? path : null;
+            }
             race = pbd.GetParentRace(current);
         }
         return null;

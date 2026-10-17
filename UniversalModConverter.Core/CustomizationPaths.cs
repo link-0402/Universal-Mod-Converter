@@ -143,48 +143,77 @@ public static partial class CustomizationPaths
 
     /// <summary>
     /// Au Ra tails load their model from tN for both clans, but their material from tN for Raen
-    /// and from t(N+100) for Xaela, a root that holds nothing else.
+    /// and from t(N+100) for Xaela, a root that holds nothing else. Faces of the races whose second
+    /// clan has faces of its own do the same (face 101 is the second clan's face 1): Xaela, The
+    /// Lost and Veena load the model of fN and the materials of f(N+100), except that Veena take
+    /// their face skin (_fac) and The Lost their eye area (_etc) from fN.
     /// </summary>
-    private const ushort XaelaTailOffset = 100;
+    private const ushort ClanOffset = 100;
 
     public static bool IsAuRaTail(CustomizationPathEndpoint endpoint)
         => endpoint.Kind == AssetKind.Tail && endpoint.GenderRace is 1301 or 1401;
 
-    /// <summary>The Xaela material root of an Au Ra tail (t0103 for tail 3), or null for any other root.</summary>
-    public static CustomizationPathEndpoint? XaelaMaterialEndpoint(CustomizationPathEndpoint endpoint)
-        => IsAuRaTail(endpoint) && endpoint.ModelId is > 0 and < XaelaTailOffset
-            ? endpoint with { ModelId = (ushort)(endpoint.ModelId + XaelaTailOffset) }
+    /// <summary>Whether the second clan of the race loads this kind's materials from a root of its own.</summary>
+    private static bool HasClanRoots(CustomizationPathEndpoint endpoint)
+        => IsAuRaTail(endpoint) ||
+           endpoint.Kind == AssetKind.Face && endpoint.GenderRace is 1301 or 1401 or 1501 or 1601 or 1701 or 1801;
+
+    /// <summary>The second clan of a race whose faces or tails have a material root of their own: Xaela, Lost, Veena.</summary>
+    public static string SecondClan(ushort genderRace) => genderRace switch
+    {
+        1301 or 1401 => "Xaela",
+        1501 or 1601 => "Lost",
+        _ => "Veena",
+    };
+
+    /// <summary>
+    /// The material root of the race's second clan (an Au Ra tail 3's Xaela root t0103, a Viera
+    /// face 1's Veena root f0101), or null for a root without one.
+    /// </summary>
+    public static CustomizationPathEndpoint? ClanMaterialEndpoint(CustomizationPathEndpoint endpoint)
+        => HasClanRoots(endpoint) && endpoint.ModelId is > 0 and < ClanOffset
+            ? endpoint with { ModelId = (ushort)(endpoint.ModelId + ClanOffset) }
             : null;
 
     /// <summary>
-    /// The customization a root belongs to: itself, except that an Au Ra tail's Xaela material
-    /// root (t0103) belongs to the tail whose model loads it (t0003).
+    /// The customization a root belongs to: itself, except that a second clan's material root
+    /// (t0103, f0101) belongs to the tail or face whose model loads it (t0003, f0001).
     /// </summary>
     public static CustomizationPathEndpoint Owner(CustomizationPathEndpoint endpoint)
-        => IsAuRaTail(endpoint) && endpoint.ModelId is > XaelaTailOffset and < 2 * XaelaTailOffset
-            ? endpoint with { ModelId = (ushort)(endpoint.ModelId - XaelaTailOffset) }
+        => HasClanRoots(endpoint) && endpoint.ModelId is > ClanOffset and < 2 * ClanOffset
+            ? endpoint with { ModelId = (ushort)(endpoint.ModelId - ClanOffset) }
             : endpoint;
 
     /// <summary>
-    /// The source roots a conversion moves: the customization itself, and an Au Ra tail's Xaela
+    /// The part of the name (after its first 13 characters) a second clan's face loads from the
+    /// first clan's root instead of its own: Veena their face skin, The Lost their eye area.
+    /// </summary>
+    private static string? FirstClanPart(CustomizationPathEndpoint clanRoot)
+        => clanRoot.Kind != AssetKind.Face ? null
+            : clanRoot.GenderRace is 1701 or 1801 ? "_fac"
+            : clanRoot.GenderRace is 1501 or 1601 ? "_etc"
+            : null;
+
+    /// <summary>
+    /// The source roots a conversion moves: the customization itself, and its second clan's
     /// material root when the target has one to receive it. Without one (another race, or Viera
-    /// ears) nothing loads the Xaela material any more, so it stays behind.
+    /// ears) nothing loads that material any more, so it stays behind.
     /// </summary>
     public static IReadOnlyList<CustomizationPathEndpoint> MovedRoots(CustomizationPathEndpoint source,
         CustomizationPathEndpoint target)
-        => XaelaMaterialEndpoint(source) is { } xaela && XaelaMaterialEndpoint(target) != null
-            ? [source, xaela]
+        => ClanMaterialEndpoint(source) is { } clan && ClanMaterialEndpoint(target) != null
+            ? [source, clan]
             : [source];
 
     /// <summary>
     /// Where each clan of the target loads its material from, paired with the root the source's
-    /// same clan loads it from. An Au Ra tail target also has Xaela; a source without a Xaela root
-    /// of its own gives Xaela its only material.
+    /// same clan loads it from. A target with a second clan root (Au Ra tails, and Au Ra, Hrothgar
+    /// and Viera faces) also gets one; a source without one gives that clan its only material.
     /// </summary>
     public static IReadOnlyList<(CustomizationPathEndpoint Source, CustomizationPathEndpoint Target)> MaterialClans(
         CustomizationPathEndpoint source, CustomizationPathEndpoint target)
-        => XaelaMaterialEndpoint(target) is { } xaela
-            ? [(source, target), (XaelaMaterialEndpoint(source) ?? source, xaela)]
+        => ClanMaterialEndpoint(target) is { } clan
+            ? [(source, target), (ClanMaterialEndpoint(source) ?? source, clan)]
             : [(source, target)];
 
     /// <summary>
@@ -198,7 +227,7 @@ public static partial class CustomizationPaths
         CustomizationPathEndpoint target)
     {
         var rewritten = RewriteRoot(value, source, target);
-        return XaelaMaterialEndpoint(source) is { } sourceXaela && XaelaMaterialEndpoint(target) is { } targetXaela
+        return ClanMaterialEndpoint(source) is { } sourceXaela && ClanMaterialEndpoint(target) is { } targetXaela
             ? RewriteRoot(rewritten, sourceXaela, targetXaela)
             : rewritten;
     }
@@ -266,8 +295,10 @@ public static partial class CustomizationPaths
     public static string RewriteOwnedReference(string value, CustomizationPathEndpoint source,
         CustomizationPathEndpoint target)
     {
+        // Read as the source's model names it; the second clan's pass below only moves its own root.
+        value = AsGameReadsIt(value, source);
         var rewritten = RewriteOwnedRoot(value, source, target);
-        return XaelaMaterialEndpoint(source) is { } sourceXaela && XaelaMaterialEndpoint(target) is { } targetXaela
+        return ClanMaterialEndpoint(source) is { } sourceXaela && ClanMaterialEndpoint(target) is { } targetXaela
             ? RewriteOwnedRoot(rewritten, sourceXaela, targetXaela)
             : rewritten;
     }
@@ -299,6 +330,38 @@ public static partial class CustomizationPaths
     private static string Identity(CustomizationPathEndpoint endpoint)
         => $"c{endpoint.GenderRace:D4}{CustomizationKinds.Get(endpoint.Kind).Prefix}{endpoint.ModelId:D4}";
 
+    /// <summary>The length of <c>mt_</c> and an identity: the characters of a material name the game replaces.</summary>
+    private const int IdentityLength = 13;
+
+    /// <summary>
+    /// Whether the game names this material of <paramref name="root"/> after the root itself, writing
+    /// <c>mt_{identity}</c> over its first 13 characters: faces, tails and ears do, for a name that
+    /// starts like one of the same kind (a skin material keeps its own).
+    /// </summary>
+    private static bool HasGameIdentity(CustomizationPathEndpoint root, string name)
+        => root.Kind is AssetKind.Face or AssetKind.Tail or AssetKind.VieraEar &&
+           name.Length > IdentityLength && GameIdentityRegex().Match(name) is { Success: true } match &&
+           char.ToLowerInvariant(match.Groups["prefix"].Value[0]) == CustomizationKinds.Get(root.Kind).Prefix;
+
+    [GeneratedRegex(@"^mt_c\d{4}(?<prefix>[ftz])\d{4}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex GameIdentityRegex();
+
+    /// <summary>
+    /// A model's short material name with the identity the game reads it as: that of the root the
+    /// source loads its materials from. A face, tail or ear model may name its material after
+    /// another (a c1401t0002 model naming /mt_c1401t0001_a.mtrl loads mt_c1401t0002_a.mtrl); said
+    /// as the game reads it, the name converts like any other.
+    /// </summary>
+    private static string AsGameReadsIt(string value, CustomizationPathEndpoint source)
+    {
+        var slash = value.StartsWith('/') ? "/" : string.Empty;
+        var name = value[slash.Length..];
+        var root = GetMaterialEndpoint(source);
+        if (name.Contains('/') || !name.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase) || !HasGameIdentity(root, name))
+            return value;
+        return $"{slash}mt_{Identity(root)}{name[IdentityLength..]}";
+    }
+
     private static string RewriteIdentity(string value, string oldCombined, string newCombined,
         CustomizationPathEndpoint source, CustomizationPathEndpoint target)
     {
@@ -312,18 +375,23 @@ public static partial class CustomizationPaths
 
     /// <summary>
     /// Hrothgar tail materials are named after the shared t0001 root (mt_c1501t0001_...).
-    /// When the material root changes they take the target's own identity, never the
-    /// target root's, so they cannot replace the materials every Hrothgar tail shares.
+    /// When the material root changes they take the target's own identity. For a Hrothgar tail
+    /// target that is the shared root's, since the game writes mt_c{race}t0001 over the first
+    /// 13 characters whatever the model says, followed by the tail's own ID, so they cannot
+    /// replace the materials every Hrothgar tail shares (mt_c1601t0001_t0003_a.mtrl).
     /// </summary>
     private static string RewriteSharedRootIdentity(string value, CustomizationPathEndpoint source,
         CustomizationPathEndpoint target)
     {
         var sourceRoot = GetMaterialEndpoint(source);
-        if (source.Kind == AssetKind.Hair || sourceRoot == source || sourceRoot == GetMaterialEndpoint(target))
-            return value;
-        var rootCombined = $"c{sourceRoot.GenderRace:D4}{CustomizationKinds.Get(sourceRoot.Kind).Prefix}{sourceRoot.ModelId:D4}";
-        var newCombined = $"c{target.GenderRace:D4}{CustomizationKinds.Get(target.Kind).Prefix}{target.ModelId:D4}";
-        return RewriteIdentity(value, rootCombined, newCombined, source, target);
+        var targetRoot = GetMaterialEndpoint(target);
+        if (source.Kind == AssetKind.Hair || sourceRoot == targetRoot) return value;
+        var newCombined = Identity(target);
+        if (sourceRoot != source) value = RewriteIdentity(value, Identity(sourceRoot), newCombined, source, target);
+        if (!IsHrothgarTail(target)) return value;
+        var token = CustomizationKinds.Get(target.Kind).Token(target.ModelId);
+        return Regex.Replace(value, @"(?<=mt_)" + Regex.Escape(newCombined) + @"(?!\d)(?!_" + token + ")",
+            $"{Identity(targetRoot)}_{token}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
     /// <summary>
@@ -334,7 +402,7 @@ public static partial class CustomizationPaths
         CustomizationPathEndpoint target)
     {
         // Same layout on both sides: keep whatever folder the mod already uses.
-        if (source.Kind == target.Kind && IsHrothgarTail(source) == IsHrothgarTail(target)) return value;
+        if (source.Kind == target.Kind && HasFurFolders(source) == HasFurFolders(target)) return value;
         var folder = MaterialVariants(target).Length == 0 ? string.Empty : "v0001";
         return Regex.Replace(value, @"(?<sep>[/\\])material[/\\](?:v\d{4}[/\\])?",
             match => match.Groups["sep"].Value + "material" + match.Groups["sep"].Value +
@@ -363,10 +431,18 @@ public static partial class CustomizationPaths
         if (named.Contains('/')) return CompletePaths(endpoint, named);
 
         var root = GetMaterialEndpoint(endpoint);
-        var directory = CustomizationKinds.Get(root.Kind).Root(root.GenderRace, root.ModelId) + "/material";
         var name = materialName.TrimStart('/');
-        if (Owner(endpoint) is var owner && owner != endpoint)
-            name = RewriteIdentity(name, Identity(owner), Identity(endpoint), owner, endpoint);
+        if (HasGameIdentity(root, name))
+        {
+            // The game writes the root's identity over the first 13 characters of a face, tail or
+            // ear material's name, whatever they say; a second clan's face takes one part from
+            // the first clan's root.
+            if (FirstClanPart(root) is { } part && Owner(root) != root &&
+                name[IdentityLength..].StartsWith(part, StringComparison.OrdinalIgnoreCase))
+                root = Owner(root);
+            name = $"mt_{Identity(root)}{name[IdentityLength..]}";
+        }
+        var directory = CustomizationKinds.Get(root.Kind).Root(root.GenderRace, root.ModelId) + "/material";
         if (root.Kind == AssetKind.Hair && IsSharedMaterialRoot(root) &&
             name.Length > 8 && name.StartsWith("mt_c", StringComparison.OrdinalIgnoreCase))
             name = $"{name[..4]}{root.GenderRace:D4}{name[8..]}";
@@ -413,13 +489,38 @@ public static partial class CustomizationPaths
     /// <summary>Material folder variants used by a customization kind (none for face and ears).</summary>
     public static int[] MaterialVariants(CustomizationPathEndpoint endpoint) => endpoint.Kind switch
     {
-        AssetKind.Tail when IsHrothgarTail(endpoint) => [1, 2, 3, 4, 5],
+        _ when HasFurFolders(endpoint) => [1, 2, 3, 4, 5],
         AssetKind.Tail or AssetKind.Hair or AssetKind.Body => [1],
         _ => [],
     };
 
     public static bool IsHrothgarTail(CustomizationPathEndpoint endpoint)
         => endpoint.Kind == AssetKind.Tail && endpoint.GenderRace is 1501 or 1601;
+
+    /// <summary>
+    /// Hrothgar skins and tails keep their materials in five folders, v0001-v0005, one per fur
+    /// pattern, which picks the folder the game loads.
+    /// </summary>
+    public static bool HasFurFolders(CustomizationPathEndpoint endpoint)
+        => endpoint.Kind is AssetKind.Tail or AssetKind.Body && endpoint.GenderRace is 1501 or 1601;
+
+    /// <summary>
+    /// The same material path in every other fur folder of <paramref name="target"/>, for a target
+    /// that has them: each fur pattern loads its own folder, so a material given to one needs all.
+    /// </summary>
+    public static IEnumerable<string> OtherFurFolders(string path, CustomizationPathEndpoint target)
+    {
+        if (!HasFurFolders(target) || VariantFolderRegex().Match(path) is not { Success: true } match) yield break;
+        var current = int.Parse(path.AsSpan(match.Index + match.Groups["pre"].Length, 4));
+        foreach (var variant in MaterialVariants(target).Where(v => v != current))
+            yield return VariantFolderRegex().Replace(path, m => m.Groups["pre"].Value + variant.ToString("D4"), 1);
+    }
+
+    /// <summary>The fur folder of a material path (v0003 is 3), or null for a path without one.</summary>
+    public static int? MaterialFolder(string path)
+        => VariantFolderRegex().Match(path) is { Success: true } match
+            ? int.Parse(path.AsSpan(match.Index + match.Groups["pre"].Length, 4))
+            : null;
 
     /// <summary>The root the game loads this customization's materials from.</summary>
     public static CustomizationPathEndpoint GetMaterialEndpoint(CustomizationPathEndpoint endpoint)
@@ -456,9 +557,22 @@ public static partial class CustomizationPaths
         if (ushort.TryParse(match.Groups["race"].Value, out var currentSkinRace) &&
             currentSkinRace == skinRace)
             return value;
+        // A body the target's skin race has too (b0091) is kept; any other becomes its body 1.
+        var body = ushort.TryParse(match.Groups["body"].Value, out var id) && SkinBodiesInGame(skinRace).Contains(id) ? id : (ushort)1;
         var prefix = value.StartsWith('/') ? "/" : string.Empty;
-        return $"{prefix}mt_c{skinRace:D4}b0001{match.Groups["tail"].Value}";
+        return $"{prefix}mt_c{skinRace:D4}b{body:D4}{match.Groups["tail"].Value}";
     }
+
+    /// <summary>Every body ID the game has a skin material for, per skin race (b0091 and the like beside the players' own).</summary>
+    private static ushort[] SkinBodiesInGame(ushort skinRace) => skinRace switch
+    {
+        101 => [1, 4, 91, 250],
+        201 or 901 => [1, 91],
+        1301 => [1, 91, 101, 191],
+        1401 => [1, 91, 101, 191, 201],
+        1601 => [1, 201],
+        _ => [1],
+    };
 
     public static ushort GetSkinGenderRace(ushort genderRace) => genderRace switch
     {
@@ -470,6 +584,16 @@ public static partial class CustomizationPaths
         1201 => 1101,
         _ => genderRace,
     };
+
+    /// <summary>
+    /// The skins (body IDs) players of a race can wear: body 1, and for Au Ra also body 101, the
+    /// Xaela skin. No other race has a body 101.
+    /// </summary>
+    public static IReadOnlyList<ushort> SkinBodies(ushort genderRace)
+        => genderRace is 1301 or 1401 ? [1, XaelaBody] : [1];
+
+    /// <summary>The body ID of the Xaela skin.</summary>
+    public const ushort XaelaBody = 101;
 
     /// <summary>Every playable race that wears <paramref name="skinGenderRace"/>'s skin, itself included.</summary>
     public static IReadOnlyList<ushort> SkinUsers(ushort skinGenderRace)

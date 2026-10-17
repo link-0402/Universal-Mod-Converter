@@ -96,7 +96,9 @@ public static partial class GearPaths
         if (string.IsNullOrEmpty(targetSlot)) return suffix;
         if (string.IsNullOrEmpty(suffix)) return suffix;
         var sourceSuffix = "_" + sourceSlot;
-        if (suffix.Equals(sourceSuffix, StringComparison.OrdinalIgnoreCase))
+        // A left ring's models load the right ring's materials, so for a left ring both are its own.
+        if (suffix.Equals(sourceSuffix, StringComparison.OrdinalIgnoreCase) ||
+            sourceSlot.Equals("ril", StringComparison.OrdinalIgnoreCase) && suffix.Equals("_rir", StringComparison.OrdinalIgnoreCase))
             return "_" + targetSlot;
 
         // TexTools preserves deliberately cross-referenced/fake part tags and adds

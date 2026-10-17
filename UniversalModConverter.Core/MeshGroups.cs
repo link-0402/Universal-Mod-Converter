@@ -164,11 +164,13 @@ public sealed record GearOutputModel(string Local, ImmutableArray<string> GamePa
 
     /// <summary>
     /// Whether <paramref name="group"/> can never be kept: a body material (skin, bibo, pubes,
-    /// piercings) on an accessory. Only equipment slots send those to the character's body; an
-    /// accessory looks for them in its own folder, never finds them, and then draws nothing of
-    /// the model at all.
+    /// piercings) on an accessory, on parts with geometry. Only equipment slots send those to the
+    /// character's body; an accessory looks for them in its own folder and never finds them. A group
+    /// without vertices draws nothing either way (accessory mods often carry such leftovers), so it
+    /// does no harm.
     /// </summary>
-    public bool IsForcedOff(int group) => Conversion?.Target.IsAccessory == true && IsSkin(group);
+    public bool IsForcedOff(int group)
+        => Conversion?.Target.IsAccessory == true && IsSkin(group) && Groups[group].Vertices > 0;
 
     /// <summary>
     /// Whether <paramref name="group"/> starts switched off: a body material in a model that

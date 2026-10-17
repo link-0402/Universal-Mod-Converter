@@ -32,6 +32,77 @@ public sealed record AnimationSwapVariant(string Label, ImmutableDictionary<stri
     /// </summary>
     public ImmutableDictionary<string, string> SourceRoles { get; init; } =
         ImmutableDictionary<string, string>.Empty;
+
+    /// <summary>
+    /// Further destinations of a source location, beside its one in <see cref="Locations"/>: an
+    /// emote that plays one animation in several positions (/Cheer's u_cheer, sitting and
+    /// standing) swapped to one with an animation for each.
+    /// </summary>
+    public ImmutableDictionary<string, ImmutableArray<string>> AlsoTo { get; init; } =
+        ImmutableDictionary<string, ImmutableArray<string>>.Empty;
+
+    /// <summary>Every destination of a source location; none when it has no counterpart.</summary>
+    public IEnumerable<string> Destinations(string location)
+        => Locations.TryGetValue(location, out var to)
+            ? AlsoTo.TryGetValue(location, out var more) ? more.Prepend(to) : [to]
+            : [];
+
+    /// <summary>Every location some source location goes to.</summary>
+    public IEnumerable<string> AllDestinations => Locations.Values.Concat(AlsoTo.Values.SelectMany(more => more));
+
+    /// <summary>Whether some source location goes to <paramref name="location"/>.</summary>
+    public bool IsDestination(string location) => AllDestinations.Contains(location);
+}
+
+/// <summary>
+/// Pairs the body animations of two emotes by position (Emote.ActionTimeline: main, start, ground
+/// sitting, chair sitting, upper body). One animation may play in several positions: /Cheer plays
+/// u_cheer for both kinds of sitting and the upper body.
+/// </summary>
+public static class EmotePairing
+{
+    /// <summary>One animation of an emote and every position it plays in.</summary>
+    public readonly record struct Timeline(string Location, ImmutableArray<int> Positions);
+
+    /// <summary>
+    /// Every position a source animation plays in goes to the animation the destination plays
+    /// there, so one source animation may go to several. Where the destination plays one
+    /// animation in several positions, only one source animation can take it: the one that plays
+    /// in the same positions, else the upper body one (what the destination plays standing), else
+    /// the earliest. Emotes with one animation each pair them whatever their positions.
+    /// </summary>
+    public static (ImmutableDictionary<string, string> Locations, ImmutableDictionary<string, ImmutableArray<string>> AlsoTo)
+        Pair(IReadOnlyList<Timeline> from, IReadOnlyList<Timeline> to)
+    {
+        const int upperBody = 4;
+        var claims = new Dictionary<string, List<Timeline>>(StringComparer.Ordinal);
+        foreach (var source in from)
+        foreach (var position in source.Positions)
+            if (to.FirstOrDefault(t => t.Positions.Contains(position)) is { Location: not null } match)
+            {
+                if (!claims.TryGetValue(match.Location, out var list)) claims[match.Location] = list = [];
+                if (!list.Contains(source)) list.Add(source);
+            }
+
+        var destinations = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var target in to)
+        {
+            if (!claims.TryGetValue(target.Location, out var candidates)) continue;
+            var winner = candidates
+                .OrderByDescending(c => c.Positions.SequenceEqual(target.Positions))
+                .ThenByDescending(c => c.Positions.Contains(upperBody))
+                .ThenBy(c => c.Positions.Min())
+                .First();
+            if (!destinations.TryGetValue(winner.Location, out var list)) destinations[winner.Location] = list = [];
+            list.Add(target.Location);
+        }
+        if (destinations.Count == 0 && from.Count == 1 && to.Count == 1)
+            destinations[from[0].Location] = [to[0].Location];
+
+        return (destinations.ToImmutableDictionary(d => d.Key, d => d.Value[0], StringComparer.Ordinal),
+            destinations.Where(d => d.Value.Count > 1)
+                .ToImmutableDictionary(d => d.Key, d => d.Value.Skip(1).ToImmutableArray(), StringComparer.Ordinal));
+    }
 }
 
 public sealed record AnimationConversionRequest(
@@ -455,7 +526,7 @@ public sealed class AnimationConversionPlanner(
                     // Unpaired parts (a start without a counterpart) leave together with the rest.
                     // A location that is also a destination was just rewritten; leave it. Slot
                     // groups rewrite nothing where it is: they hold all of it.
-                    if (!InSlotGroups && variants.Any(v => v.Locations.Values.Contains(provider.Path.Location))) continue;
+                    if (!InSlotGroups && variants.Any(v => v.IsDestination(provider.Path.Location))) continue;
                     RemoveKey(provider);
                 }
             else if (targets.Count > 0 && !SourceRaceStays)
@@ -485,26 +556,29 @@ public sealed class AnimationConversionPlanner(
             _destinationLabel = variant.Label;
             foreach (var provider in sources)
             {
-                if (!variant.Locations.TryGetValue(provider.Path.Location, out var destinationLocation))
+                if (!variant.Locations.ContainsKey(provider.Path.Location))
                 {
                     // Said once for every race: the message names the part, not the race.
                     Warn("unpaired", Unpaired(variant, provider));
                     continue;
                 }
-                var destination = FromLocation(provider.Path.Race, destinationLocation);
-                if (destination == null) continue;
-                if (!GameHas(destination, variant.Label, provider, _request.Mode.IsNewMod() ? "is left out there."
-                        : Keeps ? "stays where it is." : "is removed from the mod with the rest.")) continue;
-                if (SwapContent(provider, destination) is not { } local) continue;
+                foreach (var destinationLocation in variant.Destinations(provider.Path.Location))
+                {
+                    var destination = FromLocation(provider.Path.Race, destinationLocation);
+                    if (destination == null) continue;
+                    if (!GameHas(destination, variant.Label, provider, _request.Mode.IsNewMod() ? "is left out there."
+                            : Keeps ? "stays where it is." : "is removed from the mod with the rest.")) continue;
+                    if (SwapContent(provider, destination) is not { } local) continue;
 
-                var container = Result.GetContainer(provider.Container.Address);
-                var files = container.GetOrCreateFiles();
-                if (GamePath.FindKey(files, destination.GamePath) != null && !_sources.Contains(destination.Location))
-                    Warn("destination_replaced", $"{container.Label}: the mod's own {destination.GamePath} is replaced.");
-                if (GamePath.FindKey(files, destination.GamePath) is { } stale) Replace(files, stale);
-                files[destination.GamePath] = GamePath.ToLocal(local);
-                _plan.Changes.Add(new GearPlanChange(provider.RetargetedFrom == null ? "Game path" : "Retarget", container.Label,
-                    GamePath.Normalize(provider.Key), destination.GamePath));
+                    var container = Result.GetContainer(provider.Container.Address);
+                    var files = container.GetOrCreateFiles();
+                    if (GamePath.FindKey(files, destination.GamePath) != null && !_sources.Contains(destination.Location))
+                        Warn("destination_replaced", $"{container.Label}: the mod's own {destination.GamePath} is replaced.");
+                    if (GamePath.FindKey(files, destination.GamePath) is { } stale) Replace(files, stale);
+                    files[destination.GamePath] = GamePath.ToLocal(local);
+                    _plan.Changes.Add(new GearPlanChange(provider.RetargetedFrom == null ? "Game path" : "Retarget", container.Label,
+                        GamePath.Normalize(provider.Key), destination.GamePath));
+                }
             }
         }
 
@@ -544,17 +618,20 @@ public sealed class AnimationConversionPlanner(
                     var files = new JsonObject();
                     foreach (var provider in chosen.Where(p => p.Path.Race == race))
                     {
-                        if (!variant.Locations.TryGetValue(provider.Path.Location, out var location))
+                        if (!variant.Locations.ContainsKey(provider.Path.Location))
                         {
                             Warn("unpaired", Unpaired(variant, provider));
                             continue;
                         }
-                        var destination = FromLocation(race, location);
-                        if (destination == null || !GameHas(destination, variant.Label, provider, "is left out there.")) continue;
-                        if (SwapContent(provider, destination) is not { } local) continue;
-                        files[destination.GamePath] = GamePath.ToLocal(local);
-                        _plan.Changes.Add(new GearPlanChange(provider.RetargetedFrom == null ? "Option" : "Retarget",
-                            $"{name} / {variant.Label}", GamePath.Normalize(provider.Key), destination.GamePath));
+                        foreach (var location in variant.Destinations(provider.Path.Location))
+                        {
+                            var destination = FromLocation(race, location);
+                            if (destination == null || !GameHas(destination, variant.Label, provider, "is left out there.")) continue;
+                            if (SwapContent(provider, destination) is not { } local) continue;
+                            files[destination.GamePath] = GamePath.ToLocal(local);
+                            _plan.Changes.Add(new GearPlanChange(provider.RetargetedFrom == null ? "Option" : "Retarget",
+                                $"{name} / {variant.Label}", GamePath.Normalize(provider.Key), destination.GamePath));
+                        }
                     }
                     if (files.Count > 0) options.Add(ModGroupBuilder.Option(variant.Label, string.Empty, files));
                 }
@@ -589,8 +666,8 @@ public sealed class AnimationConversionPlanner(
             {
                 if (_request.StaysAtSource) locations.Add(path);
                 foreach (var variant in variants)
-                    if (variant.Locations.TryGetValue(path.Location, out var to) &&
-                        PapPath.TryParse($"chara/human/c{path.Race:D4}/animation/{to}.pap", out var destination))
+                foreach (var to in variant.Destinations(path.Location))
+                    if (PapPath.TryParse($"chara/human/c{path.Race:D4}/animation/{to}.pap", out var destination))
                         locations.Add(destination);
             }
             return [.. locations.DistinctBy(p => p.Location)];
@@ -718,6 +795,15 @@ public sealed class AnimationConversionPlanner(
             if (Mirrored(provider.Local, origin.GamePath, destination.GamePath) is { } mirrored) return mirrored;
 
             var folder = Path.GetDirectoryName(GamePath.ToLocal(provider.Local)) ?? string.Empty;
+            // A folder named like the game's (emote\ for an emote's file) becomes the destination's
+            // (resident\ for the idle), as for a file laid out like its game path.
+            var sourceFolder = Path.GetDirectoryName(GamePath.ToLocal(origin.Key));
+            var destinationFolder = Path.GetDirectoryName(GamePath.ToLocal(destination.Key));
+            if (!string.IsNullOrEmpty(sourceFolder) && !string.IsNullOrEmpty(destinationFolder) &&
+                !string.Equals(sourceFolder, destinationFolder, StringComparison.OrdinalIgnoreCase) &&
+                folder.EndsWith(sourceFolder, StringComparison.OrdinalIgnoreCase) &&
+                (folder.Length == sourceFolder.Length || folder[folder.Length - sourceFolder.Length - 1] == '\\'))
+                folder = folder[..^sourceFolder.Length] + destinationFolder;
             if (_races > 1 || destination.IsFacial) folder = Path.Combine(folder, $"c{destination.Race:D4}");
             // A race has a pack per face animation set, all named after the pose.
             if (destination.IsFacial) folder = Path.Combine(folder, destination.Set);

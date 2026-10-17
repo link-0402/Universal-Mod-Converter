@@ -247,7 +247,7 @@ public sealed class ModConverterService
     {
         if (entry.Task.AnimationRequest is not { } request) return [];
         return request.SourceLocations
-            .Concat(request.Variants.SelectMany(v => v.Locations.Values))
+            .Concat(request.Variants.SelectMany(v => v.AllDestinations))
             .Distinct(StringComparer.OrdinalIgnoreCase);
     }
 

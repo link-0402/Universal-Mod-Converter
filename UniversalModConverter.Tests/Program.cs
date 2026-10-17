@@ -689,6 +689,11 @@ static void TestCharacterMaterialPaths()
         CustomizationPaths.FixSkinMaterialReference("/mt_c0101b0099_a.mtrl", 701));
     Equal("/mt_c1801b0001_b.mtrl",
         CustomizationPaths.FixSkinMaterialReference("/mt_c0201b0007_b.mtrl", 1801));
+    // A body the target's skin race has as well keeps its ID.
+    Equal("/mt_c0901b0091_a.mtrl",
+        CustomizationPaths.FixSkinMaterialReference("/mt_c0101b0091_a.mtrl", 901));
+    Equal("/mt_c1701b0001_a.mtrl",
+        CustomizationPaths.FixSkinMaterialReference("/mt_c0101b0091_a.mtrl", 1701));
 }
 
 static void TestFingerprint()
