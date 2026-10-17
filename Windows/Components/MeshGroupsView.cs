@@ -262,8 +262,8 @@ internal sealed partial class MeshGroupsView(ConverterSession session, Plugin pl
         "the new item is worn, so it was switched off automatically.";
 
     private const string ForcedReason =
-        "Uses a body material (skin, bibo, pubes or piercings). An accessory cannot load those, and the game would not " +
-        "draw the model at all, so this mesh group is always left out.";
+        "Uses a body material (skin, bibo, pubes or piercings). An accessory looks for its materials in its own folder " +
+        "and cannot load those, so this mesh group is always left out.";
 
     private void DrawPartRow(Family family, int g, int p, int removedInFamily, string? blocked)
     {

@@ -248,7 +248,7 @@ public sealed partial class ConverterSession
     /// for it.
     /// </summary>
     public bool CanSwapToEmote(AnimationSource source, EmoteInfo emote)
-        => GameHasForSourceRaces(source, emote, () => EmoteVariant(source, emote).Locations.Values);
+        => GameHasForSourceRaces(source, emote, () => EmoteVariant(source, emote).AllDestinations);
 
     /// <summary>Whether a swap into the idle slot writes anything; see <see cref="CanSwapToEmote"/>.</summary>
     public bool CanSwapToIdleSlot(AnimationSource source, IdleSlot slot)
@@ -472,28 +472,17 @@ public sealed partial class ConverterSession
     private AnimationSwapVariant EmoteVariant(AnimationSource source)
         => EmoteVariant(source, GameData.Animations.FindEmote(AnimationTargetEmote));
 
-    /// <summary>An emote's animations pair with the destination's by their position in the emote.</summary>
+    /// <summary>An emote's animations pair with the destination's by their positions in the emote (see <see cref="EmotePairing"/>).</summary>
     private AnimationSwapVariant EmoteVariant(AnimationSource source, EmoteInfo? to)
     {
         var from = GameData.Animations.FindEmote(source.EmoteId);
-        var map   = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
-        var roles = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
-        if (from != null && to != null)
+        if (from == null || to == null) return new AnimationSwapVariant(to == null ? "Emote" : $"/{to.Name}", ImmutableDictionary<string, string>.Empty);
+        var provided = from.Timelines.Where(t => source.Locations.Contains(t.Location)).ToList();
+        var (map, alsoTo) = EmotePairing.Pair([.. provided.Select(t => t.ForPairing)], [.. to.Timelines.Select(t => t.ForPairing)]);
+        return new AnimationSwapVariant($"/{to.Name}", map)
         {
-            var provided = from.Timelines.Where(t => source.Locations.Contains(t.Location)).ToList();
-            foreach (var timeline in provided)
-            {
-                roles[timeline.Location] = timeline.Label;
-                if (to.Timelines.FirstOrDefault(t => t.Index == timeline.Index) is { } match)
-                    map[timeline.Location] = match.Location;
-            }
-            // Emotes with one animation each pair them regardless of position.
-            if (map.Count == 0 && provided.Count == 1 && to.Timelines.Length == 1)
-                map[provided[0].Location] = to.Timelines[0].Location;
-        }
-        return new AnimationSwapVariant(to == null ? "Emote" : $"/{to.Name}", map.ToImmutable())
-        {
-            SourceRoles = roles.ToImmutable(),
+            SourceRoles = provided.ToImmutableDictionary(t => t.Location, t => t.Label, StringComparer.Ordinal),
+            AlsoTo = alsoTo,
         };
     }
 

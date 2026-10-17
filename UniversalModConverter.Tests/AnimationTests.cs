@@ -34,6 +34,7 @@ internal static class AnimationTests
         ("A swap that would write nothing is refused instead of removing the mod's animation", SwapWritingNothingIsRefused),
         ("Swap pairs the animation the action timeline plays", SwapFromDefaultIdle),
         ("An animation with no counterpart is explained in plain words", UnpairedIsExplained),
+        ("Emote swaps pair every position an animation plays in", EmotePositions),
         ("A facial expression swaps to another, with its timeline in every option", FaceSwap),
         ("Attaching an expression names the face in the body's timeline", ExpressionAttach),
         ("Game expressions: one pose, read from the race's own face animations", GameExpressionDonor),
@@ -651,6 +652,49 @@ internal static class AnimationTests
     /// A destination with no start animation leaves the mod's start animation nowhere to go.
     /// The warning has to say that in those terms, not in terms of pap keys and "counterparts".
     /// </summary>
+    /// <summary>
+    /// /Doze plays its own animation for ground sitting, chair sitting and the upper body; /Cheer
+    /// plays u_cheer for all three. Doze to Cheer gives u_cheer the upper body one (and leaves the
+    /// other two out); Cheer to Doze gives all three of Doze's u_cheer. One animation each pair
+    /// whatever their positions.
+    /// </summary>
+    private static void EmotePositions()
+    {
+        const string root = "a0001/bt_common/emote/";
+        EmotePairing.Timeline T(string key, params int[] positions) => new(root + key, [.. positions]);
+        var doze = new[] { T("doze", 0), T("j_doze", 2), T("s_doze", 3), T("u_doze", 4) };
+        var cheer = new[] { T("cheer", 0), T("u_cheer", 2, 3, 4) };
+
+        var (toCheer, toCheerMore) = EmotePairing.Pair(doze, cheer);
+        Assert.Equal(new[] { "doze>cheer", "u_doze>u_cheer" },
+            toCheer.Select(p => $"{p.Key[root.Length..]}>{p.Value[root.Length..]}").Order(StringComparer.Ordinal).ToArray());
+        Assert.True(toCheerMore.IsEmpty);
+
+        var (toDoze, toDozeMore) = EmotePairing.Pair(cheer, doze);
+        Assert.Equal(root + "j_doze", toDoze[root + "u_cheer"]);
+        Assert.Equal(new[] { root + "s_doze", root + "u_doze" }, toDozeMore[root + "u_cheer"].ToArray());
+        var variant = new AnimationSwapVariant("/Doze", toDoze) { AlsoTo = toDozeMore };
+        Assert.Equal(new[] { "j_doze", "s_doze", "u_doze" },
+            variant.Destinations(root + "u_cheer").Select(d => d[root.Length..]).ToArray());
+
+        var (single, _) = EmotePairing.Pair([T("a", 0)], [T("b", 2)]);
+        Assert.Equal(root + "b", single[root + "a"]);
+
+        // The planner writes the animation at every destination.
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"loop.pap"}}""");
+        mod.File("loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        string Location(string path) => PapPath.TryParse(path, out var p) ? p.Location : throw new Exception(path);
+        var request = new AnimationConversionRequest([Location(Loop3)], AnimationOperation.Swap, ConversionOutputMode.NewMod, "test")
+        {
+            Variants = [new AnimationSwapVariant("Both", ImmutableDictionary<string, string>.Empty.Add(Location(Loop3), Location(Loop5)))
+                { AlsoTo = ImmutableDictionary<string, ImmutableArray<string>>.Empty.Add(Location(Loop3), [Location(Start5)]) }],
+        };
+        var plan = Planner(Game()).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { Loop5, Start5 }, plan.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
+    }
+
     private static void UnpairedIsExplained()
     {
         using var mod = new TempDir();
@@ -836,6 +880,16 @@ internal static class AnimationTests
         Assert.True(plan.Files.All(f => f.Operation != LocalFileOperation.Delete), "The unchanged slot keeps using the source files.");
         GearConversionExecutor.ApplyInPlace(plan, mod.Path);
         Assert.Equal(0, AnimationConversionVerifier.Verify(mod.Path, plan).Count);
+
+        // A file named with a suffix is not laid out like its game path, but its emote\ folder
+        // still becomes resident\ for the default idle.
+        using var suffixed = new TempDir();
+        Definition(suffixed, $$$"""{"Files":{"{{{Loop3}}}":"anim\\emote\\pose03_loop.ie72c8e8c5.pap"} }""");
+        suffixed.File("anim/emote/pose03_loop.ie72c8e8c5.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        var idle = Planner(Game()).Plan(suffixed.Path, SlotRequest(ConversionOutputMode.InPlace, ("Standing idle (default)", Idle0, null)));
+        Assert.True(!idle.HasBlockers, string.Join(" ", idle.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { Path.Combine("anim", "resident", "idle.pap") },
+            idle.Files.Where(f => f.Operation == LocalFileOperation.Write).Select(f => f.Destination).ToArray());
     }
 
     /// <summary>

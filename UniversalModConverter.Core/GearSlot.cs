@@ -211,6 +211,21 @@ public static class GenderRaces
         return (Races[(index - 1) / 2], index % 2 == 1 ? "Male" : "Female");
     }
 
+    /// <summary>
+    /// The race whose gear model the game shows when an item has none for <paramref name="code"/>
+    /// (its EQDP entry has no model bit), or null for Midlander men, who have nothing to fall
+    /// back to. Men fall back to Midlander men and women to Midlander women, except Lalafell
+    /// women (Lalafell men) and Hrothgar men (Roegadyn men). This is Penumbra's GenderRace.Fallback.
+    /// </summary>
+    public static ushort? ModelFallback(ushort code) => code switch
+    {
+        101 => null,
+        1201 => 1101,
+        1501 => 901,
+        _ when code / 100 % 2 == 0 && code != 201 => 201,
+        _ => 101,
+    };
+
     public static bool TryParse(string? race, string? gender, out ushort code)
     {
         code = 0;

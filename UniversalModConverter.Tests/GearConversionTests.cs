@@ -30,6 +30,8 @@ internal static class GearConversionTests
         ("An earring that becomes a top renames its part tags to the top's", AccessoryToGearPartTags),
         ("A part tag the model already has under its new name is merged, not doubled", PartTagMerge),
         ("Races with a model get an EQDP entry on a target without one", EqdpForRaceModels),
+        ("Races that fell back to the mod's model keep doing so on the target", EqdpForFallbackRaces),
+        ("Left ring retextures use the right ring's material name both ways", LeftRingMaterials),
         ("Item the mod does not change is rejected", EmptyPlanWithoutModContent),
         ("v4 in place: IMC group, swaps, missing files", InPlaceV4ImcGroupAndSwaps),
         ("In place refuses to overwrite existing target paths", InPlaceTargetConflict),
@@ -391,6 +393,10 @@ internal static class GearConversionTests
         Assert.Equal("on,off", Rules(together[0]));
         // The legs becoming a necklace: an accessory cannot load a body material at all.
         Assert.Equal("on,forced", Rules(together[1]));
+
+        // A body material on a group without vertices draws nothing, so it is not forced off.
+        var empty = together[1] with { Groups = [.. together[1].Groups.Select(g => g.IsSkin ? g with { Vertices = 0 } : g)] };
+        Assert.Equal("on,off", Rules(empty));
     }
 
     private static void CustomizationBorrowedTextures()
@@ -638,6 +644,16 @@ internal static class GearConversionTests
         // Each extra race gets the same file under its own path; the file name follows the race.
         var highlander = CustomizationPaths.Rewrite(skin, root, root with { GenderRace = 401 });
         Assert.Equal("chara/human/c0401/obj/body/b0001/texture/--c0401b0001_base.tex", highlander);
+
+        // The Xaela skin is body 101, which only Au Ra have: offered to another race it becomes
+        // that race's body 1, and the other way round it can become Xaela's.
+        var xaela = new CustomizationPathEndpoint(AssetKind.Body, 1401, 101);
+        Assert.Equal("chara/human/c0201/obj/body/b0001/texture/--c0201b0001_base.tex",
+            CustomizationPaths.Rewrite("chara/human/c1401/obj/body/b0101/texture/--c1401b0101_base.tex", xaela, root));
+        Assert.Equal("chara/human/c1401/obj/body/b0101/material/v0001/mt_c1401b0101_a.mtrl",
+            CustomizationPaths.Rewrite("chara/human/c0201/obj/body/b0001/material/v0001/mt_c0201b0001_a.mtrl", root, xaela));
+        Assert.Equal(new ushort[] { 1, 101 }, CustomizationPaths.SkinBodies(1401).ToArray());
+        Assert.Equal(new ushort[] { 1 }, CustomizationPaths.SkinBodies(201).ToArray());
 
         // Bodies are shaped per gender, so skins stay on their side of it.
         Assert.True(CustomizationTargets.BlockReason(AssetKind.Body, 201, AssetKind.Body, 101) != null);
@@ -1594,6 +1610,102 @@ internal static class GearConversionTests
         Assert.True(EqdpFor(defaults, 1801) == null, "The option-only model does not change the default.");
         var viera = EqdpFor(option, 1801) ?? throw new Exception("No EQDP entry for Viera women in the option.");
         Assert.Equal(3, Json.GetInt(viera["Manipulation"]!["Entry"], 0) >> GearSlot.Wrists.EqdpShift() & 3);
+    }
+
+    /// <summary>
+    /// A race the source has no model for shows the mod's model through its fallback (Miqo'te
+    /// women the Midlander women's one). Where the target has a model of its own for that race,
+    /// its EQDP entry is switched off so the race keeps seeing the converted model. A race the
+    /// source had a model of its own for, and one the target has none for either, are left alone.
+    /// </summary>
+    private static void EqdpForFallbackRaces()
+    {
+        using var mod = new TempDir();
+        const string src = "chara/equipment/e0168";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Top",
+             "DefaultData":{"Files":{
+               "{{{src}}}/model/c0201e0168_top.mdl":"top.mdl",
+               "{{{src}}}/material/v0001/mt_c0201e0168_top_a.mtrl":"top.mtrl"} } }
+            """);
+        mod.File("top.mdl", TestAssets.CreateMdl(material: "/mt_c0201e0168_top_a.mtrl"));
+        mod.File("top.mtrl", Mtrl("chara/common/texture/white.tex"));
+
+        var game = new FakeGame();
+        game.Files[$"{src}/e0168.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+        game.Files["chara/equipment/e0300/e0300.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+        game.Files["chara/common/texture/white.tex"] = [1];
+        void Eqdps(ushort race, ushort source, ushort target)
+            => game.Files[$"chara/xls/charadb/equipmentdeformerparameter/c{race:D4}.eqdp"] = Eqdp((168, source), (300, target));
+        Eqdps(101, 0b1100, 0b1100);
+        Eqdps(201, 0b1100, 0b1100);
+        Eqdps(801, 0, 0b1100);   // falls back to the mod's model; the target has its own
+        Eqdps(1001, 0b1100, 0b1100); // has its own source model, which the mod leaves vanilla
+        Eqdps(1401, 0, 0);       // falls back on both
+
+        var request = new GearConversionRequest(new GearItem(GearSlot.Body, 168, 1), new GearItem(GearSlot.Body, 300, 1),
+            ConversionOutputMode.NewMod);
+        var plan = new GearConversionPlanner(game).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+
+        var entries = (plan.Result.Default.Manipulations?.OfType<JsonObject>() ?? [])
+            .Where(m => m["Type"]!.GetValue<string>() == "Eqdp").Select(m => m["Manipulation"]!)
+            .Select(m => $"{m["Race"]} {m["Gender"]} {Json.GetInt(m["Entry"], -1)}").ToArray();
+        Assert.Equal(new[] { "Miqote Female 0" }, entries);
+        Assert.True(plan.Changes.Any(c => c.From.Contains("shows the mod's") && c.From.Contains("Midlander")),
+            string.Join("; ", plan.Changes.Select(c => c.From)));
+    }
+
+    /// <summary>
+    /// Every one of the game's left ring models loads the right ring's material. A right ring
+    /// retexture made a left ring one keeps the _rir name the target's own model asks for (and
+    /// says it changes the right ring too); a converted model names its own material, which keeps
+    /// the unique _ril name. The other way, a left ring retexture is a _rir material, and it
+    /// becomes the target slot's own name rather than _rir_nek.
+    /// </summary>
+    private static void LeftRingMaterials()
+    {
+        using var mod = new TempDir();
+        mod.Json("meta.json", """
+            {"FileVersion":4,"Name":"Ring",
+             "DefaultData":{"Files":{
+               "chara/accessory/a0050/material/v0001/mt_c0101a0050_rir_a.mtrl":"ring.mtrl"}}}
+            """);
+        mod.File("ring.mtrl", Mtrl("chara/common/texture/white.tex"));
+        var game = new FakeGame();
+        game.Files["chara/common/texture/white.tex"] = [1];
+        foreach (var set in new[] { 50, 60 })
+            game.Files[$"chara/accessory/a{set:D4}/a{set:D4}.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+
+        var toLeft = new GearConversionPlanner(game).Plan(mod.Path, new GearConversionRequest(
+            new GearItem(GearSlot.RFinger, 50, 1), new GearItem(GearSlot.LFinger, 60, 1), ConversionOutputMode.NewMod));
+        Assert.True(!toLeft.HasBlockers, string.Join("; ", toLeft.Diagnostics.Select(d => d.Message)));
+        Assert.Equal("chara/accessory/a0060/material/v0001/mt_c0101a0060_rir_a.mtrl",
+            toLeft.GamePathMap["chara/accessory/a0050/material/v0001/mt_c0101a0050_rir_a.mtrl"]);
+        Assert.True(toLeft.Diagnostics.Any(d => d.Code == "left_ring_shared_material"));
+
+        var fromLeft = new GearConversionPlanner(game).Plan(mod.Path, new GearConversionRequest(
+            new GearItem(GearSlot.LFinger, 50, 1), new GearItem(GearSlot.Neck, 60, 1), ConversionOutputMode.NewMod));
+        Assert.True(!fromLeft.HasBlockers, string.Join("; ", fromLeft.Diagnostics.Select(d => d.Message)));
+        Assert.Equal("chara/accessory/a0060/material/v0001/mt_c0101a0060_nek_a.mtrl",
+            fromLeft.GamePathMap["chara/accessory/a0050/material/v0001/mt_c0101a0050_rir_a.mtrl"]);
+
+        // With the model shipped, the converted model and its material agree on _ril.
+        using var withModel = new TempDir();
+        withModel.Json("meta.json", """
+            {"FileVersion":4,"Name":"Ring",
+             "DefaultData":{"Files":{
+               "chara/accessory/a0050/model/c0101a0050_rir.mdl":"ring.mdl",
+               "chara/accessory/a0050/material/v0001/mt_c0101a0050_rir_a.mtrl":"ring.mtrl"}}}
+            """);
+        withModel.File("ring.mdl", TestAssets.CreateMdl(material: "/mt_c0101a0050_rir_a.mtrl"));
+        withModel.File("ring.mtrl", Mtrl("chara/common/texture/white.tex"));
+        var modelPlan = new GearConversionPlanner(game).Plan(withModel.Path, new GearConversionRequest(
+            new GearItem(GearSlot.RFinger, 50, 1), new GearItem(GearSlot.LFinger, 60, 1), ConversionOutputMode.NewMod));
+        Assert.True(!modelPlan.HasBlockers, string.Join("; ", modelPlan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal("chara/accessory/a0060/material/v0001/mt_c0101a0060_ril_a.mtrl",
+            modelPlan.GamePathMap["chara/accessory/a0050/material/v0001/mt_c0101a0050_rir_a.mtrl"]);
+        Assert.True(modelPlan.Diagnostics.All(d => d.Code != "left_ring_shared_material"));
     }
 
     private static void EmptyPlanWithoutModContent()

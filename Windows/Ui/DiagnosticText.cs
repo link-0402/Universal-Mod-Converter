@@ -64,6 +64,7 @@ internal static class DiagnosticText
         ["est_invalid"]            = "Extra skeleton entry invalid",
         ["est_unavailable"]        = "Extra skeleton data unavailable",
         ["extra_skeleton_missing"] = "Extra skeleton missing",
+        ["face_skeleton_replaced"] = "Face skeleton swapped for the target's",
         ["tail_bones_on_ear"]      = "Tail bones on an ear",
         ["hair_skeleton_mismatch"] = "Hair physics bones not on the target",
         ["material_not_loaded"]    = "Hair material will not load",
@@ -73,7 +74,8 @@ internal static class DiagnosticText
         ["unused_material_kept"]   = "Unused material kept",
         ["accessory_part_tags"]    = "Part toggles on an accessory",
         ["part_tags_not_merged"]   = "Part tags not renamed",
-        ["xaela_material_dropped"] = "Xaela material removed",
+        ["xaela_material_dropped"] = "Second clan's material removed",
+        ["left_ring_shared_material"] = "Left ring shares the right ring's material",
 
         // Skin and face retextures
         ["not_fan_out"]            = "No longer a retexture",

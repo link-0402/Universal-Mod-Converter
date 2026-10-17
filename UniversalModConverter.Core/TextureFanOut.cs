@@ -170,7 +170,8 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
             var entries = CollectEntries();
             foreach (var target in targets)
                 _targetKeys[target] = entries
-                    .Select(e => GamePath.Normalize(Retarget(e.Key, target)))
+                    .SelectMany(e => Retargets(e.Key, target))
+                    .Select(GamePath.Normalize)
                     .ToHashSet(StringComparer.Ordinal);
 
             if (_request.Layout == TextureFanOutLayout.AddPathsToOptions) AddPaths(entries, targets);
@@ -200,10 +201,10 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                                             $"{RaceNames.Describe(target.GenderRace)}.");
                 else if (CustomizationTargets.BlockReason(_source.Kind, _source.GenderRace, target.Kind, target.GenderRace) is { } reason)
                     Block("invalid_target", reason);
-                else if (_source.Kind == AssetKind.Body && target.Kind == AssetKind.Body && _source.ModelId != target.ModelId)
-                    // A race's body variants (the Xaela skin is b0101) are its own: another race has no such body.
-                    Block("invalid_target", $"This skin is body {_source.ModelId:D4}, which only its own race has, so it cannot be " +
-                                            $"offered to {RaceNames.Describe(target.GenderRace)}.");
+                else if (target.Kind == AssetKind.Body && !CustomizationPaths.SkinBodies(target.GenderRace).Contains(target.ModelId))
+                    // The Xaela skin is body 101, which no other race has: nothing would load it there.
+                    Block("invalid_target", $"{RaceNames.Describe(target.GenderRace)} has no body {target.ModelId:D4}; " +
+                                            "offer the skin to its body 0001 instead.");
                 else
                     targets.Add(target);
             }
@@ -232,6 +233,26 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
         /// <summary><paramref name="value"/> moved from the source's root to the root <paramref name="target"/> loads its files from.</summary>
         private string Retarget(string value, CustomizationPathEndpoint target)
             => CustomizationPaths.Rewrite(value, _source, PathsOf(target));
+
+        /// <summary>
+        /// Every path a source key gives <paramref name="target"/>. Hrothgar skins load their
+        /// material from the folder of the fur pattern (v0001-v0005): another race's material goes
+        /// to all five, and of a Hrothgar's five only v0001 goes to a race with one folder, unless
+        /// the mod has no v0001 of it. None when the key has no equivalent for the target.
+        /// </summary>
+        private IEnumerable<string> Retargets(string key, CustomizationPathEndpoint target)
+        {
+            var moved = Retarget(key, target);
+            if (string.Equals(moved, key, StringComparison.Ordinal)) return [];
+            var normalized = GamePath.Normalize(key);
+            if (CustomizationPaths.HasFurFolders(_source) && !CustomizationPaths.HasFurFolders(target) &&
+                CustomizationPaths.MaterialFolder(normalized) is > 1 &&
+                _redirected.ContainsKey(CustomizationPaths.OtherFurFolders(normalized, _source).First(p => CustomizationPaths.MaterialFolder(p) == 1)))
+                return [];
+            return CustomizationPaths.HasFurFolders(_source)
+                ? [moved]
+                : CustomizationPaths.OtherFurFolders(moved, PathsOf(target)).Prepend(moved);
+        }
 
         private static string Describe(CustomizationPathEndpoint endpoint)
             => $"{RaceNames.Name(endpoint.GenderRace)} {CustomizationKinds.Get(endpoint.Kind).DisplayName.ToLowerInvariant()} {endpoint.ModelId}";
@@ -265,14 +286,16 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
                 var dictionary = entry.IsSwap ? container.GetOrCreateFileSwaps() : container.GetOrCreateFiles();
                 foreach (var target in targets)
                 {
-                    var key = Retarget(entry.Key, target);
-                    if (string.Equals(key, entry.Key, StringComparison.Ordinal))
+                    if (string.Equals(Retarget(entry.Key, target), entry.Key, StringComparison.Ordinal))
                     {
                         _withoutEquivalent++;   // e.g. an Au Ra tail's Xaela material, for a race without one
                         continue;
                     }
-                    if (Kept(key, target) || Holds(dictionary, key)) continue;
-                    Add(dictionary, entry, target, key, container.Label, "Game path");
+                    foreach (var key in Retargets(entry.Key, target))
+                    {
+                        if (Kept(key, target) || Holds(dictionary, key)) continue;
+                        Add(dictionary, entry, target, key, container.Label, "Game path");
+                    }
                 }
             }
         }
@@ -406,8 +429,8 @@ public sealed class TextureFanOutPlanner(IGameFileProvider game, Func<Customizat
             var swaps = new JsonObject();
             foreach (var entry in entries)
             foreach (var target in targets)
+            foreach (var key in Retargets(entry.Key, target))
             {
-                var key = Retarget(entry.Key, target);
                 var dictionary = entry.IsSwap ? swaps : files;
                 if (string.Equals(key, entry.Key, StringComparison.Ordinal) || Kept(key, target) || Holds(dictionary, key))
                     continue;

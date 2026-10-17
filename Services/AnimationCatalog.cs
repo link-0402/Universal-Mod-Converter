@@ -9,21 +9,32 @@ using Lumina.Excel.Sheets;
 
 namespace UniversalModConverter.Services;
 
-/// <summary>One body animation an emote plays: its position in the emote's timeline list and its PAP key.</summary>
+/// <summary>
+/// One body animation an emote plays: its first position in the emote's timeline list and its PAP
+/// key. An emote may play the same animation in several positions (/Cheer's u_cheer for both kinds
+/// of sitting and the upper body); <see cref="Positions"/> holds all of them.
+/// </summary>
 public sealed record EmoteTimeline(int Index, string Key)
 {
     public string Location => $"a0001/bt_common/{Key}";
 
-    /// <summary>What the game uses this position of Emote.ActionTimeline for.</summary>
-    public string Label => Index switch
+    /// <summary>Every position of Emote.ActionTimeline that plays this animation, first to last.</summary>
+    public ImmutableArray<int> Positions { get; init; } = [Index];
+
+    /// <summary>What the game uses the positions of Emote.ActionTimeline that play this animation for.</summary>
+    public string Label => string.Join(", ", Positions.Select(PositionLabel));
+
+    private static string PositionLabel(int position) => position switch
     {
         0 => "main",
         1 => "start",
         2 => "ground sitting",
         3 => "chair sitting",
         4 => "upper body",
-        _ => $"timeline {Index}",
+        _ => $"timeline {position}",
     };
+
+    public EmotePairing.Timeline ForPairing => new(Location, Positions);
 }
 
 public sealed record EmoteInfo(uint Id, string Name, uint Icon, ImmutableArray<EmoteTimeline> Timelines);
@@ -159,8 +170,10 @@ public sealed class AnimationCatalog(IDataManager data, IPluginLog log)
                         if (key.Length == 0) continue;
                         var papKey = AnimationKeys.PapKey(key);
                         if (!PapPath.TryParse(PapPath.ForTimelineKey(ProbeRace, key).GamePath, out var path) ||
-                            !FileExists(path.GamePath) || timelines.Any(t => t.Key == papKey)) continue;
-                        timelines.Add(new EmoteTimeline(position, papKey));
+                            !FileExists(path.GamePath)) continue;
+                        var known = timelines.Select((t, i) => t.Key == papKey ? i : -1).FirstOrDefault(i => i >= 0, -1);
+                        if (known >= 0) timelines[known] = timelines[known] with { Positions = timelines[known].Positions.Add(position) };
+                        else timelines.Add(new EmoteTimeline(position, papKey));
                     }
                     if (timelines.Count > 0)
                         emotes.Add(new EmoteInfo(emote.RowId, name, emote.Icon, timelines.ToImmutable()));

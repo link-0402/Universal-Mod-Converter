@@ -21,8 +21,40 @@ internal static class TextureFanOutTests
         ("An unreadable material is reported once, not once per target", UnreadableMaterialOnce),
         ("A written plan lets go of the contents it carried", ReleasesContents),
         ("Hair textures go to the shared root the game loads them from", HairSharedRoot),
-        ("A body variant only its own race has is not offered to other races", SkinVariantTargets),
+        ("The Xaela skin goes to other races' body 1, and a Raen skin to Xaela's", SkinVariantTargets),
+        ("Hrothgar skins get every fur folder, and give one", HrothgarSkinFolders),
     ];
+
+    /// <summary>
+    /// Hrothgar skins load their material from the folder of the fur pattern, v0001-v0005. A
+    /// Midlander skin material goes to all five; of a Hrothgar's five, only v0001 goes to a race
+    /// with one folder.
+    /// </summary>
+    private static void HrothgarSkinFolders()
+    {
+        using var mod = new TempDir();
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Skin","DefaultData":{"Files":{"{{{SkinMtrl}}}":"skin.mtrl"} } }
+            """);
+        mod.File("skin.mtrl", [1]);
+        var plan = new TextureFanOutPlanner(new FakeGame()).Plan(mod.Path,
+            Request(Skin(201), TextureFanOutLayout.AddPathsToOptions, false, Skin(1601)));
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(Enumerable.Range(1, 5).Select(v => $"chara/human/c1601/obj/body/b0001/material/v{v:D4}/mt_c1601b0001_a.mtrl").ToArray(),
+            plan.Result.Default.Files!.Select(p => GamePath.Normalize(p.Key)).Where(k => k.Contains("c1601")).Order(StringComparer.Ordinal).ToArray());
+
+        using var hrothgar = new TempDir();
+        var files = string.Join(",", Enumerable.Range(1, 5).Select(v =>
+            $"\"chara/human/c1601/obj/body/b0001/material/v{v:D4}/mt_c1601b0001_a.mtrl\":\"v{v}.mtrl\""));
+        hrothgar.Json("meta.json", "{\"FileVersion\":4,\"Name\":\"Fur\",\"DefaultData\":{\"Files\":{" + files + "} } }");
+        foreach (var v in Enumerable.Range(1, 5)) hrothgar.File($"v{v}.mtrl", [(byte)v]);
+        var back = new TextureFanOutPlanner(new FakeGame()).Plan(hrothgar.Path,
+            Request(Skin(1601), TextureFanOutLayout.AddPathsToOptions, false, Skin(201)));
+        Assert.True(!back.HasBlockers, string.Join("; ", back.Diagnostics.Select(d => d.Message)));
+        var added = back.Result.Default.Files!.Where(p => GamePath.Normalize(p.Key).Contains("c0201")).ToList();
+        Assert.Equal(new[] { SkinMtrl }, added.Select(p => GamePath.Normalize(p.Key)).ToArray());
+        Assert.Equal("v1.mtrl", added.Single().Value!.GetValue<string>());
+    }
 
     private static void SkinVariantTargets()
     {
@@ -32,12 +64,33 @@ internal static class TextureFanOutTests
             {"FileVersion":4,"Name":"Xaela skin","DefaultData":{"Files":{"{{{xaela}}}":"skin.tex"} } }
             """);
         mod.File("skin.tex", [1]);
+        var source = new CustomizationPathEndpoint(AssetKind.Body, 1401, 101);
+
+        // Body 101 exists only for Au Ra, so another race is offered its body 1.
+        var dead = new TextureFanOutPlanner(new FakeGame()).Plan(mod.Path,
+            Request(source, TextureFanOutLayout.AddPathsToOptions, false, Skin(201) with { ModelId = 101 }));
+        Assert.True(dead.Diagnostics.Any(d => d.Code == "invalid_target" && d.IsBlocker && d.Message.Contains("0101")),
+            string.Join("; ", dead.Diagnostics.Select(d => d.Message)));
+        Assert.True(dead.Result.Default.Files!.Count == 1, "no path for a body the race does not have is written");
+
         var plan = new TextureFanOutPlanner(new FakeGame()).Plan(mod.Path,
-            Request(new CustomizationPathEndpoint(AssetKind.Body, 1401, 101), TextureFanOutLayout.AddPathsToOptions, false, Skin(201)));
-        Assert.True(plan.Diagnostics.Any(d => d.Code == "invalid_target" && d.IsBlocker && d.Message.Contains("b0101")
-                                             || d.Code == "invalid_target" && d.IsBlocker && d.Message.Contains("0101")),
-            string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
-        Assert.True(plan.Result.Default.Files!.Count == 1, "no path for another race's body is written");
+            Request(source, TextureFanOutLayout.AddPathsToOptions, false, Skin(201)));
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.True(plan.Result.Default.Files!.Select(p => GamePath.Normalize(p.Key))
+                .Contains("chara/human/c0201/obj/body/b0001/texture/c0201b0001_base.tex"),
+            string.Join(", ", plan.Result.Default.Files!.Select(p => p.Key)));
+
+        // The other way round, Raen skin to the Xaela one.
+        using var raen = new TempDir();
+        raen.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Skin","DefaultData":{"Files":{"{{{SkinBase}}}":"skin.tex"} } }
+            """);
+        raen.File("skin.tex", [1]);
+        var toXaela = new TextureFanOutPlanner(new FakeGame()).Plan(raen.Path,
+            Request(Skin(201), TextureFanOutLayout.AddPathsToOptions, false, source));
+        Assert.True(!toXaela.HasBlockers, string.Join("; ", toXaela.Diagnostics.Select(d => d.Message)));
+        Assert.True(toXaela.Result.Default.Files!.Select(p => GamePath.Normalize(p.Key)).Contains(xaela),
+            string.Join(", ", toXaela.Result.Default.Files!.Select(p => p.Key)));
     }
 
     /// <summary>
