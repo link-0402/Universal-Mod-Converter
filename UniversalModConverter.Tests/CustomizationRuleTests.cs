@@ -6,6 +6,9 @@ internal static class CustomizationRuleTests
     public static (string Name, Action Run)[] All =>
     [
         ("Shared material roots (hair 101-200, Hrothgar t0001)", SharedRoots),
+        ("Midlander hair to another race's same ID keeps the shared material name", MidlanderHairSameId),
+        ("Hair material names resolve the way the game resolves them", GameHairMaterialNames),
+        ("Hair physics bones name their skeleton", HairSkeletonsFromBones),
         ("Hrothgar tail materials use t0001 and five variant folders", HrothgarMaterialPaths),
         ("A material named by complete game path is used as it is", CompleteMaterialPaths),
         ("Hrothgar tail to other race tail", HrothgarToOtherTail),
@@ -34,6 +37,64 @@ internal static class CustomizationRuleTests
         Assert.True(!CustomizationPaths.IsSharedMaterialRoot(Tail(801, 1)));
         Assert.Equal(Tail(1601, 1), CustomizationPaths.GetMaterialEndpoint(Tail(1601, 4)));
         Assert.Equal(Hair(101, 130), CustomizationPaths.GetMaterialEndpoint(Hair(501, 130)));
+    }
+
+    /// <summary>
+    /// Midlander male hair 111 to Viera male hair 111: both load their materials from the
+    /// c0101 h0111 root, and the game finds the folder from the c0101h0111 the material's name
+    /// starts with. The owner suffix the conversion adds must not turn that into c1701h0111,
+    /// a folder nothing is in (the hair would load no material and not be drawn).
+    /// </summary>
+    private static void MidlanderHairSameId()
+    {
+        var source = Hair(101, 111);
+        var viera = Hair(1701, 111);
+        Assert.Equal("chara/human/c0101/obj/hair/h0111/material/v0001/mt_c0101h0111_c1701_hir_b.mtrl",
+            CustomizationPaths.Rewrite("chara/human/c0101/obj/hair/h0111/material/v0001/mt_c0101h0111_hir_b.mtrl", source, viera));
+        Assert.Equal("chara/human/c0101/obj/hair/h0111/material/v0001/mt_c0101h0111_c1701_hir_b.mtrl",
+            CustomizationPaths.RewriteOwnedReference("chara/human/c0101/obj/hair/h0111/material/v0001/mt_c0101h0111_hir_b.mtrl", source, viera));
+        Assert.Equal("/mt_c0101h0111_c1701_hir_scalp.mtrl",
+            CustomizationPaths.RewriteOwnedReference("/mt_c0101h0111_hir_scalp.mtrl", source, viera));
+        Assert.Equal("/mt_c0101h0111_c0301_hir_a.mtrl",
+            CustomizationPaths.RewriteOwnedReference("/mt_c0101h0111_hir_a.mtrl", source, Hair(301, 111)));
+        // Another ID was never affected.
+        Assert.Equal("/mt_c0101h0109_c1701_hir_scalp.mtrl",
+            CustomizationPaths.RewriteOwnedReference("/mt_c0101h0111_hir_scalp.mtrl", source, Hair(1701, 109)));
+        // The model's own textures still move to the target's root.
+        Assert.Equal("chara/human/c1701/obj/hair/h0111/texture/c1701h0111_hir_b_mask.tex",
+            CustomizationPaths.Rewrite("chara/human/c0101/obj/hair/h0111/texture/c0101h0111_hir_b_mask.tex", source, viera));
+    }
+
+    /// <summary>
+    /// What the game's own material resolver returned for hair (Human.ResolveMtrlPath, 2026-10-17):
+    /// on the shared Midlander root it writes that root's race over the name's, and keeps the
+    /// name's ID; a hair with a root of its own loads the name as it is.
+    /// </summary>
+    private static void GameHairMaterialNames()
+    {
+        Assert.Equal("chara/human/c0101/obj/hair/h0111/material/v0001/mt_c0101h0111_c1701_hir_a.mtrl",
+            CustomizationPaths.MaterialPath(Hair(1701, 111), "/mt_c1701h0111_c1701_hir_a.mtrl"));
+        Assert.Equal("chara/human/c0101/obj/hair/h0111/material/v0001/mt_c0101h0111_c1701_hir_a.mtrl",
+            CustomizationPaths.MaterialPath(Hair(1701, 111), "/mt_c0101h0111_c1701_hir_a.mtrl"));
+        Assert.Equal("chara/human/c0101/obj/hair/h0109/material/v0001/mt_c0101h0111_c1701_hir_a.mtrl",
+            CustomizationPaths.MaterialPath(Hair(1701, 109), "/mt_c1701h0111_c1701_hir_a.mtrl"));
+        Assert.Equal("chara/human/c0201/obj/hair/h0120/material/v0001/mt_c0201h0120_hir_a.mtrl",
+            CustomizationPaths.MaterialPath(Hair(801, 120), "/mt_c0801h0120_hir_a.mtrl"));
+        // Roots of their own: Miqo'te 101-115, Hrothgar, and every ID above 200.
+        Assert.Equal("chara/human/c0701/obj/hair/h0111/material/v0001/mt_c0101h0111_c1701_hir_a.mtrl",
+            CustomizationPaths.MaterialPath(Hair(701, 111), "/mt_c0101h0111_c1701_hir_a.mtrl"));
+        Assert.Equal("chara/human/c1501/obj/hair/h0111/material/v0001/mt_c0101h0111_hir_a.mtrl",
+            CustomizationPaths.MaterialPath(Hair(1501, 111), "/mt_c0101h0111_hir_a.mtrl"));
+        Assert.Equal("chara/human/c1701/obj/hair/h0201/material/v0001/mt_c0101h0201_hir_a.mtrl",
+            CustomizationPaths.MaterialPath(Hair(1701, 201), "/mt_c0101h0201_hir_a.mtrl"));
+    }
+
+    private static void HairSkeletonsFromBones()
+    {
+        Assert.True(CustomizationPaths.HairSkeletons(["j_kao", "j_ex_h0108_ke_b", "J_EX_H0108_KE_L", "j_ex_h0112_ke_f",
+                "j_ex_met_a", "/mt_c0101h0111_hir_a.mtrl"])
+            .SequenceEqual(new ushort[] { 108, 112 }));
+        Assert.Equal(0, CustomizationPaths.HairSkeletons(["j_kao", "j_kubi", "j_sebo_c"]).Count);
     }
 
     private static void HrothgarMaterialPaths()

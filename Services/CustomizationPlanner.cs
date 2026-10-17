@@ -138,6 +138,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             var paths = moved.MovedFiles.Select(f => f.GamePath).ToHashSet(StringComparer.Ordinal);
             models = [.. models.Select(m => m.GamePaths.Any(paths.Contains) ? m with { Options = [moved.Label!] } : m)];
         }
+        WarnAboutUnloadedMaterials(task, root, targetDescriptor, target, resources, models);
         task.OutputModels.AddRange(models);
     }
 
@@ -782,9 +783,28 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             ? "chara/xls/charadb/hairskeletontemplate.est"
             : "chara/xls/charadb/faceskeletontemplate.est";
 
+        // The skeletons the converted target loads: what options set for the source (retargeted
+        // with the rest of the metadata), what the mod already sets for the target, and its default.
+        var optionSkeletons = resources.EstOverrides
+            .Where(o => o.Key == new EstOverrideKey(source.Kind, source.GenderRace, source.ModelId) ||
+                        o.Key == new EstOverrideKey(target.Kind, target.GenderRace, target.ModelId))
+            .Select(o => o.Value)
+            .ToList();
+        var prefix = source.Kind == AssetKind.Hair ? 'h' : 'f';
+        var directory = source.Kind == AssetKind.Hair ? "hair" : "face";
+        string SkeletonPath(ushort skeleton) => $"chara/human/c{target.GenderRace:D4}/skeleton/{directory}/{prefix}{skeleton:D4}/" +
+                                                $"skl_c{target.GenderRace:D4}{prefix}{skeleton:D4}.sklb";
+        bool Exists(ushort skeleton) => SkeletonPath(skeleton) is var path &&
+                                        (resources.Files.ContainsKey(path) || resources.FileSwaps.ContainsKey(path) ||
+                                         gameData is not IGameFileProvider files || files.FileExists(path));
+
         var defaultSource = FindEst(mod.Default, source);
-        if (defaultSource == null && FindEst(mod.Default, target) != null)
-            return; // The mod's default option already defines the target explicitly.
+        if (defaultSource == null && FindEst(mod.Default, target) is { } definedTarget)
+        {
+            // The mod's default option already defines the target explicitly.
+            WarnAboutHairSkeletons(task, descriptor, target, [.. optionSkeletons, definedTarget], Exists);
+            return;
+        }
 
         // The source's default: the mod's default option, else the table the mod supplies,
         // else the game's table.
@@ -822,16 +842,11 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             .Append(defaultSkeleton)
             .Where(id => id != 0)
             .Distinct();
-        var prefix = source.Kind == AssetKind.Hair ? 'h' : 'f';
-        var directory = source.Kind == AssetKind.Hair ? "hair" : "face";
         var defaultAvailable = true;
         foreach (var skeleton in used)
         {
-            var skeletonPath = $"chara/human/c{target.GenderRace:D4}/skeleton/{directory}/{prefix}{skeleton:D4}/" +
-                               $"skl_c{target.GenderRace:D4}{prefix}{skeleton:D4}.sklb";
-            if (resources.Files.ContainsKey(skeletonPath) || resources.FileSwaps.ContainsKey(skeletonPath) ||
-                gameData is not IGameFileProvider files || files.FileExists(skeletonPath))
-                continue;
+            if (Exists(skeleton)) continue;
+            var skeletonPath = SkeletonPath(skeleton);
             if (skeleton == defaultSkeleton) defaultAvailable = false;
             task.Diagnostics.Add(new PlanDiagnostic("extra_skeleton_missing",
                 $"The source uses extra skeleton {prefix}{skeleton:D4}, which does not exist for {RaceNames.Describe(target.GenderRace)} " +
@@ -840,7 +855,10 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         // An explicit default entry is retargeted with the rest of the metadata, and a target whose own
         // skeleton is the one the source loads needs no entry to say so.
-        if (defaultSource != null || !defaultAvailable || defaultSkeleton == targetVanilla) return;
+        var inserts = defaultSource == null && defaultAvailable && defaultSkeleton != targetVanilla;
+        WarnAboutHairSkeletons(task, descriptor, target,
+            [.. optionSkeletons, defaultSource != null || inserts ? defaultSkeleton : targetVanilla], Exists);
+        if (!inserts) return;
 
         var file = Path.Combine(root, PenumbraMod.MetaFileName);
         const string jsonPath = "<root>.DefaultData";
@@ -868,6 +886,101 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                        $"(target vanilla {prefix}{targetVanilla:D4}, source default {prefix}{defaultSkeleton:D4})",
             NewValue = manipulation.ToJsonString(),
         });
+    }
+
+    /// <summary>
+    /// A hair model moves its physics parts with the bones of one hair skeleton, named after it
+    /// (j_ex_h0108_*). Converted to a hair that loads another skeleton, or none (most hairs
+    /// below 101 and many others have no physics bones), those bones do not exist on the
+    /// character: the parts weighted to them do not move and can end up stretched or misplaced.
+    /// </summary>
+    /// <param name="loaded">The skeletons the target's EST entries name, from every option.</param>
+    /// <param name="exists">Whether the target's race has that skeleton. A missing one the source uses
+    /// is reported on its own (extra_skeleton_missing); here it only means the target loads none.</param>
+    private static void WarnAboutHairSkeletons(ConversionTask task, CustomizationKindDescriptor descriptor,
+        CustomizationPathEndpoint target, IReadOnlyCollection<ushort> loaded, Func<ushort, bool> exists)
+    {
+        if (target.Kind != AssetKind.Hair) return;
+        var needed = new SortedDictionary<ushort, SortedSet<string>>();
+        foreach (var file in task.AllAssetFiles.Where(f => f.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase)))
+        {
+            IReadOnlyList<string> strings;
+            try { strings = ResourceReferences.ReadMdlStrings(File.ReadAllBytes(file)); }
+            catch (Exception ex) when (ex is InvalidDataException or IOException or ArgumentException or IndexOutOfRangeException)
+            {
+                continue; // The model's own planning step names the file and the problem.
+            }
+            foreach (var skeleton in CustomizationPaths.HairSkeletons(strings))
+            {
+                if (!needed.TryGetValue(skeleton, out var models)) needed[skeleton] = models = new(StringComparer.OrdinalIgnoreCase);
+                models.Add(Path.GetFileName(file));
+            }
+        }
+
+        var named = loaded.Where(id => id != 0).ToHashSet();
+        var loads = named.Where(exists).Order().ToArray();
+        var loadsText = loads.Length switch
+        {
+            0 => "no hair skeleton, so it has no physics bones at all",
+            1 => $"hair skeleton h{loads[0]:D4}",
+            _ => "hair skeleton " + string.Join(" or ", loads.Select(id => $"h{id:D4}")) + ", depending on the mod's options",
+        };
+        foreach (var (skeleton, models) in needed)
+        {
+            if (named.Contains(skeleton)) continue;
+            task.Diagnostics.Add(new PlanDiagnostic("hair_skeleton_mismatch",
+                $"{string.Join(", ", models)} {(models.Count == 1 ? "is" : "are")} weighted to the physics bones of hair skeleton " +
+                $"h{skeleton:D4} (j_ex_h{skeleton:D4}_*), but {RaceNames.Describe(target.GenderRace)} " +
+                $"{descriptor.DisplayName.ToLowerInvariant()} #{target.ModelId} loads {loadsText}. Those bones do not exist there: " +
+                "the parts of the hair weighted to them will not move, and may be stretched or out of place. " +
+                "Pick a target hair that loads that skeleton.", false));
+        }
+    }
+
+    /// <summary>
+    /// Every material the converted hair's models name has to load from somewhere: the game
+    /// finds it in the folder of the target's material root (see
+    /// <see cref="CustomizationPaths.MaterialPaths"/>), and either the converted mod or the game
+    /// must have a file there. A model that loads no material is not drawn at all.
+    /// </summary>
+    private void WarnAboutUnloadedMaterials(ConversionTask task, string root, CustomizationKindDescriptor descriptor,
+        CustomizationPathEndpoint target, ModResourceIndex resources, IReadOnlyList<GearOutputModel> models)
+    {
+        // Verified against the game's resolver for hair only; without the game's files a vanilla
+        // material cannot be told from a missing one.
+        if (target.Kind != AssetKind.Hair || gameData is not IGameFileProvider files) return;
+        var generated = task.PlannedGeneratedFiles.Select(g => Normalize(g.GamePath)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        bool Loads(string gamePath)
+        {
+            var path = Normalize(gamePath);
+            return task.CustomizationOutputKeys.Contains(path) || generated.Contains(path) ||
+                   resources.Files.ContainsKey(path) || resources.FileSwaps.ContainsKey(path) || files.FileExists(path);
+        }
+
+        foreach (var model in models)
+        {
+            if (model.SourceFile is not { } sourceFile) continue;
+            IReadOnlyList<string> materials;
+            try { materials = ResourceReferences.ReadMdlMaterials(File.ReadAllBytes(sourceFile)); }
+            catch (Exception ex) when (ex is InvalidDataException or IOException or ArgumentException or IndexOutOfRangeException)
+            {
+                continue;
+            }
+            var replacements = MaterialReplacements(task, sourceFile, Path.GetFullPath(Path.Combine(root, model.Local)));
+            foreach (var material in materials)
+            {
+                var name = replacements.GetValueOrDefault(material, material);
+                // Skin materials load from the character's body, not from the hair's folder.
+                if (ResourceReferences.IsSkinMaterial(name)) continue;
+                var paths = CustomizationPaths.MaterialPaths(target, name);
+                if (paths.Any(Loads)) continue;
+                task.Diagnostics.Add(new PlanDiagnostic("material_not_loaded",
+                    $"{Path.GetFileName(model.Local)} names material '{name}', which {RaceNames.Describe(target.GenderRace)} " +
+                    $"{descriptor.DisplayName.ToLowerInvariant()} #{target.ModelId} loads from {paths[0]}. Neither the converted mod " +
+                    $"nor the game has a file there, so the converted {descriptor.DisplayName.ToLowerInvariant()} will not show up " +
+                    "in game (it looks bald). Pick another target, or tell the plugin's author which conversion this was.", false));
+            }
+        }
     }
 
     /// <summary>The extra skeleton a container sets for <paramref name="endpoint"/>, if any.</summary>

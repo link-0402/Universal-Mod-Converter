@@ -65,6 +65,8 @@ internal static class DiagnosticText
         ["est_unavailable"]        = "Extra skeleton data unavailable",
         ["extra_skeleton_missing"] = "Extra skeleton missing",
         ["tail_bones_on_ear"]      = "Tail bones on an ear",
+        ["hair_skeleton_mismatch"] = "Hair physics bones not on the target",
+        ["material_not_loaded"]    = "Hair material will not load",
         ["pbd_missing"]            = "Race data missing",
         ["pbd_invalid"]            = "Race data invalid",
         ["accessory_skin_material"] = "Body materials on an accessory",
