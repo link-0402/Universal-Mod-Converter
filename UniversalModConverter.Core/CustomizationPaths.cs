@@ -229,7 +229,8 @@ public static partial class CustomizationPaths
         // Hair materials are hard-routed by the game. TexTools resolves the
         // effective Midlander/shared material root and adds the owning race to
         // the filename so clones for different races cannot collide.
-        if (isMaterial && source.Kind == AssetKind.Hair && target.Kind == AssetKind.Hair)
+        var hairMaterial = isMaterial && source.Kind == AssetKind.Hair && target.Kind == AssetKind.Hair;
+        if (hairMaterial)
         {
             var before = rewritten;
             rewritten = RewriteHairMaterialName(rewritten, source, target);
@@ -241,9 +242,13 @@ public static partial class CustomizationPaths
         // Source-owned resource filenames commonly repeat the combined race/model
         // identity (for example mt_c1801z0001_...). Restrict this secondary rewrite
         // to the exact combined identity and only after a matching canonical root.
+        // A hair material's name is already the target's: the game finds its folder from
+        // the material root it starts with, which is the source's own identity when a
+        // Midlander hair keeps its ID (mt_c0101h0111_c1701_...), so it must stay.
         var oldCombined = $"c{source.GenderRace:D4}{sourceDescriptor.Prefix}{source.ModelId:D4}";
         var newCombined = $"c{target.GenderRace:D4}{targetDescriptor.Prefix}{target.ModelId:D4}";
-        rewritten = RewriteIdentity(rewritten, oldCombined, newCombined, source, target);
+        if (!hairMaterial)
+            rewritten = RewriteIdentity(rewritten, oldCombined, newCombined, source, target);
         if (isMaterial)
         {
             rewritten = RewriteSharedRootIdentity(rewritten, source, target);
@@ -348,6 +353,9 @@ public static partial class CustomizationPaths
     /// (/mt_c1401t0003_a.mtrl loads t0103/material/v0001/mt_c1401t0103_a.mtrl).
     /// A model may name its material by a complete game path instead (the same test gear
     /// conversion uses); that path is the material, with no folder added to it.
+    /// A hair loading the shared Midlander root also gets that root's race in the name: the game
+    /// writes it over the four digits after mt_c (/mt_c1701h0111_x.mtrl on Viera male hair 111
+    /// loads c0101/obj/hair/h0111/material/v0001/mt_c0101h0111_x.mtrl), and keeps the rest.
     /// </summary>
     public static string[] MaterialPaths(CustomizationPathEndpoint endpoint, string materialName)
     {
@@ -359,6 +367,9 @@ public static partial class CustomizationPaths
         var name = materialName.TrimStart('/');
         if (Owner(endpoint) is var owner && owner != endpoint)
             name = RewriteIdentity(name, Identity(owner), Identity(endpoint), owner, endpoint);
+        if (root.Kind == AssetKind.Hair && IsSharedMaterialRoot(root) &&
+            name.Length > 8 && name.StartsWith("mt_c", StringComparison.OrdinalIgnoreCase))
+            name = $"{name[..4]}{root.GenderRace:D4}{name[8..]}";
         var variants = MaterialVariants(endpoint);
         return variants.Length == 0
             ? [$"{directory}/{name}"]
@@ -367,6 +378,22 @@ public static partial class CustomizationPaths
 
     [GeneratedRegex(@"(?<pre>/material/v)\d{4}(?=/)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex VariantFolderRegex();
+
+    [GeneratedRegex(@"^j_ex_h(?<id>\d{4})_", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex HairPhysicsBoneRegex();
+
+    /// <summary>
+    /// The hair skeletons a model's physics bones belong to: each hair skeleton names its bones
+    /// after itself (j_ex_h0108_ke_b is a bone of skeleton h0108), so the model only moves right
+    /// on a character whose hair loads that skeleton.
+    /// </summary>
+    public static IReadOnlyList<ushort> HairSkeletons(IEnumerable<string> modelStrings)
+        => modelStrings.Select(s => HairPhysicsBoneRegex().Match(s))
+            .Where(m => m.Success)
+            .Select(m => ushort.Parse(m.Groups["id"].Value))
+            .Distinct()
+            .Order()
+            .ToArray();
 
     /// <summary>
     /// The paths a material the model names by its complete game path resolves to. An Au Ra
