@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using UniversalModConverter.Core;
 
 /// <summary>Material-root rules for hair, face, tail and Viera ear conversion.</summary>
@@ -21,7 +22,79 @@ internal static class CustomizationRuleTests
         ("Au Ra tail to other race leaves the Xaela root behind", AuRaToOtherTail),
         ("Other race tail to Au Ra tail gives Xaela a material root", OtherToAuRaTail),
         ("Detection counts the Xaela root as part of its tail", AuRaXaelaDetection),
+        ("A face's neck morphs move with its neck", NeckMorphsDeform),
+        ("A face's neck is fitted to the target race's seam", NeckFitsTargetSeam),
+        ("A neck that cannot be fitted says why and is only deformed", NeckNotFitted),
+        ("A garbled neck table is left alone and the race's seam found near the vertices", GarbledNeckMorphs),
     ];
+
+    private static RacialDeformationPlan Translate(float x, float y, float z) => new(
+        [new RacialDeformationStep(201, false, new Dictionary<string, System.Numerics.Matrix4x4>
+            { ["j_kubi"] = System.Numerics.Matrix4x4.CreateTranslation(x, y, z) }.ToImmutableDictionary())], []);
+
+    private static NeckSeamPoint SeamPoint(float x, float y, float z, System.Numerics.Vector3 normal)
+        => new(new(x, y, z), normal);
+
+    private static void Near(System.Numerics.Vector3 expected, System.Numerics.Vector3 actual)
+        => Assert.True(System.Numerics.Vector3.Distance(expected, actual) < 1e-4f, $"expected {expected}, got {actual}");
+
+    private static System.Numerics.Vector3 ReadVector(byte[] bytes, int offset)
+        => new(BitConverter.ToSingle(bytes, offset), BitConverter.ToSingle(bytes, offset + 4), BitConverter.ToSingle(bytes, offset + 8));
+
+    private static void NeckMorphsDeform()
+    {
+        var model = MdlFile.Read(TestAssets.CreateMdl(boneName: "j_kubi", neckMorph: true));
+        MdlRaceConverter.Convert(model, Translate(2, 3, 4));
+        var parsed = MdlFile.Read(model.Write());
+        Near(new(3, 5, 7), parsed.NeckMorphs.Single().Position);
+        Assert.Equal(0xFFu, parsed.NeckMorphs.Single().Unknown);
+    }
+
+    private static void NeckFitsTargetSeam()
+    {
+        var model = MdlFile.Read(TestAssets.CreateMdl(boneName: "j_kubi", neckMorph: true));
+        var normal = System.Numerics.Vector3.Normalize(new(0, 0.6f, 0.8f));
+        // The deformation puts the seam at (3, 5, 7); the target race's bodies meet it 1 cm higher.
+        var target = SeamPoint(3, 5.01f, 7, normal);
+        var report = MdlRaceConverter.Convert(model, Translate(2, 3, 4),
+            new NeckFit([SeamPoint(1, 2, 3, System.Numerics.Vector3.UnitZ)], [target]));
+        Assert.Equal(null, report.NeckProblem);
+        Assert.True(MathF.Abs(report.NeckMoved - 0.01f) < 1e-4f, $"moved {report.NeckMoved}");
+        var output = model.Write();
+        var parsed = MdlFile.Read(output);
+        Near(target.Position, ReadVector(output, parsed.DataOffset));
+        Near(normal, ReadVector(output, parsed.DataOffset + 20));
+        Near(target.Position, parsed.NeckMorphs.Single().Position);
+        Near(normal, parsed.NeckMorphs.Single().Normal);
+        Near(target.Position, new System.Numerics.Vector3(parsed.BoundingBox.Maximum.X, parsed.BoundingBox.Maximum.Y, parsed.BoundingBox.Maximum.Z));
+    }
+
+    private static void GarbledNeckMorphs()
+    {
+        // The model's own neck table lists a seam nowhere near its vertices; its race's seam lists
+        // the vertex 2 mm from where a sculptor left it.
+        var model = MdlFile.Read(TestAssets.CreateMdl(boneName: "j_kubi", neckMorph: true, garbledNeckMorph: true));
+        var normal = System.Numerics.Vector3.Normalize(new(0, 0.6f, 0.8f));
+        var target = SeamPoint(3, 5.01f, 7, normal);
+        var report = MdlRaceConverter.Convert(model, Translate(2, 3, 4),
+            new NeckFit([SeamPoint(1.002f, 2, 3, System.Numerics.Vector3.UnitZ)], [target]));
+        Assert.Equal(null, report.NeckProblem);
+        var output = model.Write();
+        var parsed = MdlFile.Read(output);
+        Near(target.Position, ReadVector(output, parsed.DataOffset));
+        Near(new(9, 9, 9), parsed.NeckMorphs.Single().Position);
+    }
+
+    private static void NeckNotFitted()
+    {
+        var model = MdlFile.Read(TestAssets.CreateMdl(boneName: "j_kubi", neckMorph: true));
+        var report = MdlRaceConverter.Convert(model, Translate(2, 3, 4), new NeckFit([],
+            [SeamPoint(3, 5, 7, System.Numerics.Vector3.UnitZ), SeamPoint(4, 5, 7, System.Numerics.Vector3.UnitX)]));
+        Assert.True(report.NeckProblem?.Contains("1 vertices and the target race's 2") == true, report.NeckProblem ?? "no problem");
+        var output = model.Write();
+        Near(new(3, 5, 7), ReadVector(output, MdlFile.Read(output).DataOffset));
+        Near(new(3, 5, 7), MdlFile.Read(output).NeckMorphs.Single().Position);
+    }
 
     private static CustomizationPathEndpoint Hair(ushort race, ushort id) => new(AssetKind.Hair, race, id);
     private static CustomizationPathEndpoint Tail(ushort race, ushort id) => new(AssetKind.Tail, race, id);

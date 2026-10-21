@@ -110,7 +110,7 @@ public sealed class MdlFile
     public ImmutableArray<MdlShapeMesh> ShapeMeshes { get; private set; }
     public ImmutableArray<MdlShapeValue> ShapeValues { get; private set; }
     public ImmutableArray<ushort> SubmeshBoneMap { get; }
-    public ImmutableArray<MdlNeckMorph> NeckMorphs { get; }
+    public ImmutableArray<MdlNeckMorph> NeckMorphs { get; private set; }
     public ImmutableArray<MdlFaceData> FaceData { get; private set; }
     public MdlBoundingBox BoundingBox { get; private set; }
     public MdlBoundingBox ModelBoundingBox { get; private set; }
@@ -756,6 +756,23 @@ public sealed class MdlFile
             builder.Add(FaceData[i] with { Position = positions[i] });
         }
         FaceData = builder.MoveToImmutable();
+    }
+
+    /// <summary>Replaces the neck morphs in place; there must be as many as the model has.</summary>
+    internal void SetNeckMorphs(IReadOnlyList<MdlNeckMorph> morphs)
+    {
+        if (morphs.Count != NeckMorphs.Length)
+            throw new InvalidDataException("MDL neck-morph count does not match.");
+        // They are stored, 32 bytes each, right before the face data.
+        var start = FaceDataOffset - morphs.Count * 32;
+        for (var i = 0; i < morphs.Count; i++)
+        {
+            WriteVector3(start + i * 32, morphs[i].Position);
+            BinaryPrimitives.WriteUInt32LittleEndian(_bytes.AsSpan(start + i * 32 + 12, 4), morphs[i].Unknown);
+            WriteVector3(start + i * 32 + 16, morphs[i].Normal);
+            morphs[i].BoneIndices.AsSpan().CopyTo(_bytes.AsSpan(start + i * 32 + 28, 4));
+        }
+        NeckMorphs = morphs.ToImmutableArray();
     }
 
     internal void SetBounds(MdlBoundingBox modelBounds, IReadOnlyList<MdlBoundingBox> boneBounds)

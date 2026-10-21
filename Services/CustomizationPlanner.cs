@@ -1202,6 +1202,11 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                 task.Diagnostics.Add(new PlanDiagnostic("skeleton_warning", warning, false));
         }
 
+        // A face's neck has to meet the target race's bodies, which the deformation alone can miss.
+        var neck = route != null && source.Kind == AssetKind.Face && (task.TargetCustomizationKind ?? task.Kind) == AssetKind.Face
+            ? new NeckFit(RaceNeckSeam(sourceRace), RaceNeckSeam(targetRace))
+            : null;
+
         foreach (var filePath in task.AllAssetFiles
                      .Where(path => string.Equals(Path.GetExtension(path), ".mdl", StringComparison.OrdinalIgnoreCase))
                      .Distinct(StringComparer.OrdinalIgnoreCase))
@@ -1229,9 +1234,13 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                     ?? new Dictionary<string, string>(StringComparer.Ordinal);
                 if (replacements.Count > 0) model.ReplacePaths(replacements);
                 var deformationPlan = route.Materialize(model.Bones, hierarchy.StepSkeletons, hierarchy.SourceSkeleton);
-                var report = MdlRaceConverter.Convert(model, deformationPlan);
+                var report = MdlRaceConverter.Convert(model, deformationPlan, neck);
                 var output = model.Write();
                 _ = MdlFile.Read(output);
+                if (report.NeckProblem != null)
+                    task.Diagnostics.Add(new PlanDiagnostic("neck_not_fitted",
+                        $"{Path.GetFileName(filePath)}: the neck is not fitted to {RaceNames.Describe(targetRace)} bodies " +
+                        $"because {report.NeckProblem}; it may not meet the body.", false));
 
                 var planned = new PlannedMdlChange
                 {
@@ -1245,6 +1254,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                     VertexCount = report.VertexCount,
                     ShapeVertexCount = report.ShapeVertexCount,
                     DeformationPlan = deformationPlan,
+                    Neck = neck,
                 };
                 planned.BoneResolutions.AddRange(report.BoneResolutions);
                 if (binary != null)
@@ -1278,6 +1288,23 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         if (task.PlannedMdlChanges.Count > 0)
             log.Information("[UMC] Planned racial deformation for {0} model(s).", task.PlannedMdlChanges.Count);
+    }
+
+    /// <summary>
+    /// The neck seam of the race's own faces, which all share one, read from the first face the
+    /// game has for it; empty when it has none or it cannot be read.
+    /// </summary>
+    private ImmutableArray<NeckSeamPoint> RaceNeckSeam(ushort race)
+    {
+        if (gameData == null) return [];
+        foreach (var id in Enumerable.Range(1, 10).Concat(Enumerable.Range(101, 10)))
+        {
+            var bytes = gameData.GetRawFileBytes($"chara/human/c{race:D4}/obj/face/f{id:D4}/model/c{race:D4}f{id:D4}_fac.mdl");
+            if (bytes == null) continue;
+            try { return MdlRaceConverter.NeckSeam(MdlFile.Read(bytes)); }
+            catch (Exception ex) when (ex is InvalidDataException or UnsupportedMdlVersionException) { return []; }
+        }
+        return [];
     }
 
     /// <summary>
