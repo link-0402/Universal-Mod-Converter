@@ -62,6 +62,9 @@ public sealed class DetectedItem
 
     /// <summary>What kinds of files the mod replaces for this root; none for animations.</summary>
     public AssetContents Contents { get; init; }
+
+    /// <summary>Gear only: the races the mod ships a model of its own for, in race-code order.</summary>
+    public IReadOnlyList<ushort> ModelRaces { get; init; } = [];
 }
 
 /// <summary>A face, hair, tail or ear ID a player can choose.</summary>
@@ -126,6 +129,9 @@ public sealed class GameDataService : IGameFileProvider
     private static readonly Regex TokenRx = new(
         @"(?<![a-zA-Z])([ea])(\d{4})_(met|top|glv|dwn|sho|ear|nek|wrs|rir|ril)(?![a-zA-Z0-9])",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex ModelRaceRx = new(
+        @"/model/c(\d{4})[ea]\d{4}_[a-z]{3}\.mdl$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public GameDataService(IDataManager data, IPluginLog log)
     {
@@ -245,7 +251,9 @@ public sealed class GameDataService : IGameFileProvider
         void Add(AssetKind kind, ushort code, ushort id, string clan)
         {
             var descriptor = CustomizationKinds.Get(kind);
-            if (id == 0 || !descriptor.SupportsRace(code) || !((IGameFileProvider)this).FileExists(descriptor.ModelPath(code, id)))
+            // A second clan's face or tail with a material root of its own loads the first clan's model.
+            var model = CustomizationPaths.Owner(new CustomizationPathEndpoint(kind, code, id)).ModelId;
+            if (id == 0 || !descriptor.SupportsRace(code) || !((IGameFileProvider)this).FileExists(descriptor.ModelPath(code, model)))
                 return;
             if (!ids.TryGetValue((kind, code), out var byId)) ids[(kind, code)] = byId = new();
             if (!byId.TryGetValue(id, out var owners)) byId[id] = owners = new(StringComparer.Ordinal);
@@ -260,26 +268,31 @@ public sealed class GameDataService : IGameFileProvider
                 var clan = ClanName(row.Tribe.RowId, row.Gender);
                 if (!clans.TryGetValue(code, out var known)) clans[code] = known = new(StringComparer.Ordinal);
                 known.Add(clan);
+                var secondClan = row.Tribe.RowId % 2 == 0;
 
                 foreach (var menu in row.CharaMakeStruct)
                 {
                     var values = menu.SubMenuGraphic.Take(menu.SubMenuNum).Where(v => v != 0).Select(v => (ushort)v);
                     if (menu.Customize == CustomizeFace && menu.SubMenuType == 1)
                     {
-                        // The second clan of a race uses faces 101+ unless both clans share one set.
-                        var secondClan = row.Tribe.RowId % 2 == 0;
+                        // The second clan of a race uses faces 101+ (a model of their own, or materials of
+                        // their own for the first clan's model) unless both clans share one set.
                         foreach (var value in values)
                         {
                             var shifted = (ushort)(value + 100);
-                            var own = secondClan && ((IGameFileProvider)this).FileExists(
-                                CustomizationKinds.Get(AssetKind.Face).ModelPath(code, shifted));
+                            var own = secondClan && (((IGameFileProvider)this).FileExists(
+                                CustomizationKinds.Get(AssetKind.Face).ModelPath(code, shifted)) ||
+                                CustomizationPaths.ClanMaterialEndpoint(new CustomizationPathEndpoint(AssetKind.Face, code, value)) != null);
                             Add(AssetKind.Face, code, own ? shifted : value, clan);
                         }
                     }
                     else if (menu.Customize == CustomizeTail && menu.SubMenuType == 1)
                     {
                         var kind = CustomizationKinds.Get(AssetKind.VieraEar).SupportsRace(code) ? AssetKind.VieraEar : AssetKind.Tail;
-                        foreach (var value in values) Add(kind, code, value, clan);
+                        // Xaela tails are the Raen ones' models with materials of their own, 101+.
+                        foreach (var value in values)
+                            Add(kind, code, secondClan && CustomizationPaths.ClanMaterialEndpoint(
+                                new CustomizationPathEndpoint(kind, code, value)) is { } xaela ? xaela.ModelId : value, clan);
                     }
                 }
             }
@@ -550,6 +563,11 @@ public sealed class GameDataService : IGameFileProvider
                      .ThenBy(k => k.Key.Item2))
         {
             if (!ushort.TryParse(id, out var modelId)) continue;
+            var modelRaces = gearKeys.GetValueOrDefault((slot, id))?
+                .Select(key => ModelRaceRx.Match(key))
+                .Where(m => m.Success && ushort.TryParse(m.Groups[1].Value, out var race) && GenderRaces.Playable.Contains(race))
+                .Select(m => ushort.Parse(m.Groups[1].Value))
+                .Distinct().Order().ToArray() ?? [];
 
             var logicalSlots = slot == EquipSlot.Head
                 ? new[] { EquipSlot.Head, EquipSlot.Facewear }
@@ -567,6 +585,7 @@ public sealed class GameDataService : IGameFileProvider
                         ModelIdPadded = id,
                         IsAccessory   = isAcc,
                         Contents      = contents.GetValueOrDefault((slot, id)),
+                        ModelRaces    = modelRaces,
                         // Equipment model 0 is what a slot shows with nothing equipped; no item uses it.
                         ItemName      = modelId == 0 && !isAcc ? "Smallclothes" : $"Unknown (ID {modelId})",
                     });
@@ -587,6 +606,7 @@ public sealed class GameDataService : IGameFileProvider
                         IsFacewear    = match.IsFacewear,
                         IsAmbiguous   = ambiguous,
                         Contents      = contents.GetValueOrDefault((slot, id)),
+                        ModelRaces    = modelRaces,
                         Icon          = match.Icon,
                         ItemName      = ambiguous ? $"{match.Name} (+{variantGroup.Count() - 1} shared items)" : match.Name,
                     });

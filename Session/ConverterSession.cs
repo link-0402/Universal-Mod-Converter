@@ -173,6 +173,64 @@ public sealed partial class ConverterSession
         }
     }
 
+    /// <summary>
+    /// Gear only: the source item's model goes to another race (<see cref="GearTargetRace"/>)
+    /// instead of to another item. It is a conversion of its own, never combined with a
+    /// conversion to another item.
+    /// </summary>
+    public bool GearRaceMode { get; private set; }
+
+    /// <summary>The race whose model of the item a gear race conversion takes.</summary>
+    public ushort GearSourceRace { get; private set; }
+
+    /// <summary>The race a gear race conversion gives the model to.</summary>
+    public ushort GearTargetRace { get; private set; }
+
+    /// <summary>Whether the source is head gear, facewear or an accessory the mod ships a model for.</summary>
+    public bool CanConvertGearRace
+        => Source is { IsCustomization: false, Animation: null, ModelRaces.Count: > 0 } source &&
+           GearRaceConversion.Supports(SlotInfo.ToGearSlot(source.Slot));
+
+    /// <summary>Whether the current selection is a gear race conversion.</summary>
+    public bool IsGearRaceConversion => GearRaceMode && CanConvertGearRace;
+
+    public IReadOnlyList<ushort> GearSourceRaces => Source?.ModelRaces ?? [];
+
+    public IReadOnlyList<ushort> GearTargetRaces => GearRaceConversion.Targets(GearSourceRace);
+
+    public void SetGearRaceMode(bool on)
+    {
+        if (on == GearRaceMode || on && !CanConvertGearRace) return;
+        GearRaceMode = on;
+        MarkDirty();
+    }
+
+    public void SetGearSourceRace(ushort race)
+    {
+        if (race == GearSourceRace || !GearSourceRaces.Contains(race)) return;
+        GearSourceRace = race;
+        if (!GearTargetRaces.Contains(GearTargetRace)) GearTargetRace = DefaultGearTargetRace();
+        MarkDirty();
+    }
+
+    public void SetGearTargetRace(ushort race)
+    {
+        if (race == GearTargetRace || !GearTargetRaces.Contains(race)) return;
+        GearTargetRace = race;
+        MarkDirty();
+    }
+
+    /// <summary>The first race the source race's model may go to that the mod has no model of its own for.</summary>
+    private ushort DefaultGearTargetRace()
+        => GearTargetRaces.FirstOrDefault(r => !GearSourceRaces.Contains(r), GearTargetRaces.FirstOrDefault());
+
+    /// <summary>Picks the races of a newly selected gear source, keeping the target race where it still fits.</summary>
+    private void ResetGearRaces(DetectedItem source)
+    {
+        GearSourceRace = source.ModelRaces.Contains(GearSourceRace) ? GearSourceRace : source.ModelRaces.FirstOrDefault();
+        if (!GearTargetRaces.Contains(GearTargetRace)) GearTargetRace = DefaultGearTargetRace();
+    }
+
     public AssetKind TargetCustomizationKind { get; private set; } = AssetKind.Hair;
     public ushort TargetRace { get; private set; } = 101;
     public int TargetCustomizationId { get; private set; } = 1;
@@ -441,6 +499,15 @@ public sealed partial class ConverterSession
             if (ModError != null) return ModError;
             if (Source is not { } source) return DetectedItems.Count == 0 ? "No convertible item was found in this mod." : "Select a source item.";
             if (source.Animation is { } animation) return AnimationBlockReason(animation);
+            if (IsGearRaceConversion)
+            {
+                var item = new GearItem(SlotInfo.ToGearSlot(source.Slot), 0, 0);
+                if (GearRaceConversion.BlockReason(item, item, new GearRaceChange(GearSourceRace, GearTargetRace)) is { } invalid)
+                    return invalid;
+                return GearSourceRaces.Contains(GearTargetRace)
+                    ? $"The mod already has a {RaceLabel(GearTargetRace)} model of its own for this item. Choose another race."
+                    : null;
+            }
             if (!source.IsCustomization) return TargetItem == null ? "Select a target item." : null;
             if (source.CanFanOut) return _textureTargets.Count == 0 ? "Tick at least one race or ID to add the paths for." : null;
             if (TargetCustomizationId is < 1 or > 9999) return "Customization IDs must be between 1 and 9999.";
@@ -565,7 +632,10 @@ public sealed partial class ConverterSession
             _fixTargetId = true;
         }
         else
+        {
+            ResetGearRaces(source);
             ReloadCandidates();
+        }
         MarkDirty();
     }
 
@@ -878,6 +948,23 @@ public sealed partial class ConverterSession
                     EffectiveOutputMode, TextureLayout, RetargetMaterials, Describe(source)),
             };
 
+        // A race conversion keeps the item; its races are what change.
+        if (IsGearRaceConversion)
+            return new ConversionTask
+            {
+                Kind             = source.Kind,
+                ModDirectory     = ModDirectory,
+                OutputMode       = OutputMode,
+                Slot             = source.Slot,
+                OldIdPadded      = source.ModelIdPadded,
+                NewIdPadded      = source.ModelIdPadded,
+                TargetVariant    = source.Variant,
+                SourceVariant    = source.Variant,
+                SourceGenderRace = GearSourceRace,
+                TargetGenderRace = GearTargetRace,
+                ConvertedOption  = ConvertedOptionFor(source),
+            };
+
         return new ConversionTask
         {
             Kind                    = source.Kind,
@@ -903,6 +990,9 @@ public sealed partial class ConverterSession
     /// </summary>
     private ConvertedOptionRequest ConvertedOptionFor(DetectedItem source)
     {
+        if (IsGearRaceConversion)
+            return new ConvertedOptionRequest(RaceLabel(GearTargetRace),
+                $"{RaceLabel(GearSourceRace)} {source.ItemName} ({source.ModelIdDisplay}), converted to {RaceLabel(GearTargetRace)}.");
         if (!source.IsCustomization)
             return TargetItem is { } item
                 ? new ConvertedOptionRequest(item.Name.Length > 0 ? item.Name : item.ModelIdDisplay,
@@ -1179,6 +1269,8 @@ public sealed partial class ConverterSession
             return source.CanFanOut
                 ? $"{RaceLabel(source.GenderRace ?? 0)} {source.ItemName} → also {DescribeTextureTargets()}"
                 : $"{RaceLabel(source.GenderRace ?? 0)} {source.ItemName} → {RaceLabel(TargetRace)} {TargetOptionLabel}";
+        if (IsGearRaceConversion)
+            return $"{RaceLabel(GearSourceRace)} {source.ItemName} ({source.ModelIdDisplay}) → {RaceLabel(GearTargetRace)}";
         var target = TargetItem == null ? "?" : $"{TargetItem.Name} ({TargetItem.ModelIdDisplay})";
         return $"{source.ItemName} ({source.ModelIdDisplay}) → {target}" +
                (TargetSlot != source.Slot ? $" [{SlotInfo.DisplayLabelMap[source.Slot]} → {SlotInfo.DisplayLabelMap[TargetSlot]}]" : string.Empty);

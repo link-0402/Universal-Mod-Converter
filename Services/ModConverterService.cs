@@ -355,10 +355,13 @@ public sealed class ModConverterService
     /// <summary>
     /// What a queued gear conversion claims: the item it reads and the one it writes. A root
     /// such as e0728 holds every slot of a set, so the slot is part of the claim; body and
-    /// hands of the same set are different items and may be converted together.
+    /// hands of the same set are different items and may be converted together. A race
+    /// conversion claims the race it writes, so one model can go to several races in one run.
     /// </summary>
     private static IEnumerable<string> GearRoots(GearConversionRequest request)
-        => [$"{request.Source.Root} ({request.Source.Slot})", $"{request.Target.Root} ({request.Target.Slot})"];
+        => request.Race is { } race
+            ? [$"{request.Target.Root} ({request.Target.Slot}) for {RaceNames.Name(race.Target)}"]
+            : [$"{request.Source.Root} ({request.Source.Slot})", $"{request.Target.Root} ({request.Target.Slot})"];
 
     /// <summary>What a gear conversion to another slot does and does not change, or null when it keeps its slot.</summary>
     private static PlanDiagnostic? CrossSlotDiagnostic(GearConversionRequest request)
@@ -471,7 +474,12 @@ public sealed class ModConverterService
         var source = new GearItem(SlotInfo.ToGearSlot(task.Slot), sourceId, (ushort)Math.Max(0, task.SourceVariant));
         var target = new GearItem(SlotInfo.ToGearSlot(task.TargetSlot ?? task.Slot), targetId,
             (ushort)Math.Max(0, task.TargetVariant));
-        return new GearConversionRequest(source, target, task.PlanMode) { ConvertedOption = task.OwnOption };
+        return new GearConversionRequest(source, target, task.PlanMode)
+        {
+            ConvertedOption = task.OwnOption,
+            // Gear names its races only when it converts to another race.
+            Race = task.SourceGenderRace is { } from && task.TargetGenderRace is { } to ? new GearRaceChange(from, to) : null,
+        };
     }
 
     /// <param name="newMod">
@@ -1055,9 +1063,11 @@ public sealed class ModConverterService
         return plan switch
         {
             // Retained source paths are expected when editing the mod (shared resources, and the
-            // whole point of adding to it) but not in a new mod.
+            // whole point of adding to it) but not in a new mod. A race conversion keeps the item,
+            // whose paths are the target's too; what it must have made is the target race's model.
             GearConversionPlan gear => GearConversionVerifier.Verify(modDirectory, gear.Request.Target,
-                    gear.Mode.IsNewMod() ? gear.Request.Source : (GearItem?)null, _gameFiles)
+                    gear.Mode.IsNewMod() && gear.Request.Race == null ? gear.Request.Source : (GearItem?)null, _gameFiles,
+                    gear.Request.Race?.Target)
                 .Select(issue => Hit(issue.IsError ? "missing" : "leftover", issue.Message)),
             AnimationConversionPlan animation => AnimationConversionVerifier.Verify(modDirectory, animation)
                 .Select(issue => Hit(issue.IsError ? "missing" : "note", issue.Message)),
@@ -1068,18 +1078,18 @@ public sealed class ModConverterService
     }
 
     /// <summary>
-    /// The roots a customization conversion moves away (an Au Ra tail's Xaela material root too,
-    /// when the target has one), or none when the task does not name its source.
+    /// Whether a customization conversion moves the paths a value names away (see
+    /// <see cref="CustomizationPaths.Moves"/>), or null when the task does not name its source
+    /// and target.
     /// </summary>
-    private static IReadOnlyList<CustomizationPathEndpoint> MovedCustomizationRoots(ConversionTask task)
+    private static Func<string, bool>? MovedCustomizationPaths(ConversionTask task)
     {
-        if (task.SourceGenderRace is not { } race ||
-            !ushort.TryParse(task.OldIdPadded, out var modelId)) return [];
+        if (task.SourceGenderRace is not { } race || !ushort.TryParse(task.OldIdPadded, out var modelId) ||
+            task.TargetGenderRace is not { } targetRace || !ushort.TryParse(task.NewIdPadded, out var targetId))
+            return null;
         var source = new CustomizationPathEndpoint(task.Kind, race, modelId);
-        if (task.TargetGenderRace is not { } targetRace || !ushort.TryParse(task.NewIdPadded, out var targetId))
-            return [source];
-        return CustomizationPaths.MovedRoots(source,
-            new CustomizationPathEndpoint(task.TargetCustomizationKind ?? task.Kind, targetRace, targetId));
+        var target = new CustomizationPathEndpoint(task.TargetCustomizationKind ?? task.Kind, targetRace, targetId);
+        return value => CustomizationPaths.Moves(value, source, target);
     }
 
     /// <summary>The converted customization's own target, as its task names it.</summary>
@@ -1109,8 +1119,7 @@ public sealed class ModConverterService
     private static List<LeftoverHit> VerifyCustomizationConversion(
         ConversionTask task, List<LeftoverHit> hits)
     {
-        var moved = MovedCustomizationRoots(task);
-        if (moved.Count == 0) return hits;
+        if (MovedCustomizationPaths(task) is not { } moved) return hits;
         var flagged = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var entry in Directory.EnumerateFileSystemEntries(task.ModDirectory, "*", SearchOption.AllDirectories))
@@ -1154,7 +1163,7 @@ public sealed class ModConverterService
 
         return hits;
 
-        bool Moved(string value) => moved.Any(root => CustomizationPaths.Contains(value, root));
+        bool Moved(string value) => moved(value);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1163,13 +1172,13 @@ public sealed class ModConverterService
 
     private void PruneEmptyCustomizationDirs(ConversionTask task, Action<string> log)
     {
-        var moved = MovedCustomizationRoots(task);
+        var moved = MovedCustomizationPaths(task) ?? (_ => false);
         var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var rename in task.PlannedRenames.Where(r => !r.KeepsOriginal))
         {
             var directory = Path.GetDirectoryName(rename.OldPath);
-            while (directory != null && moved.Any(root => CustomizationPaths.Contains(directory, root)))
+            while (directory != null && moved(directory))
             {
                 candidates.Add(directory);
                 directory = Path.GetDirectoryName(directory);

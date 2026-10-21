@@ -58,6 +58,7 @@ var tests = new (string Name, Action Run)[]
     ("MDL mesh groups are described", TestMeshGroupsDescribe),
     ("MDL mesh removal renumbers metadata and keeps data", TestMeshRemoval),
     ("MDL mesh removal drops the removed mesh's shape", TestMeshRemovalDropsShape),
+    ("MDL mesh removal drops strings nothing references", TestMeshRemovalDropsOrphanedStrings),
     ("MDL mesh removal guards", TestMeshRemovalGuards),
     ("Customization descriptors restrict races", TestCustomizationDescriptors),
     ("Customization targets exclude Lalafell and cross-gender faces", TestCustomizationTargets),
@@ -781,6 +782,30 @@ static void TestMeshRemovalDropsShape()
     Equal("shp_test", parsed.Shapes.Single().Name);
     Equal((ushort)0, parsed.Shapes[0].MeshCounts[0]);
     Equal(0, parsed.ShapeMeshes.Length);
+}
+
+static void TestMeshRemovalDropsOrphanedStrings()
+{
+    // Mesh 1 is the only user of the skin material, so its slot goes and its name must go too.
+    var bytes = TestAssets.CreateMultiMeshMdl(ThreeMaterials(), shapeMesh: 2);
+    var original = MdlFile.Read(bytes);
+    var output = MdlMeshGroups.Remove(bytes, new MeshRemoval([1], 3));
+    var parsed = MdlFile.Read(output);
+
+    string[] referenced = ["j_root", "/mt_c0201e0100_top_a.mtrl", "/mt_c0201e0100_top_b.mtrl", "atr_test", "shp_test"];
+    var strings = ResourceReferences.ReadMdlStrings(output);
+    Equal(referenced.Length, strings.Count);
+    True(strings.ToHashSet().SetEquals(referenced));
+    True(parsed.Strings.SequenceEqual(strings));
+
+    // Every offset table still names what it named before.
+    True(parsed.Attributes.SequenceEqual(original.Attributes));
+    True(parsed.Bones.SequenceEqual(original.Bones));
+    True(parsed.Shapes.Select(s => s.Name).SequenceEqual(original.Shapes.Select(s => s.Name)));
+    True(parsed.Materials.SequenceEqual(["/mt_c0201e0100_top_a.mtrl", "/mt_c0201e0100_top_b.mtrl"]));
+    True(ResourceReferences.ReadMdlMaterials(output).SequenceEqual(parsed.Materials));
+    Equal("/mt_c0201e0100_top_b.mtrl", parsed.Materials[parsed.Meshes[1].MaterialIndex]);
+    Equal("atr_test", MdlMeshGroups.Describe(output)[0].Attributes.Single());
 }
 
 static void TestMeshRemovalGuards()

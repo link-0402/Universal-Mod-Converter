@@ -11,6 +11,53 @@ public sealed record GearConversionRequest(GearItem Source, GearItem Target, Con
     /// source's (see <see cref="Core.ConvertedOption"/>), or null to add them beside.
     /// </summary>
     public ConvertedOptionRequest? ConvertedOption { get; init; }
+
+    /// <summary>
+    /// A race conversion: the item stays the same (<see cref="Target"/> is <see cref="Source"/>),
+    /// and the model the mod ships for one race becomes another race's, reshaped for it. Null for
+    /// a conversion to another item.
+    /// </summary>
+    public GearRaceChange? Race { get; init; }
+}
+
+/// <summary>The races a gear race conversion moves the item's model between.</summary>
+public readonly record struct GearRaceChange(ushort Source, ushort Target);
+
+/// <summary>Which gear can be converted to another race, and to which races.</summary>
+public static class GearRaceConversion
+{
+    /// <summary>
+    /// Head gear, facewear and accessories. The other slots are shaped to the body, whose skin
+    /// and body parts a reshaped model cannot bring along.
+    /// </summary>
+    public static bool Supports(GearSlot slot) => !slot.IsBodyShaped();
+
+    /// <summary>Races the model of <paramref name="source"/> may become: any other, Lalafell only among Lalafell.</summary>
+    public static IReadOnlyList<ushort> Targets(ushort source)
+        => GenderRaces.Playable.Where(r => r != source && CustomizationTargets.IsLalafell(r) == CustomizationTargets.IsLalafell(source))
+            .ToArray();
+
+    /// <summary>Why the request cannot convert between its races, or null.</summary>
+    public static string? BlockReason(GearItem source, GearItem target, GearRaceChange race)
+    {
+        if (!Supports(source.Slot))
+            return $"Only head gear, facewear and accessories can be converted to another race, not {source.Slot.Label()} gear.";
+        if (source.Slot != target.Slot || source.SetId != target.SetId)
+            return "A race conversion keeps the item. Convert it to another item separately.";
+        if (!GenderRaces.Playable.Contains(race.Source) || !GenderRaces.Playable.Contains(race.Target))
+            return "Both races must be playable races.";
+        if (race.Source == race.Target) return "Source and target are the same race.";
+        if (!Targets(race.Source).Contains(race.Target))
+            return "Lalafell can only be converted to and from other Lalafell.";
+        return null;
+    }
+
+    /// <summary>The race code in a model's file name, as in <c>c0101e6001_met.mdl</c>, replaced.</summary>
+    public static string RenameModel(string fileName, GearItem item, GearRaceChange race)
+    {
+        var token = $"{item.PathEndpoint.Token}_{item.Slot.Suffix()}";
+        return fileName.Replace($"c{race.Source:D4}{token}", $"c{race.Target:D4}{token}", StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 public enum LocalFileOperation
@@ -159,6 +206,19 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         /// <summary>Part tags past <c>_a</c> that a gear model brings to an accessory, which only Penumbra switches.</summary>
         private readonly SortedSet<string> _accessoryTags = new(StringComparer.Ordinal);
 
+        /// <summary>A race conversion's races, or null for a conversion to another item.</summary>
+        private readonly GearRaceChange? _race;
+
+        /// <summary>A race conversion: the route that reshapes the model from the source race to the target race.</summary>
+        private RacialDeformationPlan? _route;
+
+        /// <summary>
+        /// A race conversion of head gear: the game's extra skeleton for the source race, which the
+        /// target race gets an EST entry for beside its model; null when the mod's own entries or
+        /// the game's entry for the target race already say what it loads.
+        /// </summary>
+        private ushort? _raceSkeleton;
+
         public Session(IGameFileProvider game, ModPlanContext context, GearConversionRequest request)
         {
             _game = game;
@@ -170,6 +230,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             _srcEp = _src.PathEndpoint;
             _tgtEp = _tgt.PathEndpoint;
             _srcRoot = _src.Root;
+            _race = request.Race;
             _mod = context.Source;
             _plan = new GearConversionPlan(request, context.Result);
             foreach (var file in context.InputFiles) _plan.InputFiles.Add(file);
@@ -188,7 +249,15 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
 
         public GearConversionPlan Run()
         {
-            if (_src.SetId == _tgt.SetId && _src.Slot == _tgt.Slot && _src.IsAccessory == _tgt.IsAccessory)
+            if (_race is { } race)
+            {
+                if (GearRaceConversion.BlockReason(_src, _tgt, race) is { } reason)
+                {
+                    Block("race_conversion", reason);
+                    return _plan;
+                }
+            }
+            else if (_src.SetId == _tgt.SetId && _src.Slot == _tgt.Slot && _src.IsAccessory == _tgt.IsAccessory)
             {
                 Block("identical_roots", "Source and target are the same item slot.");
                 return _plan;
@@ -204,6 +273,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             // In a run, the result already holds what the earlier conversions made.
             if (KeepsSource && _request.ConvertedOption != null) _before = _plan.Result.Clone();
             IndexContainers();
+            if (_race != null && !PrepareRaceConversion()) return _plan;
             ResolveVariants();
             SeedAndWalk();
 
@@ -375,6 +445,16 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
 
         private void SeedAndWalk()
         {
+            if (_race != null)
+            {
+                // Only the model changes: it is the only path named for its race. Its materials and
+                // textures stay where they are, loaded by both races' models.
+                Enqueue(RaceSourceModel);
+                while (_queue.Count > 0) Visit(_queue.Dequeue());
+                PlanRaceSkeletons();
+                return;
+            }
+
             foreach (var race in GenderRaces.Playable)
             {
                 // Only the models the mod ships are converted. A race it has no model for keeps
@@ -584,7 +664,11 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                     : _optionMaterialIds.Contains(folder) && !_files.ContainsKey(path) && !_swaps.ContainsKey(path);
                 if (needed && !_generated.ContainsKey(path))
                 {
-                    if (Game(path) is { } vanilla) Generate(path, vanilla);
+                    // A race conversion keeps the item, whose game files stay where the model finds them.
+                    if (Game(path) is { } vanilla)
+                    {
+                        if (_race == null) Generate(path, vanilla);
+                    }
                     else if (!_files.ContainsKey(path) && !_swaps.ContainsKey(path))
                         Warn("missing_material",
                             $"{origin} uses '{material}', but {path} exists neither in the mod nor in the game." +
@@ -652,10 +736,12 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                           Path.GetFileName(k).Contains(token, StringComparison.Ordinal)));
         }
 
-        private bool IsOwned(string path) => path.StartsWith(_srcRoot + "/", StringComparison.Ordinal);
+        private bool IsOwned(string path)
+            => _race != null ? path == RaceSourceModel : path.StartsWith(_srcRoot + "/", StringComparison.Ordinal);
 
         private string TargetPath(string path)
         {
+            if (_race != null) return RaceTargetModel;
             var match = MaterialPathRegex().Match(path);
             if (match.Success && path.StartsWith(_srcRoot + "/material/", StringComparison.Ordinal))
                 return $"{_tgt.Root}/material/v{match.Groups["variant"].Value}/" +
@@ -709,7 +795,9 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                     var output = replacements.Count > 0 ? ResourceReferences.Rewrite(path, bytes, replacements) : bytes;
                     foreach (var (from, to) in replacements)
                         _plan.Changes.Add(new GearPlanChange("Reference", origin, from, to));
-                    if (path.EndsWith(".mdl", StringComparison.Ordinal))
+                    if (path.EndsWith(".mdl", StringComparison.Ordinal) && _race != null)
+                        output = Reshape(origin, output);
+                    else if (path.EndsWith(".mdl", StringComparison.Ordinal))
                     {
                         output = RetagParts(origin, output);
                         if (_tgt.IsAccessory) output = ForAccessory(origin, path, output);
@@ -924,7 +1012,8 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             }
 
             AddGeneratedFiles(result.Default, rewritten, locals);
-            RetargetManipulations(result, keepUnrelated: true, keepSource: KeepsSource);
+            if (_race != null) RaceManipulations(result, keepUnrelated: true);
+            else RetargetManipulations(result, keepUnrelated: true, keepSource: KeepsSource);
             InjectDefaults(result);
             RetargetImcGroups(result);
             var moved = MoveIntoConvertedOption(result);
@@ -1001,7 +1090,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             {
                 // Still used unchanged elsewhere: the converted copy gets its own file.
                 destination = locals.Reserve(string.Equals(renamed, relative, StringComparison.OrdinalIgnoreCase)
-                    ? AppendSuffix(relative, "_" + _tgtEp.Token) : renamed, null);
+                    ? AppendSuffix(relative, CopySuffix) : renamed, null);
                 _plan.Files.Add(new PlannedFileOperation(LocalFileOperation.Write, null, destination, content,
                     "converted copy of a shared file"));
             }
@@ -1096,7 +1185,8 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
             }
 
             AddGeneratedFiles(result.Default, rewritten, locals);
-            RetargetManipulations(result, keepUnrelated: false);
+            if (_race != null) RaceManipulations(result, keepUnrelated: false);
+            else RetargetManipulations(result, keepUnrelated: false);
             InjectDefaults(result);
             // IMC groups about other items are dropped once the whole run has planned.
             RetargetImcGroups(result);
@@ -1153,9 +1243,14 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         private string RewriteLocal(string relative)
         {
             var slashed = relative.Replace('\\', '/');
-            var rewritten = GearPaths.RewriteGamePath(slashed, _srcEp, _tgtEp);
+            var rewritten = _race is { } race
+                ? RaceSkeletonPath(GearRaceConversion.RenameModel(slashed, _src, race), race.Source, race.Target)
+                : GearPaths.RewriteGamePath(slashed, _srcEp, _tgtEp);
             return GamePath.ToLocal(rewritten);
         }
+
+        /// <summary>What a converted copy kept beside its original is told apart by.</summary>
+        private string CopySuffix => _race is { } race ? $"_c{race.Target:D4}" : "_" + _tgtEp.Token;
 
         private static string AppendSuffix(string relative, string suffix)
             => Path.Combine(Path.GetDirectoryName(relative) ?? string.Empty,
@@ -1244,6 +1339,12 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         /// </summary>
         private void InjectDefaults(PenumbraMod result)
         {
+            if (_race != null)
+            {
+                InjectRaceDefaults(result);
+                return;
+            }
+
             var defaults = result.Default;
             var existing = (defaults.Manipulations?.OfType<JsonObject>() ?? [])
                 .Select(GearManipulations.Identity).ToHashSet(StringComparer.Ordinal);
@@ -1374,6 +1475,8 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
 
         private void RetargetImcGroups(PenumbraMod result)
         {
+            // Every race of an item shares its IMC entries, and the groups that switch them.
+            if (_race != null) return;
             var added = new List<ModGroup>();
             for (var i = result.Groups.Count - 1; i >= 0; i--)
             {
@@ -1429,6 +1532,296 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         private void PruneGroups(PenumbraMod result)
             => ModGroupPruning.Prune(result, _mod, group => _plan.Changes.Add(
                 new GearPlanChange("Group", group.Name, "option group", "not included (no converted content)")));
+
+        // ── Race conversion ─────────────────────────────────────────────────
+
+        private const string HumanPbdPath = "chara/xls/boneDeformer/human.pbd";
+
+        private string RaceSourceModel => GamePath.Normalize(GearSlots.ModelPath(_src, _race!.Value.Source));
+
+        private string RaceTargetModel => GamePath.Normalize(GearSlots.ModelPath(_src, _race!.Value.Target));
+
+        /// <summary>
+        /// Checks that the mod ships a model of its own for the source race, and finds the route
+        /// in the game's race tree that reshapes it for the target race. False when it blocks.
+        /// </summary>
+        private bool PrepareRaceConversion()
+        {
+            var (from, to) = _race!.Value;
+            if (!_files.ContainsKey(RaceSourceModel))
+            {
+                Block("race_model_missing", _swaps.ContainsKey(RaceSourceModel)
+                    ? $"The mod swaps the {RaceNames.Name(from)} model of {Describe(_src)} to another file, which cannot be " +
+                      "reshaped for another race."
+                    : $"This mod has no {RaceNames.Name(from)} model for {Describe(_src)}, so there is nothing to convert.");
+                return false;
+            }
+
+            if (Game(HumanPbdPath) is not { } pbd)
+            {
+                Block("pbd_missing", "human.pbd could not be read, so the model cannot be reshaped for another race.");
+                return false;
+            }
+            try { _route = RacialDeformationPlan.Create(new HumanPbd(pbd), from, to); }
+            catch (InvalidDataException ex)
+            {
+                Block("pbd_invalid", $"human.pbd cannot be used ({ex.Message}), so the model cannot be reshaped for {RaceNames.Name(to)}.");
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Reshapes a model of the source race for the target race the way the game's race tree
+        /// (human.pbd) deforms one into the other, as a hair or face conversion does. Bones the tree
+        /// does not list, such as an extra skeleton's, follow the bone they hang from.
+        /// </summary>
+        private byte[] Reshape(string origin, byte[] data)
+        {
+            var (from, to) = _race!.Value;
+            try
+            {
+                var model = MdlFile.Read(data);
+                var report = MdlRaceConverter.Convert(model, _route!.Materialize(model.Bones));
+                var output = model.Write();
+                _ = MdlFile.Read(output);
+                _plan.Changes.Add(new GearPlanChange("Model", origin, RaceNames.Name(from),
+                    $"reshaped for {RaceNames.Name(to)} ({report.VertexCount} vertices)"));
+                var unresolved = report.BoneResolutions.Where(r => r.Strategy == BoneResolutionStrategy.Identity)
+                    .Select(r => r.Bone).Distinct().Order(StringComparer.Ordinal).ToList();
+                if (unresolved.Count > 0)
+                    Warn("race_bones_unresolved",
+                        $"{origin}: {string.Join(", ", unresolved)} {(unresolved.Count == 1 ? "is" : "are")} in neither the game's race " +
+                        $"tree nor below a bone that is, so the parts weighted to {(unresolved.Count == 1 ? "it" : "them")} keep their " +
+                        $"{RaceNames.Name(from)} shape.");
+                return output;
+            }
+            catch (UnsupportedMdlVersionException ex)
+            {
+                Block("unsupported_mdl_version",
+                    $"{origin}: {ex.Message} Re-export the model with a current tool to convert it to another race.");
+            }
+            catch (MdlConversionException ex)
+            {
+                Block(ex.Code, $"{origin}: {ex.Message}");
+            }
+            catch (InvalidDataException ex)
+            {
+                Block("malformed_mdl", $"{origin} cannot be reshaped: {ex.Message}");
+            }
+            return data;
+        }
+
+        /// <summary>
+        /// Head gear with physics loads the extra skeleton its EST entry names, from a folder of each
+        /// race's own, and a model weighted to that skeleton's bones does not show on a race without
+        /// it. The target race loads what the source race does: what the mod's entries say, else the
+        /// game's skeleton for the item (the target's own when the game gives it one). A skeleton
+        /// the target race has none of is copied to its folder from the source race's, the mod's
+        /// files first, then the game's.
+        /// </summary>
+        private void PlanRaceSkeletons()
+        {
+            if (_src.Slot.EstFile() is not { } estFile) return;
+            var (from, to) = _race!.Value;
+            ushort gameSource = 0, gameTarget = 0;
+            if (Game(estFile) is { } est)
+            {
+                try
+                {
+                    ExtraSkeletonTable.TryGet(est, from, _src.SetId, out gameSource);
+                    ExtraSkeletonTable.TryGet(est, to, _src.SetId, out gameTarget);
+                }
+                catch (InvalidDataException ex)
+                {
+                    Warn("est_invalid", $"{estFile} cannot be read ({ex.Message}), so the extra skeleton is not carried over.");
+                    return;
+                }
+            }
+
+            // The mod's own entries for the source race go to the target race (see RaceManipulations).
+            var skeletons = new SortedSet<ushort>();
+            foreach (var container in _mod.Containers)
+            foreach (var manipulation in container.Manipulations?.OfType<JsonObject>() ?? [])
+                if (GearManipulations.IsEstFor(manipulation, _src) && IsRaceEntry(manipulation, out var race) && race == from &&
+                    Json.TryGetInt(manipulation["Manipulation"]!["Entry"], out var entry) && entry != 0)
+                    skeletons.Add((ushort)entry);
+
+            // Without one in the default option, the source race loads the game's.
+            if (EstEntry(_mod.Default, from) == null && EstEntry(_mod.Default, to) == null && gameTarget == 0 && gameSource != 0)
+            {
+                _raceSkeleton = gameSource;
+                skeletons.Add(gameSource);
+            }
+
+            foreach (var skeleton in skeletons) ProvideRaceSkeleton(skeleton);
+        }
+
+        /// <summary>Makes sure the target race has extra skeleton <paramref name="skeleton"/>; see <see cref="PlanRaceSkeletons"/>.</summary>
+        private void ProvideRaceSkeleton(ushort skeleton)
+        {
+            var (from, to) = _race!.Value;
+            var target = SkeletonFile(to, skeleton);
+            if (_files.ContainsKey(target) || _swaps.ContainsKey(target) || Game(target) != null) return;
+
+            var sourceFolder = GearSlots.ExtraSkeletonFolder(_src.Slot, from, skeleton)!;
+            var shipped = _files.Keys.Concat(_swaps.Keys).Where(p => p.StartsWith(sourceFolder, StringComparison.Ordinal)).ToList();
+            foreach (var path in shipped) _map[path] = RaceSkeletonPath(path, from, to);
+            foreach (var path in new[] { SkeletonFile(from, skeleton), PhysicsFile(from, skeleton) })
+                if (!shipped.Contains(path) && Game(path) is { } bytes)
+                {
+                    _generated[path] = bytes;
+                    _map[path] = RaceSkeletonPath(path, from, to);
+                }
+
+            if (!_map.ContainsKey(SkeletonFile(from, skeleton)))
+            {
+                Warn("extra_skeleton_missing",
+                    $"The item loads extra skeleton m{skeleton:D4}, which neither the mod nor the game has for " +
+                    $"{RaceNames.Name(from)} or {RaceNames.Name(to)}; the model may not show for {RaceNames.Name(to)}.");
+                return;
+            }
+            _plan.Changes.Add(new GearPlanChange("Extra skeleton", "Default", $"{RaceNames.Name(from)} m{skeleton:D4}",
+                $"copied for {RaceNames.Name(to)}, who has none"));
+            Warn("race_skeleton_copied",
+                $"{RaceNames.Name(to)} has no extra skeleton m{skeleton:D4} of its own, so the {RaceNames.Name(from)} one is copied " +
+                "for it: the model shows, but the bones it moves keep their " + RaceNames.Name(from) + " positions.");
+        }
+
+        private string SkeletonFile(ushort race, ushort skeleton)
+            => $"{GearSlots.ExtraSkeletonFolder(_src.Slot, race, skeleton)}skl_c{race:D4}m{skeleton:D4}.sklb";
+
+        private string PhysicsFile(ushort race, ushort skeleton)
+            => $"{GearSlots.ExtraSkeletonFolder(_src.Slot, race, skeleton)}phy_c{race:D4}m{skeleton:D4}.phyb";
+
+        /// <summary>A path in one race's extra skeleton folder, moved to another race's.</summary>
+        private static string RaceSkeletonPath(string path, ushort from, ushort to)
+            => path.Replace($"c{from:D4}/skeleton/", $"c{to:D4}/skeleton/", StringComparison.OrdinalIgnoreCase)
+                .Replace($"_c{from:D4}m", $"_c{to:D4}m", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Whether a manipulation is the item's EQDP or EST entry for one race, and for which.</summary>
+        private bool IsRaceEntry(JsonObject manipulation, out ushort race)
+        {
+            race = 0;
+            if (!GearManipulations.IsEqdpFor(manipulation, _src, null) && !GearManipulations.IsEstFor(manipulation, _src)) return false;
+            var m = (JsonObject)manipulation["Manipulation"]!;
+            return GenderRaces.TryParse(Json.GetString(m["Race"]), Json.GetString(m["Gender"]), out race);
+        }
+
+        /// <summary>The extra skeleton a container's EST entry gives the item for <paramref name="race"/>, or null.</summary>
+        private ushort? EstEntry(ModContainer container, ushort race)
+        {
+            foreach (var manipulation in container.Manipulations?.OfType<JsonObject>() ?? [])
+                if (GearManipulations.IsEstFor(manipulation, _src) && IsRaceEntry(manipulation, out var own) && own == race &&
+                    Json.TryGetInt(manipulation["Manipulation"]!["Entry"], out var entry))
+                    return (ushort)entry;
+            return null;
+        }
+
+        /// <summary>
+        /// The metadata of a race conversion. The item's IMC entries, visibility and visor flags and
+        /// part toggles apply to every race, so they stay as they are (and a new mod takes them
+        /// along). The source race's EQDP and EST entries, which tell the game whether the race has
+        /// a model of its own and which extra skeleton it loads, are given to the target race in the
+        /// same option; converted in place, the source race's go with its model.
+        /// </summary>
+        private void RaceManipulations(PenumbraMod result, bool keepUnrelated)
+        {
+            var (from, to) = _race!.Value;
+            foreach (var original in _mod.Containers)
+            {
+                // As in RetargetManipulations: the result holds what earlier conversions of a run made.
+                var container = result.GetContainer(original.Address);
+                if ((keepUnrelated ? container.Manipulations : original.Manipulations) is not { } manipulations) continue;
+                var output = new JsonArray();
+                if (!keepUnrelated && container.Manipulations is { } earlier)
+                    foreach (var node in earlier)
+                        output.Add(node?.DeepClone());
+                var converted = new List<JsonObject>();
+                foreach (var node in manipulations)
+                {
+                    if (node is not JsonObject manipulation) continue;
+                    if (!IsRaceEntry(manipulation, out var race))
+                    {
+                        if (keepUnrelated || GearManipulations.Retarget(manipulation, _src, _src, _sourceVariant, [_sourceVariant]).Kind
+                            != RetargetKind.Unrelated)
+                            output.Add(manipulation.DeepClone());
+                        continue;
+                    }
+                    if (race != from)
+                    {
+                        if (keepUnrelated) output.Add(manipulation.DeepClone());
+                        continue;
+                    }
+
+                    var copy = (JsonObject)manipulation.DeepClone();
+                    var (raceName, gender) = GenderRaces.Names(to);
+                    copy["Manipulation"]!["Race"] = raceName;
+                    copy["Manipulation"]!["Gender"] = gender;
+                    converted.Add(copy);
+                    if (keepUnrelated && KeepsSource) output.Add(manipulation.DeepClone());
+                    _plan.Changes.Add(new GearPlanChange("Metadata", original.Label, GearManipulations.Describe(manipulation),
+                        GearManipulations.Describe(copy) + (keepUnrelated && !KeepsSource ? " (moved with the model)" : string.Empty)));
+                }
+
+                // A converted entry wins over the mod's own one for the target race.
+                var identities = converted.Select(GearManipulations.Identity).ToHashSet(StringComparer.Ordinal);
+                var merged = new JsonArray();
+                foreach (var node in output)
+                    if (node is JsonObject existing && identities.Contains(GearManipulations.Identity(existing)))
+                        Warn("metadata_replaced", $"{original.Label}: {GearManipulations.Describe(existing)} is replaced by the converted model's entry.");
+                    else merged.Add(node?.DeepClone());
+                foreach (var item in converted) merged.Add(item);
+
+                if (merged.Count > 0) container.Node["Manipulations"] = merged;
+                else container.Node.Remove("Manipulations");
+            }
+        }
+
+        /// <summary>
+        /// The entries the target race needs to load the converted model: an EQDP entry with the
+        /// model bit, without which the game never asks for the race's own model and shows it the one
+        /// of the race it falls back to, and the EST entry of the extra skeleton the source race loads
+        /// (see <see cref="PlanRaceSkeletons"/>). Like the model, they go where it is: the default
+        /// option, or each option that holds it.
+        /// </summary>
+        private void InjectRaceDefaults(PenumbraMod result)
+        {
+            var to = _race!.Value.Target;
+            var holders = result.Containers.Where(c => Redirects(c, RaceTargetModel)).ToList();
+            if (holders.Count == 0) return;
+            if (holders.Any(c => c.Address.IsDefault)) holders = [result.Default];
+
+            var shift = _src.Slot.EqdpShift();
+            var vanilla = Game(_src.Slot.EqdpFile(to)) is { } bytes
+                ? GameMetadata.EqdpBits(GameMetadata.ReadEqdp(bytes, _src.SetId), _src.Slot)
+                : (ushort)0;
+            foreach (var holder in holders)
+            {
+                var own = holder.Manipulations?.OfType<JsonObject>().LastOrDefault(m => GearManipulations.IsEqdpFor(m, _src, to));
+                if (own != null)
+                {
+                    // The mod's entry, or the source race's given to the target, must still let it load its model.
+                    if (Json.TryGetInt(own["Manipulation"]!["Entry"], out var entry) && !GameMetadata.EqdpHasModel((ushort)entry, _src.Slot))
+                    {
+                        own["Manipulation"]!["Entry"] = Json.SameKindNumber(own["Manipulation"]!["Entry"], entry | 2 << shift);
+                        _plan.Changes.Add(new GearPlanChange("Metadata", holder.Label, $"{RaceNames.Name(to)} model shipped by the mod",
+                            GearManipulations.Describe(own)));
+                    }
+                }
+                else if ((vanilla & 2) == 0)
+                    Add(holder, GearManipulations.Eqdp(_src, to, (ushort)((vanilla | 2) << shift)), $"{RaceNames.Name(to)} model shipped by the mod");
+
+                if (_raceSkeleton is { } skeleton && EstEntry(holder, to) == null)
+                    Add(holder, GearManipulations.Est(_src, to, skeleton), $"{RaceNames.Name(_race.Value.Source)} extra skeleton");
+            }
+
+            void Add(ModContainer holder, JsonObject manipulation, string note)
+            {
+                holder.GetOrCreateManipulations().Add(manipulation);
+                _plan.Changes.Add(new GearPlanChange("Metadata", holder.Label, note, GearManipulations.Describe(manipulation)));
+            }
+        }
 
         // ── Helpers ─────────────────────────────────────────────────────────
 

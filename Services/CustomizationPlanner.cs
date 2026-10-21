@@ -52,7 +52,8 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         var target = new CustomizationPathEndpoint(targetKind, targetRace, newId);
         var resources = ReadResources(root);
-        var keys = new KeyRules(source, target, resources);
+        var keys = new KeyRules(source, target, resources,
+            path => gameData is IGameFileProvider files && files.FileExists(path));
         var references = new References();
         // The index keeps one file per game path, the last option's; every option's file is converted.
         var optionFiles = new List<(string GamePath, string Local)>();
@@ -62,15 +63,15 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             try { optionFiles.Add((Normalize(key), PathSafety.ResolveRelative(root, GamePath.ToLocal(local)))); }
             catch (InvalidDataException) { /* a path outside the mod folder is no file of the mod's */ }
         }
-        var movedRoots = CustomizationPaths.MovedRoots(source, target);
+        bool Moves(string path) => CustomizationPaths.Moves(path, source, target);
         var missing = new List<string>();
-        var assets = DiscoverAssets(root, resources.Files, optionFiles, movedRoots, references, missing);
+        var assets = DiscoverAssets(root, resources.Files, optionFiles, Moves, references, missing);
         foreach (var file in missing.Distinct(StringComparer.OrdinalIgnoreCase))
             task.Diagnostics.Add(new PlanDiagnostic("missing_local_file",
                 $"The mod redirects a game path under this root to '{Path.GetRelativePath(root, file)}', which does not exist; it is skipped.",
                 false));
         if (assets.Count == 0)
-            throw new InvalidDataException(resources.FileSwaps.Keys.Any(key => movedRoots.Any(moved => CustomizationPaths.Contains(key, moved)))
+            throw new InvalidDataException(resources.FileSwaps.Keys.Any(Moves)
                 ? $"This {descriptor.DisplayName.ToLowerInvariant()} root only holds file swaps, which cannot be converted. " +
                   "Convert the mod it swaps to instead."
                 : $"No {descriptor.DisplayName.ToLowerInvariant()} root matched c{sourceRace:D4}/{descriptor.Token(oldId)}.");
@@ -130,8 +131,9 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         var keepSource = task.PlanMode.KeepsSource();
         if (keepSource) KeepSourceFiles(task, root, mod, keys, target);
         PlanJson(task, root, descriptor, source, target, resources, materialDependencies, keys, keepSource,
-            FaceSkeletons(task, source, target, resources));
-        PlanExtraSkeleton(task, root, mod, descriptor, source, target, resources);
+            FaceSkeletons(task, CustomizationPaths.Owner(source), CustomizationPaths.Owner(target), resources));
+        // Both clans of a race load one model, and the extra skeleton with it.
+        PlanExtraSkeleton(task, root, mod, descriptor, CustomizationPaths.Owner(source), CustomizationPaths.Owner(target), resources);
         var models = CollectOutputModels(task, root, mod, keys);
         if (keepSource && task.OwnOption is { } own && PlanConvertedOption(task, root, descriptor, own) is { Moved: true } moved)
         {
@@ -348,11 +350,14 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                 var renamed = CustomizationPaths.RewriteOwnedReference(material, source, target);
                 if (renamed == material) continue;
                 // Each clan of the target (Au Ra tails: Raen and Xaela) loads the material from
-                // its own root, and gets what the source's same clan loads. Clans loading the
-                // same source material share one copy.
+                // its own root. The target gets what the source loads; the other clan loading the
+                // same model gets it too where the game has no material of its own there. Both
+                // share one copy.
                 var copies = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var (sourceClan, targetClan) in CustomizationPaths.MaterialClans(source, target))
                 {
+                    if (targetClan != target && gameData is IGameFileProvider game &&
+                        CustomizationPaths.MaterialPaths(targetClan, renamed).Any(game.FileExists)) continue;
                     // Prefer the folder the source actually loads (Hrothgar tails: one of five).
                     var sourcePaths = CustomizationPaths.MaterialPaths(sourceClan, material);
                     var ordered = keys.OrderSourceMaterialPaths(sourcePaths);
@@ -360,7 +365,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                                      ?? ordered[0];
                     // A model both clans load may name a material the mod gives only one of them (Xaela
                     // horns, say) and the game neither: that clan's copy is the only one there is.
-                    var otherClan = sourceClan == source ? CustomizationPaths.ClanMaterialEndpoint(source) : source;
+                    var otherClan = CustomizationPaths.OtherClan(source);
                     var borrowed = false;
                     if (otherClan != null && !resources.Files.ContainsKey(sourcePath) && !resources.FileSwaps.ContainsKey(sourcePath) &&
                         CustomizationPaths.MaterialPaths(otherClan.Value, material)
@@ -418,10 +423,10 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         return result;
     }
 
-    /// <param name="sources">The roots the conversion moves (see <see cref="CustomizationPaths.MovedRoots"/>).</param>
+    /// <param name="moves">Whether the conversion moves a path (see <see cref="CustomizationPaths.Moves"/>).</param>
     private static HashSet<string> DiscoverAssets(string root,
         IReadOnlyDictionary<string, string> mappings, IReadOnlyList<(string GamePath, string Local)> optionFiles,
-        IReadOnlyList<CustomizationPathEndpoint> sources, References references, ICollection<string> missing)
+        Func<string, bool> moves, References references, ICollection<string> missing)
     {
         var assets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var queue = new Queue<string>();
@@ -457,7 +462,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             if (assets.Add(full)) queue.Enqueue(full);
         }
 
-        bool Moves(string path) => sources.Any(source => CustomizationPaths.Contains(path, source));
+        bool Moves(string path) => moves(path);
     }
 
     /// <summary>
@@ -559,7 +564,9 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         var sourceNames = GenderRaces.Names(source.GenderRace);
         var targetNames = GenderRaces.Names(target.GenderRace);
         var occupied = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-        var dropped = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Hair and face switches and skeleton entries name the model, which both clans of a race share.
+        var modelSource = CustomizationPaths.Owner(source);
+        var modelTarget = CustomizationPaths.Owner(target);
 
         foreach (var jsonFile in PenumbraMod.DefinitionFiles(root).Where(File.Exists))
         {
@@ -579,12 +586,6 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             task.Diagnostics.Add(new PlanDiagnostic("target_conflict",
                 $"The mod already redirects {occupied.Count} of the target's path(s) itself, such as {occupied.First()}; " +
                 "converting would replace them. Choose another target, or remove those from the mod first.", true));
-
-        if (dropped.Count > 0)
-            task.Diagnostics.Add(new PlanDiagnostic("xaela_material_dropped",
-                $"The target has no {CustomizationPaths.SecondClan(source.GenderRace)} material, so the source's {dropped.Count} " +
-                $"{CustomizationPaths.SecondClan(source.GenderRace)} path(s), such as {dropped.First()}, are removed: nothing loads " +
-                $"them once the {descriptor.DisplayName.ToLowerInvariant()}'s model has moved.", false));
 
         void Walk(JsonNode? node, string path, List<JsonFieldChange> changes)
         {
@@ -623,22 +624,13 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                         var produced = new HashSet<string>(dict.Select(p => Normalize(p.Key)), StringComparer.OrdinalIgnoreCase);
                         // Keys this conversion leaves where they are, which a moved key must not land on.
                         // Adding beside the source leaves every key where it is.
-                        var staying = dict.Where(p => keepSource || keys.Target(p.Key) == null && !keys.IsDropped(p.Key))
+                        var staying = dict.Where(p => keepSource || keys.Target(p.Key) == null)
                             .Select(p => Normalize(p.Key))
                             .ToHashSet(StringComparer.OrdinalIgnoreCase);
                         var added = new JsonObject();
                         var variantAdditions = new JsonObject();
                         foreach (var (dictKey, dictValue) in dict.ToList())
                         {
-                            if (keys.IsDropped(dictKey))
-                            {
-                                // Kept beside the source, they still load with the source's tail.
-                                if (keepSource) continue;
-                                dropped.Add(Normalize(dictKey));
-                                changes.Add(new JsonFieldChange { JsonPath = $"{path}.{key}[key]", OldValue = dictKey, ChangeType = "path_key_remove" });
-                                continue;
-                            }
-
                             var newKey = keys.Target(dictKey);
                             if (newKey != null)
                             {
@@ -736,12 +728,12 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
             var edits = new List<JsonFieldChange>();
             var slot = source.Kind switch { AssetKind.Hair => "Hair", AssetKind.Face => "Face", _ => null };
             if (slot == null || !string.Equals(Json.GetString(shape["Slot"]), slot, StringComparison.OrdinalIgnoreCase)) return edits;
-            if (!Json.TryGetInt(shape["Id"], out var id) || id != source.ModelId) return edits;
+            if (!Json.TryGetInt(shape["Id"], out var id) || id != modelSource.ModelId) return edits;
             var hasRace = Json.TryGetInt(shape["GenderRaceCondition"], out var race) && race != 0;
             if (hasRace && race != source.GenderRace) return edits;
 
-            if (source.ModelId != target.ModelId)
-                edits.Add(new JsonFieldChange { JsonPath = "Id", OldValue = source.ModelId.ToString(), NewValue = target.ModelId.ToString(),
+            if (modelSource.ModelId != modelTarget.ModelId)
+                edits.Add(new JsonFieldChange { JsonPath = "Id", OldValue = modelSource.ModelId.ToString(), NewValue = modelTarget.ModelId.ToString(),
                     ChangeType = shape["Id"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
             if (hasRace && source.GenderRace != target.GenderRace)
                 edits.Add(new JsonFieldChange { JsonPath = "GenderRaceCondition", OldValue = source.GenderRace.ToString(), NewValue = target.GenderRace.ToString(),
@@ -752,13 +744,14 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         List<JsonFieldChange> EstEdits(JsonObject est)
         {
             var edits = new List<JsonFieldChange>();
-            if (!Json.TryGetInt(est["SetId"], out var setId) || setId != source.ModelId) return edits;
+            if (!Json.TryGetInt(est["SetId"], out var setId) || setId != modelSource.ModelId) return edits;
             // Hair and face share the same identifier space; the slot tells them apart.
             if (!string.Equals(Json.GetString(est["Slot"]), source.Kind.ToString(), StringComparison.OrdinalIgnoreCase)) return edits;
             if (Json.GetString(est["Race"]) is { } race && !race.Equals(sourceNames.Race, StringComparison.OrdinalIgnoreCase)) return edits;
             if (Json.GetString(est["Gender"]) is { } gender && !gender.Equals(sourceNames.Gender, StringComparison.OrdinalIgnoreCase)) return edits;
-            edits.Add(new JsonFieldChange { JsonPath = "SetId", OldValue = source.ModelId.ToString("D4"), NewValue = target.ModelId.ToString("D4"),
-                ChangeType = est["SetId"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
+            if (modelSource.ModelId != modelTarget.ModelId)
+                edits.Add(new JsonFieldChange { JsonPath = "SetId", OldValue = modelSource.ModelId.ToString("D4"), NewValue = modelTarget.ModelId.ToString("D4"),
+                    ChangeType = est["SetId"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
             if (Json.TryGetInt(est["Entry"], out var entry) && skeletonFor((ushort)entry) is { } replacement && replacement != entry)
                 edits.Add(new JsonFieldChange { JsonPath = "Entry", OldValue = entry.ToString(), NewValue = replacement.ToString(),
                     ChangeType = est["Entry"]?.GetValueKind() == JsonValueKind.String ? "numeric_id_string" : "numeric_id" });
@@ -1084,20 +1077,19 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         private readonly CustomizationPathEndpoint _target;
         private readonly HashSet<string> _skipped = new(StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>The source's Xaela material root when the target has none to move it to.</summary>
-        private readonly CustomizationPathEndpoint? _droppedXaela;
+        /// <summary>The other clan's root loading the target's model (Raen tail 3 for Xaela tail 103), or null.</summary>
+        private readonly CustomizationPathEndpoint? _otherClan;
 
-        /// <summary>The target's Xaela material root when the source has none of its own, so Xaela share the target's material.</summary>
-        private readonly CustomizationPathEndpoint? _sharedXaela;
+        /// <summary>Whether the game has a file at a game path.</summary>
+        private readonly Func<string, bool> _inGame;
 
-        public KeyRules(CustomizationPathEndpoint source, CustomizationPathEndpoint target, ModResourceIndex resources)
+        public KeyRules(CustomizationPathEndpoint source, CustomizationPathEndpoint target, ModResourceIndex resources,
+            Func<string, bool> inGame)
         {
             _source = source;
             _target = target;
-            var sourceXaela = CustomizationPaths.ClanMaterialEndpoint(source);
-            var targetXaela = CustomizationPaths.ClanMaterialEndpoint(target);
-            _droppedXaela = targetXaela == null ? sourceXaela : null;
-            _sharedXaela = sourceXaela == null ? targetXaela : null;
+            _inGame = inGame;
+            _otherClan = CustomizationPaths.OtherClan(target);
             // Hrothgar tails and skins keep the same material in up to five variant folders. A
             // target with a single folder receives one of them: the tail's own number when present.
             if (!CustomizationPaths.HasFurFolders(source) || CustomizationPaths.HasFurFolders(target)) return;
@@ -1127,12 +1119,6 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         public bool IsSkipped(string key) => _skipped.Contains(Normalize(key));
 
         /// <summary>
-        /// Whether this key is removed: an Au Ra tail's Xaela material paths, when the target has
-        /// no Xaela root. They only ever load with the tail's model, which moves away.
-        /// </summary>
-        public bool IsDropped(string key) => _droppedXaela is { } xaela && CustomizationPaths.Contains(key, xaela);
-
-        /// <summary>
         /// Whether this key is added rather than moved: material keys under a root other
         /// customizations also load.
         /// </summary>
@@ -1145,14 +1131,15 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         /// <summary>
         /// A Hrothgar tail or skin target may load any of v0001-v0005; the other folders get the same file.
-        /// Xaela load an Au Ra tail's material from a root of their own, which gets the same file
-        /// too unless the source's own Xaela material moves there.
+        /// The other clan loading the target's model (Raen for Xaela tail 103) gets the same file
+        /// where the game has no material of its own there, so the model it now loads finds one.
         /// </summary>
         public IEnumerable<string> ExtraTargetVariants(string newKey)
         {
             if (!newKey.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase)) yield break;
-            if (_sharedXaela is { } xaela && CustomizationPaths.Contains(newKey, _target))
-                yield return CustomizationPaths.Rewrite(newKey, _target, xaela);
+            if (_otherClan is { } other && CustomizationPaths.Contains(newKey, _target) &&
+                CustomizationPaths.Rewrite(newKey, _target, other) is var shared && !_inGame(shared))
+                yield return shared;
             if (!CustomizationPaths.HasFurFolders(_target)) yield break;
             var match = MaterialVariant().Match(newKey);
             if (!match.Success) yield break;

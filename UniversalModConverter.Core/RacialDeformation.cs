@@ -338,8 +338,10 @@ public sealed record RacialDeformationPlan(
     private static string? HeuristicAncestor(string bone, IReadOnlyDictionary<string, Matrix4x4> matrices)
     {
         string? fallback = null;
+        // Hair, face and head gear (met) physics bones hang from the head.
         if (bone.StartsWith("j_ex_h", StringComparison.Ordinal) ||
-            bone.StartsWith("j_ex_f", StringComparison.Ordinal))
+            bone.StartsWith("j_ex_f", StringComparison.Ordinal) ||
+            bone.Contains("_ex_met_", StringComparison.Ordinal))
             fallback = "j_kao";
         else if (bone.Contains("_ex_top_", StringComparison.Ordinal))
             fallback = "j_sebo_b";
