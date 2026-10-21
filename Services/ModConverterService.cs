@@ -966,6 +966,7 @@ public sealed class ModConverterService
                 VertexCount = mdl.VertexCount,
                 ShapeVertexCount = mdl.ShapeVertexCount,
                 DeformationPlan = mdl.DeformationPlan,
+                Neck = mdl.Neck,
             };
             remappedMdl.BoneResolutions.AddRange(mdl.BoneResolutions);
             foreach (var patch in mdl.PathReplacements)
@@ -1479,7 +1480,7 @@ public sealed class ModConverterService
         if (replacements.Count > 0) model.ReplacePaths(replacements);
         var deformationPlan = change.DeformationPlan
             ?? throw new InvalidOperationException("The previewed MDL deformation plan is missing.");
-        var report = MdlRaceConverter.Convert(model, deformationPlan);
+        var report = MdlRaceConverter.Convert(model, deformationPlan, change.Neck);
         var output = model.Write();
         var outputHash = MdlRaceConverter.Hash(output);
         if (!string.Equals(outputHash, change.OutputHash, StringComparison.Ordinal))

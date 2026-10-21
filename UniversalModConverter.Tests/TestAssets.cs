@@ -6,7 +6,7 @@ using UniversalModConverter.Core;
 internal static class TestAssets
 {
     public static byte[] CreateMdl(bool faceData = false, bool shape = false, string boneName = "j_root",
-        bool twoBones = false, string material = "mt_test.mtrl")
+        bool twoBones = false, string material = "mt_test.mtrl", bool neckMorph = false, bool garbledNeckMorph = false)
     {
         var boneNames = twoBones ? new[] { "a", "b" } : new[] { boneName };
         var vertexCount = shape ? 2 : 1;
@@ -52,7 +52,7 @@ internal static class TestAssets
         writer.Write((byte)0); writer.Write((byte)0); // terrain, flags2
         writer.Write(0f); writer.Write(0f);
         writer.Write((ushort)0); writer.Write((ushort)0);
-        writer.Write((byte)0); writer.Write((byte)0); writer.Write((byte)0); writer.Write((byte)0);
+        writer.Write((byte)0); writer.Write((byte)0); writer.Write((byte)0); writer.Write((byte)(neckMorph ? 1 : 0));
         writer.Write((ushort)2); writer.Write((ushort)0);
         writer.Write(faceData ? (uint)vertexCount : 0u);
         writer.Write(0u);
@@ -84,6 +84,14 @@ internal static class TestAssets
         }
         writer.Write((uint)(boneNames.Length * 2));
         for (ushort index = 0; index < boneNames.Length; index++) writer.Write(index); // submesh bone map
+        if (neckMorph)
+        {
+            // The first vertex as a seam vertex: position, packed weights (all on bone 0), normal, bones.
+            // A garbled one lists a place no vertex is.
+            foreach (var value in garbledNeckMorph ? [9f, 9f, 9f] : new[] { 1f, 2f, 3f }) writer.Write(value);
+            writer.Write(0xFFu);
+            writer.Write(0f); writer.Write(0f); writer.Write(1f); writer.Write(0u);
+        }
         if (faceData)
         {
             for (var i = 0; i < vertexCount; i++)

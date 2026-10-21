@@ -5,13 +5,42 @@ using System.Security.Cryptography;
 
 namespace UniversalModConverter.Core;
 
+/// <param name="NeckMoved">How far, in metres, fitting the neck to the target race moved its seam (0: not fitted).</param>
+/// <param name="NeckProblem">Why a neck that was to be fitted was not, or null.</param>
 public sealed record MdlConversionReport(int LodCount, int MeshCount, int VertexCount,
-    int ShapeVertexCount, ImmutableArray<BoneResolution> BoneResolutions);
+    int ShapeVertexCount, ImmutableArray<BoneResolution> BoneResolutions, float NeckMoved = 0, string? NeckProblem = null);
+
+/// <summary>
+/// One vertex of a face's neck seam, the ring where it meets the body, as a face model's neck
+/// morphs list them: its position and normal in the model.
+/// </summary>
+public sealed record NeckSeamPoint(Vector3 Position, Vector3 Normal);
+
+/// <summary>
+/// The neck seams a converted face is fitted between: the source race's (where to find the seam
+/// in a model without neck morphs of its own) and the target race's, which its bodies meet.
+/// Every face of a race shares one seam.
+/// </summary>
+public sealed record NeckFit(ImmutableArray<NeckSeamPoint> Source, ImmutableArray<NeckSeamPoint> Target);
 
 /// <summary>Applies PBD racial deformation directly to every skinned v6 MDL vertex stream.</summary>
 public static class MdlRaceConverter
 {
-    public static MdlConversionReport Convert(MdlFile model, RacialDeformationPlan plan)
+    /// <summary>
+    /// The neck seam a face model's neck morphs describe, or none when it has none. Another tool
+    /// may have garbled them; a conversion only trusts them where the model's vertices agree.
+    /// </summary>
+    public static ImmutableArray<NeckSeamPoint> NeckSeam(MdlFile model)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        return model.NeckMorphs.IsDefault ? [] : [.. model.NeckMorphs.Select(m => new NeckSeamPoint(m.Position, m.Normal))];
+    }
+
+    /// <param name="neck">
+    /// Fits a face's neck to the target race's seam, which the deformation alone misses by up to
+    /// 2.5 cm for some races (Roegadyn, Hrothgar, Lalafell); null leaves the neck as deformed.
+    /// </param>
+    public static MdlConversionReport Convert(MdlFile model, RacialDeformationPlan plan, NeckFit? neck = null)
     {
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(plan);
@@ -26,6 +55,8 @@ public static class MdlRaceConverter
         var bonePositions = Enumerable.Range(0, model.Bones.Length).Select(_ => new List<Vector3>()).ToArray();
         var usedBones = new HashSet<string>(StringComparer.Ordinal);
         var vertexCount = 0;
+        // Written once the neck is fitted, which needs every vertex deformed first.
+        var deformed = new List<DeformedVertex>();
 
         for (var lodIndex = 0; lodIndex < model.Header.LodCount; lodIndex++)
         {
@@ -80,23 +111,33 @@ public static class MdlRaceConverter
                         throw new MdlConversionException("unweighted_vertex",
                             $"Mesh {meshIndex} vertex {vertexIndex} has no positive blend weight.");
 
-                    var converted = new DeformableVertex(position, normal, tangent, tangent, flow,
+                    var original = new DeformableVertex(position, normal, tangent, tangent, flow,
                         influences.ToImmutable());
-                    foreach (var step in plan.Steps)
-                        converted = RacialDeformation.Transform(converted, step.BoneMatrices);
-                    WriteVector(model, lodIndex, meshIndex, vertexIndex, positionElement, converted.Position);
-                    WriteVector(model, lodIndex, meshIndex, vertexIndex, normalElement, converted.Normal);
-                    if (tangentElement != null)
-                        WriteVector(model, lodIndex, meshIndex, vertexIndex, tangentElement, converted.Tangent);
-                    if (flowElement != null)
-                        WriteVector(model, lodIndex, meshIndex, vertexIndex, flowElement, converted.Flow);
-
-                    transformedPositions.Add(converted.Position);
-                    allPositions.Add(converted.Position);
-                    foreach (var boneIndex in influencedBones.Distinct()) bonePositions[boneIndex].Add(converted.Position);
-                    vertexCount++;
+                    var converted = Deform(original, plan);
+                    deformed.Add(new DeformedVertex(lodIndex, meshIndex, vertexIndex, positionElement, normalElement,
+                        tangentElement, flowElement, position, converted, influencedBones.Distinct().ToArray()));
                 }
             }
+        }
+
+        var (fitted, neckMoved, neckProblem) = neck == null ? (false, 0f, null) : FitNeck(model, neck, deformed);
+        // The neck morphs list the seam vertices, so they move with them.
+        if (!fitted) DeformNeckMorphs(model, deformed);
+        foreach (var vertex in deformed)
+        {
+            var (lodIndex, meshIndex, vertexIndex) = (vertex.Lod, vertex.Mesh, vertex.Index);
+            var converted = vertex.Converted;
+            WriteVector(model, lodIndex, meshIndex, vertexIndex, vertex.PositionElement, converted.Position);
+            WriteVector(model, lodIndex, meshIndex, vertexIndex, vertex.NormalElement, converted.Normal);
+            if (vertex.TangentElement != null)
+                WriteVector(model, lodIndex, meshIndex, vertexIndex, vertex.TangentElement, converted.Tangent);
+            if (vertex.FlowElement != null)
+                WriteVector(model, lodIndex, meshIndex, vertexIndex, vertex.FlowElement, converted.Flow);
+
+            transformedPositions.Add(converted.Position);
+            allPositions.Add(converted.Position);
+            foreach (var boneIndex in vertex.Bones) bonePositions[boneIndex].Add(converted.Position);
+            vertexCount++;
         }
 
         if (allPositions.Count == 0)
@@ -119,7 +160,161 @@ public static class MdlRaceConverter
             .Where(resolution => usedBones.Contains(resolution.Bone))
             .ToImmutableArray();
         return new MdlConversionReport(model.Header.LodCount, model.Meshes.Length, vertexCount,
-            CountShapeVertices(model), resolutions);
+            CountShapeVertices(model), resolutions, neckMoved, neckProblem);
+    }
+
+    private sealed record DeformedVertex(int Lod, int Mesh, int Index, MdlVertexElement PositionElement,
+        MdlVertexElement NormalElement, MdlVertexElement? TangentElement, MdlVertexElement? FlowElement,
+        Vector3 OriginalPosition, DeformableVertex Converted, int[] Bones)
+    {
+        public DeformableVertex Converted { get; set; } = Converted;
+    }
+
+    private static DeformableVertex Deform(DeformableVertex vertex, RacialDeformationPlan plan)
+    {
+        foreach (var step in plan.Steps)
+            vertex = RacialDeformation.Transform(vertex, step.BoneMatrices);
+        return vertex;
+    }
+
+    /// <summary>Copies of one seam vertex (split by normals or UVs) share its position to this distance (metres).</summary>
+    private const float SeamTolerance = 0.0005f;
+
+    /// <summary>How far (metres) a sculpted seam vertex may sit from the place its morph or its race lists.</summary>
+    private const float SeamSearch = 0.003f;
+
+    /// <summary>
+    /// Moves the deformed neck onto the target race's seam: each seam vertex exactly, with the
+    /// target's normal so the shading meets the body's too, and the rest of the neck after it in
+    /// proportion to how much it hangs on the neck bones and how close it is to the seam. The seam
+    /// is found among the model's own vertices, so where they end up decides the fit, not the
+    /// morphs' bone numbers. The model's own neck morphs, when they list that seam, are set to the target's.
+    /// </summary>
+    private static (bool Fitted, float Moved, string? Problem) FitNeck(MdlFile model, NeckFit neck,
+        List<DeformedVertex> vertices)
+    {
+        if (neck.Target.IsDefaultOrEmpty) return (false, 0, "the target race's neck seam could not be read");
+        // The model's own seam, or, for one whose neck morphs another tool dropped or garbled, its race's.
+        var own = NeckSeam(model);
+        var ownFound = Locate(own, vertices);
+        var ownMatches = Matches(ownFound);
+        var seam = ownMatches ? own : neck.Source;
+        var found = ownMatches ? ownFound : Locate(neck.Source, vertices);
+        if (seam.IsDefaultOrEmpty) return (false, 0, "the source race's neck seam could not be read");
+        if (seam.Length != neck.Target.Length)
+            return (false, 0, $"its neck seam has {seam.Length} vertices and the target race's {neck.Target.Length}");
+        if (!Matches(found)) return (false, 0, "its neck does not end where the source race's does");
+
+        var points = Enumerable.Range(0, seam.Length).Where(i => found[i] >= 0).ToArray();
+        var converted = points.Select(i => vertices[found[i]].Converted).ToArray();
+        var targets = Pair(converted, neck.Target);
+        if (targets == null) return (false, 0, "its neck seam does not match the target race's");
+        var offsets = converted.Select((v, k) => targets[k].Position - v.Position).ToArray();
+        var moved = offsets.Max(o => o.Length());
+        // The neck blends into the seam over a few centimetres, more when the seam moves far.
+        var reach = MathF.Max(0.03f, 3 * moved);
+        var seamOriginals = points.Select(i => vertices[found[i]].OriginalPosition).ToArray();
+
+        foreach (var vertex in vertices)
+        {
+            var neckWeight = NeckWeight(vertex);
+            if (neckWeight <= 0) continue;
+            var snapped = Array.FindIndex(seamOriginals, p => Vector3.Distance(p, vertex.OriginalPosition) < SeamTolerance);
+            if (snapped >= 0)
+            {
+                vertex.Converted = vertex.Converted with
+                    { Position = targets[snapped].Position, Normal = Vector3.Normalize(targets[snapped].Normal) };
+                continue;
+            }
+            var position = vertex.Converted.Position;
+            var distance = converted.Min(v => Vector3.Distance(position, v.Position));
+            if (distance >= reach) continue;
+            // Inverse-distance blend of the seam's offsets, fading out with distance from the seam.
+            var blend = Vector3.Zero;
+            var total = 0f;
+            for (var k = 0; k < converted.Length; k++)
+            {
+                var weight = 1 / MathF.Max(1e-12f, Vector3.DistanceSquared(position, converted[k].Position));
+                blend += offsets[k] * weight;
+                total += weight;
+            }
+            var fade = 1 - distance / reach;
+            fade = fade * fade * (3 - 2 * fade);
+            vertex.Converted = vertex.Converted with
+                { Position = position + blend / total * (fade * MathF.Min(1, neckWeight)) };
+        }
+
+        if (ownMatches)
+        {
+            var morphs = model.NeckMorphs.ToArray();
+            for (var k = 0; k < points.Length; k++)
+                morphs[points[k]] = morphs[points[k]] with { Position = targets[k].Position, Normal = targets[k].Normal };
+            model.SetNeckMorphs(morphs);
+        }
+        return (true, moved, null);
+    }
+
+    /// <summary>
+    /// Moves the model's neck morphs to where their seam vertices went. Morphs that do not list
+    /// the seam the vertices make (another tool garbled them) are left as they are.
+    /// </summary>
+    private static void DeformNeckMorphs(MdlFile model, List<DeformedVertex> vertices)
+    {
+        var found = Locate(NeckSeam(model), vertices);
+        if (!Matches(found)) return;
+        model.SetNeckMorphs(model.NeckMorphs.Select((m, i) => found[i] < 0 ? m
+            : m with { Position = vertices[found[i]].Converted.Position, Normal = vertices[found[i]].Converted.Normal }).ToList());
+    }
+
+    /// <summary>For each seam point, the neck vertex nearest it within <see cref="SeamSearch"/>, or -1.</summary>
+    private static int[] Locate(ImmutableArray<NeckSeamPoint> seam, List<DeformedVertex> vertices)
+    {
+        if (seam.IsDefaultOrEmpty) return [];
+        var neck = Enumerable.Range(0, vertices.Count).Where(i => NeckWeight(vertices[i]) > 0).ToArray();
+        return seam.Select(point =>
+        {
+            var best = -1;
+            var bestDistance = SeamSearch;
+            foreach (var i in neck)
+            {
+                var distance = Vector3.Distance(vertices[i].OriginalPosition, point.Position);
+                if (distance < bestDistance) (best, bestDistance) = (i, distance);
+            }
+            return best;
+        }).ToArray();
+    }
+
+    /// <summary>Whether at least half of a seam was found among the vertices.</summary>
+    private static bool Matches(int[] found) => found.Length > 0 && found.Count(i => i >= 0) * 2 >= found.Length;
+
+    private static float NeckWeight(DeformedVertex vertex)
+        => vertex.Converted.Influences.Where(i => IsNeckBone(i.Bone)).Sum(i => i.Weight);
+
+    private static bool IsNeckBone(string bone) => bone == "j_kubi" || bone.StartsWith("j_sebo_", StringComparison.Ordinal);
+
+    /// <summary>
+    /// The target seam vertex for each deformed one: races list their seam in different orders, so
+    /// they are paired by the way each faces (its normal), nearest first. Null when they do not
+    /// pair up as the same ring.
+    /// </summary>
+    private static NeckSeamPoint[]? Pair(DeformableVertex[] seam, ImmutableArray<NeckSeamPoint> target)
+    {
+        var result = new NeckSeamPoint?[seam.Length];
+        var taken = new bool[target.Length];
+        var candidates =
+            from i in Enumerable.Range(0, seam.Length)
+            from j in Enumerable.Range(0, target.Length)
+            let agreement = Vector3.Dot(Vector3.Normalize(seam[i].Normal), Vector3.Normalize(target[j].Normal))
+            orderby agreement descending
+            select (i, j, agreement);
+        foreach (var (i, j, agreement) in candidates)
+        {
+            if (result[i] != null || taken[j]) continue;
+            if (agreement < 0.7f) return null;
+            result[i] = target[j];
+            taken[j] = true;
+        }
+        return result.All(p => p != null) ? result.Select(p => p!).ToArray() : null;
     }
 
     public static string Hash(ReadOnlySpan<byte> bytes)

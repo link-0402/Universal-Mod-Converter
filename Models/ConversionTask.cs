@@ -285,6 +285,8 @@ public sealed class PlannedMdlChange
     public int VertexCount { get; set; }
     public int ShapeVertexCount { get; set; }
     public RacialDeformationPlan? DeformationPlan { get; set; }
+    /// <summary>The neck seams a face is fitted between, or null for a model that is only deformed.</summary>
+    public NeckFit? Neck { get; set; }
     public List<BoneResolution> BoneResolutions { get; } = new();
     public List<BinaryStringPatch> PathReplacements { get; } = new();
 }
