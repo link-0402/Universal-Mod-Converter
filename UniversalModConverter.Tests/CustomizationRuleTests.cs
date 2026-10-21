@@ -18,10 +18,10 @@ internal static class CustomizationRuleTests
         ("Face, tail and ear materials are named as the game reads them", GameMaterialIdentity),
         ("Face and ear materials have no variant folder", FaceAndEarFolders),
         ("Au Ra tails own a Xaela material root at ID + 100", AuRaXaelaRoots),
-        ("Au Ra tail to Au Ra tail moves both clans' materials", AuRaToAuRaTail),
-        ("Au Ra tail to other race leaves the Xaela root behind", AuRaToOtherTail),
+        ("Au Ra tail to Au Ra tail moves the model and one clan's materials", AuRaToAuRaTail),
+        ("Au Ra tail to other race takes the chosen clan's material", AuRaToOtherTail),
         ("Other race tail to Au Ra tail gives Xaela a material root", OtherToAuRaTail),
-        ("Detection counts the Xaela root as part of its tail", AuRaXaelaDetection),
+        ("Detection lists each clan's tail of its own", AuRaXaelaDetection),
         ("A face's neck morphs move with its neck", NeckMorphsDeform),
         ("A face's neck is fitted to the target race's seam", NeckFitsTargetSeam),
         ("A neck that cannot be fitted says why and is only deformed", NeckNotFitted),
@@ -292,15 +292,41 @@ internal static class CustomizationRuleTests
             new CustomizationPathEndpoint(AssetKind.Face, 1401, 1), new CustomizationPathEndpoint(AssetKind.Face, 1401, 2)));
         Assert.Equal("/mt_c1401t0002_a.mtrl", CustomizationPaths.RewriteOwnedReference("/mt_c1401t0001_a.mtrl", Tail(1401, 1), Tail(1401, 2)));
 
-        // Face roots of a second clan belong to the first clan's face, and move with it.
-        Assert.Equal(new CustomizationPathEndpoint(AssetKind.Face, 1401, 1), CustomizationPaths.Owner(xaela));
-        Assert.Equal("chara/human/c1401/obj/face/f0102/material/mt_c1401f0102_fac_a.mtrl",
-            CustomizationPaths.Rewrite("chara/human/c1401/obj/face/f0101/material/mt_c1401f0101_fac_a.mtrl",
-                new CustomizationPathEndpoint(AssetKind.Face, 1401, 1), new CustomizationPathEndpoint(AssetKind.Face, 1401, 2)));
-        Assert.Equal(new[] { 1, 101 }, CustomizationPaths.MovedRoots(new CustomizationPathEndpoint(AssetKind.Face, 1401, 1),
-            new CustomizationPathEndpoint(AssetKind.Face, 1401, 2)).Select(r => (int)r.ModelId).ToArray());
-        Assert.Equal(1, CustomizationPaths.MovedRoots(new CustomizationPathEndpoint(AssetKind.Face, 1401, 1),
-            new CustomizationPathEndpoint(AssetKind.Face, 801, 2)).Count);
+        // Each clan's face is its own: the Raen face leaves the Xaela materials where they are.
+        var raen = new CustomizationPathEndpoint(AssetKind.Face, 1401, 1);
+        const string xaelaMaterial = "chara/human/c1401/obj/face/f0101/material/mt_c1401f0101_fac_a.mtrl";
+        const string raenModel = "chara/human/c1401/obj/face/f0001/model/c1401f0001_fac.mdl";
+        Assert.Equal(raen, CustomizationPaths.Owner(xaela));
+        Assert.Equal(xaelaMaterial, CustomizationPaths.Rewrite(xaelaMaterial, raen, new CustomizationPathEndpoint(AssetKind.Face, 1401, 2)));
+        Assert.True(!CustomizationPaths.Moves(xaelaMaterial, raen, new CustomizationPathEndpoint(AssetKind.Face, 1401, 2)));
+        Assert.True(!CustomizationPaths.Owns(xaelaMaterial, raen));
+
+        // The Xaela face moves the shared model and its own materials, and nothing of Raen's.
+        var miqote = new CustomizationPathEndpoint(AssetKind.Face, 801, 2);
+        Assert.True(CustomizationPaths.Owns(raenModel, xaela));
+        // A model under the Xaela root is one the game never loads.
+        Assert.True(!CustomizationPaths.Owns("chara/human/c1401/obj/face/f0101/model/c1401f0101_fac.mdl", xaela));
+        Assert.True(CustomizationPaths.Owns("chara/human/c1401/obj/face/f0101/common/texture/eye/eye01_mask.tex", xaela));
+        Assert.True(!CustomizationPaths.Owns("chara/human/c1401/obj/face/f0001/common/texture/eye/eye01_mask.tex", xaela));
+        Assert.True(!CustomizationPaths.Owns("chara/human/c1401/obj/face/f0001/material/mt_c1401f0001_fac_a.mtrl", xaela));
+        Assert.Equal("chara/human/c0801/obj/face/f0002/model/c0801f0002_fac.mdl", CustomizationPaths.Rewrite(raenModel, xaela, miqote));
+        Assert.Equal("chara/human/c0801/obj/face/f0002/material/mt_c0801f0002_fac_a.mtrl",
+            CustomizationPaths.Rewrite(xaelaMaterial, xaela, miqote));
+        Assert.Equal("/mt_c0801f0002_fac_a.mtrl", CustomizationPaths.RewriteOwnedReference("/mt_c1401f0001_fac_a.mtrl", xaela, miqote));
+
+        // Raen face 1 to Xaela face 1 keeps the model and moves only the materials.
+        Assert.True(!CustomizationPaths.Moves(raenModel, raen, xaela));
+        Assert.Equal(xaelaMaterial,
+            CustomizationPaths.Rewrite("chara/human/c1401/obj/face/f0001/material/mt_c1401f0001_fac_a.mtrl", raen, xaela));
+
+        // Veena take their face skin from the first clan's root, on either side.
+        var veenaSkin = "chara/human/c1801/obj/face/f0001/material/mt_c1801f0001_fac_a.mtrl";
+        Assert.True(CustomizationPaths.Owns(veenaSkin, veena));
+        Assert.Equal("chara/human/c1801/obj/face/f0002/material/mt_c1801f0002_fac_a.mtrl",
+            CustomizationPaths.Rewrite(veenaSkin, veena, new CustomizationPathEndpoint(AssetKind.Face, 1801, 102)));
+        Assert.Equal("chara/human/c1801/obj/face/f0102/material/mt_c1801f0102_iri_a.mtrl",
+            CustomizationPaths.Rewrite("chara/human/c1801/obj/face/f0101/material/mt_c1801f0101_iri_a.mtrl", veena,
+                new CustomizationPathEndpoint(AssetKind.Face, 1801, 102)));
     }
 
     private static void FaceAndEarFolders()
@@ -324,8 +350,13 @@ internal static class CustomizationRuleTests
         Assert.Equal(null, CustomizationPaths.ClanMaterialEndpoint(Tail(1401, 103)));
         Assert.Equal(Tail(1401, 3), CustomizationPaths.Owner(Tail(1401, 103)));
         Assert.Equal(Tail(801, 103), CustomizationPaths.Owner(Tail(801, 103)));
-        Assert.True(CustomizationPaths.Owns(XaelaTexture, Tail(1401, 3)));
-        Assert.True(!CustomizationPaths.Contains(XaelaTexture, Tail(1401, 3)));
+        Assert.True(!CustomizationPaths.Owns(XaelaTexture, Tail(1401, 3)));
+        Assert.True(CustomizationPaths.Owns(XaelaTexture, Tail(1401, 103)));
+        Assert.Equal(Tail(1401, 3), CustomizationPaths.OtherClan(Tail(1401, 103)));
+        Assert.Equal(Tail(1401, 103), CustomizationPaths.OtherClan(Tail(1401, 3)));
+        Assert.Equal("Xaela", CustomizationPaths.ClanOf(Tail(1401, 103)));
+        Assert.Equal("Raen", CustomizationPaths.ClanOf(Tail(1401, 3)));
+        Assert.Equal(null, CustomizationPaths.ClanOf(Tail(801, 3)));
         // The model's material name loads under the Xaela root, named after it.
         Assert.Equal(XaelaMaterial, CustomizationPaths.MaterialPath(Tail(1401, 103), "/mt_c1401t0003_a.mtrl"));
         Assert.Equal(RaenMaterial, CustomizationPaths.MaterialPath(Tail(1401, 3), "/mt_c1401t0003_a.mtrl"));
@@ -333,41 +364,60 @@ internal static class CustomizationRuleTests
 
     private static void AuRaToAuRaTail()
     {
+        const string model = "chara/human/c1401/obj/tail/t0003/model/c1401t0003_til.mdl";
+        // Raen to Raen: the model and the Raen material move, the Xaela one stays.
         var source = Tail(1401, 3);
         var target = Tail(1401, 2);
-        Assert.Equal(new[] { source, Tail(1401, 103) }, CustomizationPaths.MovedRoots(source, target).ToArray());
-        Assert.Equal("chara/human/c1401/obj/tail/t0102/material/v0001/mt_c1401t0102_a.mtrl",
-            CustomizationPaths.Rewrite(XaelaMaterial, source, target));
-        Assert.Equal("chara/human/c1401/obj/tail/t0102/texture/v01_c1401t0102_etc_n.tex",
-            CustomizationPaths.Rewrite(XaelaTexture, source, target));
+        Assert.True(!CustomizationPaths.Moves(XaelaMaterial, source, target));
+        Assert.Equal(XaelaMaterial, CustomizationPaths.Rewrite(XaelaMaterial, source, target));
         Assert.Equal("chara/human/c1401/obj/tail/t0002/material/v0001/mt_c1401t0002_a.mtrl",
             CustomizationPaths.Rewrite(RaenMaterial, source, target));
+        // The other clan loading the target's model may need the material too (where the game has none).
+        Assert.Equal(new[] { (source, target), (source, Tail(1401, 102)) },
+            CustomizationPaths.MaterialClans(source, target).ToArray());
+
+        // Xaela to Xaela: the shared model and the Xaela material move, the Raen one stays.
+        var xaela = Tail(1401, 103);
+        Assert.True(CustomizationPaths.Moves(model, xaela, Tail(1401, 102)));
+        Assert.True(!CustomizationPaths.Moves(RaenMaterial, xaela, Tail(1401, 102)));
+        Assert.Equal("chara/human/c1401/obj/tail/t0002/model/c1401t0002_til.mdl", CustomizationPaths.Rewrite(model, xaela, Tail(1401, 102)));
+        Assert.Equal("chara/human/c1401/obj/tail/t0102/material/v0001/mt_c1401t0102_a.mtrl",
+            CustomizationPaths.Rewrite(XaelaMaterial, xaela, Tail(1401, 102)));
+        Assert.Equal("chara/human/c1401/obj/tail/t0102/texture/v01_c1401t0102_etc_n.tex",
+            CustomizationPaths.Rewrite(XaelaTexture, xaela, Tail(1401, 102)));
+        Assert.Equal(RaenMaterial, CustomizationPaths.Rewrite(RaenMaterial, xaela, Tail(1401, 102)));
         // Local files laid out like the game paths follow along.
         Assert.Equal(@"tail\aura\chara\human\c1301\obj\tail\t0103\material\v0001\mt_c1301t0103_a.mtrl",
             CustomizationPaths.Rewrite(@"tail\aura\chara\human\c1401\obj\tail\t0103\material\v0001\mt_c1401t0103_a.mtrl",
-                source, Tail(1301, 3)));
-        Assert.Equal(new[] { (source, target), (Tail(1401, 103), Tail(1401, 102)) },
-            CustomizationPaths.MaterialClans(source, target).ToArray());
+                xaela, Tail(1301, 103)));
+        // Raen to Xaela: across clans, the material changes root and the model needs no change.
+        Assert.Equal("chara/human/c1401/obj/tail/t0102/material/v0001/mt_c1401t0102_a.mtrl",
+            CustomizationPaths.Rewrite(RaenMaterial, source, Tail(1401, 102)));
+        Assert.True(!CustomizationPaths.Moves(model, source, xaela));
+        Assert.True(CustomizationPaths.Moves(RaenMaterial, source, xaela));
     }
 
     private static void AuRaToOtherTail()
     {
-        var source = Tail(1401, 3);
         var target = Tail(801, 2);
-        Assert.Equal(new[] { source }, CustomizationPaths.MovedRoots(source, target).ToArray());
-        Assert.Equal(XaelaMaterial, CustomizationPaths.Rewrite(XaelaMaterial, source, target));
+        Assert.Equal(XaelaMaterial, CustomizationPaths.Rewrite(XaelaMaterial, Tail(1401, 3), target));
         Assert.Equal("chara/human/c0801/obj/tail/t0002/material/v0001/mt_c0801t0002_a.mtrl",
-            CustomizationPaths.Rewrite(RaenMaterial, source, target));
-        Assert.Equal(new[] { (source, target) }, CustomizationPaths.MaterialClans(source, target).ToArray());
-        Assert.Equal(new[] { source }, CustomizationPaths.MovedRoots(source, new CustomizationPathEndpoint(AssetKind.VieraEar, 1801, 1)).ToArray());
+            CustomizationPaths.Rewrite(RaenMaterial, Tail(1401, 3), target));
+        Assert.Equal(new[] { (Tail(1401, 3), target) }, CustomizationPaths.MaterialClans(Tail(1401, 3), target).ToArray());
+        // The Xaela tail gives its own material instead.
+        Assert.Equal("chara/human/c0801/obj/tail/t0002/material/v0001/mt_c0801t0002_a.mtrl",
+            CustomizationPaths.Rewrite(XaelaMaterial, Tail(1401, 103), target));
+        Assert.Equal(RaenMaterial, CustomizationPaths.Rewrite(RaenMaterial, Tail(1401, 103), target));
+        Assert.Equal("/mt_c0801t0002_a.mtrl", CustomizationPaths.RewriteOwnedReference("/mt_c1401t0003_a.mtrl", Tail(1401, 103), target));
+        Assert.Equal("chara/human/c1801/obj/zear/z0001/material/mt_c1801z0001_a.mtrl",
+            CustomizationPaths.Rewrite(XaelaMaterial, Tail(1401, 103), new CustomizationPathEndpoint(AssetKind.VieraEar, 1801, 1)));
     }
 
     private static void OtherToAuRaTail()
     {
         var source = Tail(801, 5);
         var target = Tail(1401, 2);
-        Assert.Equal(new[] { source }, CustomizationPaths.MovedRoots(source, target).ToArray());
-        // Xaela load the source's only material too, from their own root.
+        // Xaela load the source's only material too, from their own root, where the game has none of theirs.
         Assert.Equal(new[] { (source, target), (source, Tail(1401, 102)) },
             CustomizationPaths.MaterialClans(source, target).ToArray());
         Assert.Equal("chara/human/c1401/obj/tail/t0102/material/v0001/mt_c1401t0102_a.mtrl",
@@ -388,17 +438,20 @@ internal static class CustomizationRuleTests
                   "{{RaenMaterial}}":"a.mtrl","{{XaelaMaterial}}":"b.mtrl","{{XaelaTexture}}":"b.tex"} } }
                 """);
             var mod = PenumbraMod.Load(root);
-            Assert.Equal(new[] { Tail(1401, 3) }, CustomizationDetection.FindRoots(mod, root).ToArray());
-            Assert.Equal(AssetContents.Model | AssetContents.Material | AssetContents.Texture,
+            // Each clan's tail is listed, both with the model they share.
+            Assert.Equal(new[] { Tail(1401, 3), Tail(1401, 103) }, CustomizationDetection.FindRoots(mod, root).ToArray());
+            Assert.Equal(AssetContents.Model | AssetContents.Material,
                 CustomizationDetection.Contents(mod, Tail(1401, 3)));
+            Assert.Equal(AssetContents.Model | AssetContents.Material | AssetContents.Texture,
+                CustomizationDetection.Contents(mod, Tail(1401, 103)));
 
-            // A mod that only retextures Xaela still lists the tail itself.
+            // A mod that only retextures Xaela lists the Xaela tail alone.
             File.WriteAllText(Path.Combine(root, "meta.json"), $$"""
                 {"FileVersion":4,"Name":"Xaela","DefaultData":{"Files":{"{{XaelaTexture}}":"b.tex"} } }
                 """);
             mod = PenumbraMod.Load(root);
-            Assert.Equal(new[] { Tail(1401, 3) }, CustomizationDetection.FindRoots(mod, root).ToArray());
-            Assert.True(CustomizationDetection.CanFanOut(mod, Tail(1401, 3)));
+            Assert.Equal(new[] { Tail(1401, 103) }, CustomizationDetection.FindRoots(mod, root).ToArray());
+            Assert.True(CustomizationDetection.CanFanOut(mod, Tail(1401, 103)));
         }
         finally
         {

@@ -593,7 +593,25 @@ public sealed class MdlFile
         };
         Materials = kept.ToImmutable();
         RequiresRebuild = true;
+        RemoveUnreferencedStrings();
         return removed;
+    }
+
+    /// <summary>
+    /// Drops string-table entries that no attribute, bone, material or shape names, such as a
+    /// material <see cref="RemoveUnusedMaterials"/> took out, and repeats of a name. The game
+    /// ignores them, but strict readers reject a table holding names the model does not list.
+    /// The offset tables are written afresh from the names, so each still finds its string.
+    /// </summary>
+    public void RemoveUnreferencedStrings()
+    {
+        var referenced = Attributes.Concat(Bones).Concat(Materials).Concat(Shapes.Select(s => s.Name))
+            .ToHashSet(StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var kept = Strings.Where(s => referenced.Contains(s) && seen.Add(s)).ToImmutableArray();
+        if (kept.Length == Strings.Length) return;
+        Strings = kept;
+        RequiresRebuild = true;
     }
 
     /// <summary>

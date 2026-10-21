@@ -137,16 +137,64 @@ public static partial class CustomizationPaths
     public static bool Contains(string value, CustomizationPathEndpoint endpoint)
         => FindEndpoints(value).Contains(endpoint);
 
-    /// <summary>Whether <paramref name="value"/> names a path under any of the customization's roots (see <see cref="Owner"/>).</summary>
+    /// <summary>
+    /// Whether <paramref name="value"/> names a path of the customization: one under its own root,
+    /// and for a second clan's entry (Xaela face 101, tail 103) the model it loads from the first
+    /// clan's root and the materials it takes from there (see <see cref="Owner"/>).
+    /// </summary>
     public static bool Owns(string value, CustomizationPathEndpoint endpoint)
-        => FindEndpoints(value).Any(found => found == endpoint || Owner(found) == endpoint);
+        => Occurrences(value).Any(found => Loads(found, endpoint));
+
+    /// <summary>
+    /// Whether converting <paramref name="source"/> to <paramref name="target"/> moves a path
+    /// <paramref name="value"/> names: one the source owns, except its model when both load the
+    /// same one (Raen face 1 to Xaela face 101 moves only the materials).
+    /// </summary>
+    public static bool Moves(string value, CustomizationPathEndpoint source, CustomizationPathEndpoint target)
+        => Occurrences(value).Any(found => Loads(found, source) && (found.IsMaterial || Owner(source) != Owner(target)));
+
+    /// <summary>A customization root named in a value, with what follows it: its material or texture folder, and the file name.</summary>
+    private readonly record struct Occurrence(CustomizationPathEndpoint Root, bool IsMaterial, string Name);
+
+    [GeneratedRegex(@"\G[/\\]+(?<folder>[A-Za-z]+)?[^""'\s,;]*", RegexOptions.CultureInvariant)]
+    private static partial Regex RestOfPathRegex();
+
+    private static IEnumerable<Occurrence> Occurrences(string value)
+    {
+        if (string.IsNullOrEmpty(value)) yield break;
+        foreach (Match match in EndpointRegex().Matches(value))
+        {
+            if (!TryRead(match, out var endpoint)) continue;
+            var rest = RestOfPathRegex().Match(value, match.Index + match.Length);
+            var folder = rest.Success ? rest.Groups["folder"].Value : string.Empty;
+            var path = rest.Success ? rest.Value : string.Empty;
+            // Textures anywhere under the root (common/texture/eye/ too) go with the materials.
+            yield return new Occurrence(endpoint,
+                folder.Equals("material", StringComparison.OrdinalIgnoreCase) || folder.Equals("texture", StringComparison.OrdinalIgnoreCase) ||
+                MaterialPathRegex().IsMatch(path),
+                path[(path.LastIndexOfAny(['/', '\\']) + 1)..]);
+        }
+    }
+
+    /// <summary>
+    /// Whether a path under <paramref name="found"/> belongs to <paramref name="entry"/>: everything
+    /// under its own root, and from a second clan's model root the model and the materials it
+    /// takes from there. A model under a second clan's own root is one the game never loads.
+    /// </summary>
+    private static bool Loads(Occurrence found, CustomizationPathEndpoint entry)
+        => Owner(entry) == entry
+            ? found.Root == entry
+            : found.Root == entry && found.IsMaterial ||
+              found.Root == Owner(entry) && (!found.IsMaterial || TakesFromFirstClan(entry, found.Name));
 
     /// <summary>
     /// Au Ra tails load their model from tN for both clans, but their material from tN for Raen
     /// and from t(N+100) for Xaela, a root that holds nothing else. Faces of the races whose second
     /// clan has faces of its own do the same (face 101 is the second clan's face 1): Xaela, The
     /// Lost and Veena load the model of fN and the materials of f(N+100), except that Veena take
-    /// their face skin (_fac) and The Lost their eye area (_etc) from fN.
+    /// their face skin (_fac) and The Lost their eye area (_etc) from fN. Each clan's materials
+    /// are a customization of their own (Xaela tail 103 next to Raen tail 3): converting one
+    /// moves the shared model and that clan's materials only.
     /// </summary>
     private const ushort ClanOffset = 100;
 
@@ -184,6 +232,30 @@ public static partial class CustomizationPaths
             ? endpoint with { ModelId = (ushort)(endpoint.ModelId - ClanOffset) }
             : endpoint;
 
+    /// <summary>The first clan of a race whose faces or tails have a material root for the second: Raen, Hellsguard, Rava.</summary>
+    public static string FirstClan(ushort genderRace) => genderRace switch
+    {
+        1301 or 1401 => "Raen",
+        1501 or 1601 => "Hellsguard",
+        _ => "Rava",
+    };
+
+    /// <summary>
+    /// The clan whose materials a customization is, for one of a race with a root per clan
+    /// ("Xaela" for Au Ra tail 103, "Raen" for tail 3), or null for any other.
+    /// </summary>
+    public static string? ClanOf(CustomizationPathEndpoint endpoint)
+        => Owner(endpoint) != endpoint ? SecondClan(endpoint.GenderRace)
+            : ClanMaterialEndpoint(endpoint) != null ? FirstClan(endpoint.GenderRace)
+            : null;
+
+    /// <summary>
+    /// The other clan's customization loading the same model (Raen tail 3 for Xaela tail 103 and
+    /// the other way round), or null for one no other clan shares.
+    /// </summary>
+    public static CustomizationPathEndpoint? OtherClan(CustomizationPathEndpoint endpoint)
+        => Owner(endpoint) is var owner && owner != endpoint ? owner : ClanMaterialEndpoint(endpoint);
+
     /// <summary>
     /// The part of the name (after its first 13 characters) a second clan's face loads from the
     /// first clan's root instead of its own: Veena their face skin, The Lost their eye area.
@@ -194,42 +266,56 @@ public static partial class CustomizationPaths
             : clanRoot.GenderRace is 1501 or 1601 ? "_etc"
             : null;
 
-    /// <summary>
-    /// The source roots a conversion moves: the customization itself, and its second clan's
-    /// material root when the target has one to receive it. Without one (another race, or Viera
-    /// ears) nothing loads that material any more, so it stays behind.
-    /// </summary>
-    public static IReadOnlyList<CustomizationPathEndpoint> MovedRoots(CustomizationPathEndpoint source,
-        CustomizationPathEndpoint target)
-        => ClanMaterialEndpoint(source) is { } clan && ClanMaterialEndpoint(target) != null
-            ? [source, clan]
-            : [source];
+    /// <summary>Whether a second clan's <paramref name="entry"/> loads the material <paramref name="name"/> from the first clan's root.</summary>
+    private static bool TakesFromFirstClan(CustomizationPathEndpoint entry, string name)
+        => Owner(entry) != entry && FirstClanPart(entry) is { } part && name.Length > IdentityLength &&
+           name.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase) &&
+           name[IdentityLength..].StartsWith(part, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Where each clan of the target loads its material from, paired with the root the source's
-    /// same clan loads it from. A target with a second clan root (Au Ra tails, and Au Ra, Hrothgar
-    /// and Viera faces) also gets one; a source without one gives that clan its only material.
+    /// Where each clan of the target loads its material from, paired with the root the source
+    /// loads it from: the target itself, and the other clan loading the same model, which needs
+    /// the material where the game has none of its own (the caller checks).
     /// </summary>
     public static IReadOnlyList<(CustomizationPathEndpoint Source, CustomizationPathEndpoint Target)> MaterialClans(
         CustomizationPathEndpoint source, CustomizationPathEndpoint target)
-        => ClanMaterialEndpoint(target) is { } clan
-            ? [(source, target), (ClanMaterialEndpoint(source) ?? source, clan)]
+        => OtherClan(target) is { } other
+            ? [(source, target), (source, other)]
             : [(source, target)];
+
+    [GeneratedRegex(@"[/\\](?:material|texture)[/\\]|\.(?:mtrl|tex)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex MaterialPathRegex();
 
     /// <summary>
     /// Rewrites only canonical customization roots matching <paramref name="source"/>.
     /// A race or model token elsewhere in the value is deliberately left untouched.
     /// Material paths are resolved through their material root (shared hair roots, the
     /// shared Hrothgar tail root) and receive the target's material folder layout.
-    /// An Au Ra tail's Xaela material root moves to the target's when it has one.
+    /// For a clan's customization (see <see cref="ClanOffset"/>) the model goes from the source's
+    /// model root to the target's, and the materials and textures from the source's own root to
+    /// the target's; nothing of the other clan moves.
     /// </summary>
     public static string Rewrite(string value, CustomizationPathEndpoint source,
         CustomizationPathEndpoint target)
+        => RewriteClans(value, source, target, RewriteRoot);
+
+    /// <summary>
+    /// <paramref name="rewrite"/> from source to target, with the roots of the model or of the
+    /// materials when they differ (see <see cref="Rewrite"/>).
+    /// </summary>
+    private static string RewriteClans(string value, CustomizationPathEndpoint source, CustomizationPathEndpoint target,
+        Func<string, CustomizationPathEndpoint, CustomizationPathEndpoint, string> rewrite)
     {
-        var rewritten = RewriteRoot(value, source, target);
-        return ClanMaterialEndpoint(source) is { } sourceXaela && ClanMaterialEndpoint(target) is { } targetXaela
-            ? RewriteRoot(rewritten, sourceXaela, targetXaela)
-            : rewritten;
+        if (Owner(source) == source && Owner(target) == target) return rewrite(value, source, target);
+        if (!MaterialPathRegex().IsMatch(value)) return rewrite(value, Owner(source), Owner(target));
+        var name = value[(value.LastIndexOfAny(['/', '\\']) + 1)..];
+        var to = TakesFromFirstClan(target, name) ? Owner(target) : target;
+        // Veena's face skin and The Lost's eye area are named after the first clan's root, where they load from.
+        var from = TakesFromFirstClan(source, name) && !Contains(value, source) &&
+                   !name.Contains(Identity(source), StringComparison.OrdinalIgnoreCase)
+            ? Owner(source)
+            : source;
+        return rewrite(value, from, to);
     }
 
     private static string RewriteRoot(string value, CustomizationPathEndpoint source,
@@ -295,12 +381,8 @@ public static partial class CustomizationPaths
     public static string RewriteOwnedReference(string value, CustomizationPathEndpoint source,
         CustomizationPathEndpoint target)
     {
-        // Read as the source's model names it; the second clan's pass below only moves its own root.
-        value = AsGameReadsIt(value, source);
-        var rewritten = RewriteOwnedRoot(value, source, target);
-        return ClanMaterialEndpoint(source) is { } sourceXaela && ClanMaterialEndpoint(target) is { } targetXaela
-            ? RewriteOwnedRoot(rewritten, sourceXaela, targetXaela)
-            : rewritten;
+        // Read as the source's model names it.
+        return RewriteClans(AsGameReadsIt(value, source), source, target, RewriteOwnedRoot);
     }
 
     private static string RewriteOwnedRoot(string value, CustomizationPathEndpoint source,

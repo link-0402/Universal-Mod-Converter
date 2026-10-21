@@ -363,4 +363,63 @@ internal static class TestAssets
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4), checked((ushort)bytes.Length));
         return bytes;
     }
+
+    /// <summary>
+    /// A human.pbd with Midlander men at the root and <paramref name="child"/> below them, whose
+    /// deformer moves <paramref name="bone"/> by <paramref name="matrix"/>.
+    /// </summary>
+    public static byte[] CreatePbd(ushort child, string bone, System.Numerics.Matrix4x4 matrix)
+    {
+        const int tree = 28, data = 48;
+        var bytes = new byte[data + 56 + Encoding.UTF8.GetByteCount(bone) + 1];
+        BinaryPrimitives.WriteInt32LittleEndian(bytes, 2);
+        WriteEntry(0, 101, 0, 0);
+        WriteEntry(1, child, 1, data);
+        WriteTree(tree, -1, 1, -1, 0);
+        WriteTree(tree + 8, 0, -1, -1, 1);
+
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(data), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(data + 4), 56);
+        // Three rows of a column-vector matrix: the transpose of System.Numerics' row vectors.
+        float[] rows =
+        [
+            matrix.M11, matrix.M21, matrix.M31, matrix.M41,
+            matrix.M12, matrix.M22, matrix.M32, matrix.M42,
+            matrix.M13, matrix.M23, matrix.M33, matrix.M43,
+        ];
+        for (var i = 0; i < rows.Length; i++) BinaryPrimitives.WriteSingleLittleEndian(bytes.AsSpan(data + 8 + i * 4), rows[i]);
+        Encoding.UTF8.GetBytes(bone).CopyTo(bytes, data + 56);
+        return bytes;
+
+        void WriteEntry(int index, ushort race, short treeIndex, int dataOffset)
+        {
+            var offset = 4 + index * 12;
+            BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offset), race);
+            BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(offset + 2), treeIndex);
+            BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset + 4), dataOffset);
+            BinaryPrimitives.WriteSingleLittleEndian(bytes.AsSpan(offset + 8), 1f);
+        }
+
+        void WriteTree(int offset, short parent, short firstChild, short sibling, short deformer)
+        {
+            BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(offset), parent);
+            BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(offset + 2), firstChild);
+            BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(offset + 4), sibling);
+            BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(offset + 6), deformer);
+        }
+    }
+
+    /// <summary>An extra-skeleton table (.est) with the given (set, race) → skeleton entries.</summary>
+    public static byte[] CreateEst(params (ushort SetId, ushort Race, ushort Skeleton)[] entries)
+    {
+        var bytes = new byte[4 + entries.Length * 6];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, (uint)entries.Length);
+        for (var i = 0; i < entries.Length; i++)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4 + i * 4), entries[i].SetId);
+            BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(6 + i * 4), entries[i].Race);
+            BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4 + entries.Length * 4 + i * 2), entries[i].Skeleton);
+        }
+        return bytes;
+    }
 }

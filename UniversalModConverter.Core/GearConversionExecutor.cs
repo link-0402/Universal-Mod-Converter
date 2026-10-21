@@ -99,8 +99,9 @@ public sealed record VerificationIssue(bool IsError, string Message);
 /// </summary>
 public static class GearConversionVerifier
 {
+    /// <param name="convertedRace">A race conversion: the race whose model the conversion made, which the mod must provide.</param>
     public static List<VerificationIssue> Verify(string modDirectory, GearItem target, GearItem? source,
-        IGameFileProvider game)
+        IGameFileProvider game, ushort? convertedRace = null)
     {
         var issues = new List<VerificationIssue>();
         var mod = PenumbraMod.Load(modDirectory);
@@ -198,6 +199,9 @@ public static class GearConversionVerifier
 
         if (models == 0)
             issues.Add(new VerificationIssue(true, $"The mod provides no model for {target.Root} ({target.Slot})."));
+        else if (convertedRace is { } converted &&GamePath.Normalize(GearSlots.ModelPath(target, converted)) is var own &&
+                 !files.ContainsKey(own))
+            issues.Add(new VerificationIssue(true, $"The mod provides no {RaceNames.Name(converted)} model for {target.Root} ({own})."));
 
         if (source is { } s)
         {

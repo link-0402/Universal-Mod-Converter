@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 using UniversalModConverter.Core;
 
 /// <summary>End-to-end tests of the game-path based gear conversion on synthetic mods.</summary>
-internal static class GearConversionTests
+internal static partial class GearConversionTests
 {
     public static (string Name, Action Run)[] All =>
     [
@@ -51,6 +51,7 @@ internal static class GearConversionTests
         ("Verification follows a swap to the mod's own file", VerifyFollowsSwaps),
         ("VFX options of an item that only an option gives a VFX come along, renamed for an accessory", OptionVfxComesAlong),
         ("Extra skeletons and decals the item's metadata loads come along into a new mod", MetadataLoadedFilesComeAlong),
+        .. RaceTests,
     ];
 
     /// <summary>

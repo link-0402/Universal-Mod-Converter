@@ -48,6 +48,12 @@ public sealed partial class ConverterSession
             if (source.IsCustomization && _queue.Any(e => !CustomizationKinds.IsCustomization(e.Kind)))
                 return $"{CustomizationKinds.Get(source.Kind).DisplayName} conversions can only run together with other hair, face, " +
                        "tail, ear and skin conversions. Clear the plan first.";
+            // A race conversion keeps the item, so it does not combine with one moving the item away.
+            if (!source.IsCustomization && source.Animation == null &&
+                _queue.FirstOrDefault(e => SameGearSource(e.Task, source) && IsRaceConversion(e.Task) != IsGearRaceConversion) is { } other)
+                return IsGearRaceConversion
+                    ? $"The plan converts this item to another item ({other.Description}). Converting it to another race has to run separately."
+                    : $"The plan converts this item to another race ({other.Description}). Converting it to another item has to run separately.";
             if (source.IsCustomization && _queue.Any(e => SameCustomizationTarget(e.Task)))
                 return $"The plan already converts something into {RaceLabel(TargetRace)} {TargetOptionLabel}; " +
                        "two conversions cannot add the same target.";
@@ -61,6 +67,14 @@ public sealed partial class ConverterSession
             return null;
         }
     }
+
+    /// <summary>Whether a queued gear conversion takes the same item (slot and model) as <paramref name="source"/>.</summary>
+    private static bool SameGearSource(ConversionTask task, DetectedItem source)
+        => task.Kind is AssetKind.Gear or AssetKind.Facewear && task.Slot == source.Slot && task.OldIdPadded == source.ModelIdPadded;
+
+    /// <summary>Whether a queued gear conversion moves the item's model to another race.</summary>
+    private static bool IsRaceConversion(ConversionTask task)
+        => task.Kind is AssetKind.Gear or AssetKind.Facewear && task.TargetGenderRace != null;
 
     /// <summary>Whether a queued customization conversion adds the target the cards have chosen.</summary>
     private bool SameCustomizationTarget(ConversionTask task)
@@ -187,6 +201,14 @@ public sealed partial class ConverterSession
                     Name   = $"{CustomizationKinds.Get(TargetCustomizationKind).DisplayName} {TargetCustomizationId:D4}",
                     Detail = RaceLabel(TargetRace),
                 };
+        if (IsGearRaceConversion)
+            return new ConversionSide
+            {
+                Icon   = source.Icon,
+                Kind   = source.Kind,
+                Name   = source.ItemName,
+                Detail = RaceLabel(GearTargetRace),
+            };
         return TargetItem is { } item
             ? new ConversionSide
             {

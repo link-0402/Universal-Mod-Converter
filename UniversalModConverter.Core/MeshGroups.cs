@@ -142,6 +142,8 @@ public static class MdlMeshGroups
         // A removed part's material would still be loaded, and for a skin part moved to an
         // accessory it cannot be found at all, which keeps the whole model from showing.
         model.RemoveUnusedMaterials();
+        // The metadata is written afresh anyway, so names another tool left unreferenced go too.
+        if (absolute.Count > 0) model.RemoveUnreferencedStrings();
         return model.Write();
     }
 }

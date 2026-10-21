@@ -105,6 +105,10 @@ public sealed class ModdedTargets
         var target = new ChangedCustomization(kind, genderRace, id);
         if (_customizationNotes.TryGetValue(target, out var note)) return note;
         var keys = _customizations.GetValueOrDefault(target);
+        // A second clan's face or tail (Xaela tail 103) loads the first clan's model (tail 3).
+        if (CustomizationPaths.Owner(new CustomizationPathEndpoint(kind, genderRace, id)) is var model && model.ModelId != id &&
+            _customizations.GetValueOrDefault(target with { Id = model.ModelId }) is { } shared)
+            keys = keys == null ? shared : [.. keys, .. shared];
         if (kind == AssetKind.Body && _customizations.GetValueOrDefault(target with { Id = 0 }) is { } skin)
             keys = keys == null ? skin : [.. keys, .. skin];
         _customizationNotes[target] = note = keys == null ? null : Describe(keys);

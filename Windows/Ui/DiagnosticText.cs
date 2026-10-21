@@ -76,7 +76,6 @@ internal static class DiagnosticText
         ["unused_material_kept"]   = "Unused material kept",
         ["accessory_part_tags"]    = "Part toggles on an accessory",
         ["part_tags_not_merged"]   = "Part tags not renamed",
-        ["xaela_material_dropped"] = "Second clan's material removed",
         ["left_ring_shared_material"] = "Left ring shares the right ring's material",
 
         // Skin and face retextures

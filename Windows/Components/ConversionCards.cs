@@ -308,6 +308,20 @@ internal sealed class ConversionCards(ConverterSession session)
 
     private void DrawGearTarget()
     {
+        if (session.CanConvertGearRace)
+        {
+            if (ImGui.RadioButton("Another item", !session.GearRaceMode)) session.SetGearRaceMode(false);
+            Widgets.Tooltip("Move the mod's models of this item to another item.");
+            ImGui.SameLine();
+            if (ImGui.RadioButton("Another race", session.GearRaceMode)) session.SetGearRaceMode(true);
+            Widgets.Tooltip("Keep the item, and reshape the model the mod has for one race for another race.");
+            if (session.GearRaceMode)
+            {
+                DrawGearRaceTarget();
+                return;
+            }
+        }
+
         var slotWidth = 120f * Theme.Scale;
         ImGui.SetNextItemWidth(slotWidth);
         using (var combo = ImRaii.Combo("##TargetSlot", SlotInfo.DisplayLabelMap[session.TargetSlot]))
@@ -388,6 +402,59 @@ internal sealed class ConversionCards(ConverterSession session)
             ImGui.SameLine(ImGui.GetContentRegionMax().X - ImGui.CalcTextSize(idText).X);
             Widgets.Muted(idText);
         });
+    }
+
+    /// <summary>
+    /// A gear race conversion: the race whose model the mod has (when it has several) and the
+    /// race to give it to. The item stays the same, so there is nothing else to pick.
+    /// </summary>
+    private void DrawGearRaceTarget()
+    {
+        var labelWidth = 70f * Theme.Scale;
+        var sources = session.GearSourceRaces;
+
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("From");
+        ImGui.SameLine(labelWidth);
+        if (sources.Count == 1)
+        {
+            ImGui.AlignTextToFramePadding();
+            ImGui.TextUnformatted(RaceNames.Describe(session.GearSourceRace));
+        }
+        else
+        {
+            ImGui.SetNextItemWidth(-1);
+            using var combo = ImRaii.Combo("##GearSourceRace", RaceNames.Describe(session.GearSourceRace));
+            if (combo.Success)
+                foreach (var race in sources)
+                    if (ImGui.Selectable(RaceNames.Describe(race), race == session.GearSourceRace))
+                        session.SetGearSourceRace(race);
+        }
+        Widgets.Tooltip("The races the mod has a model of its own for.");
+
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("To");
+        ImGui.SameLine(labelWidth);
+        ImGui.SetNextItemWidth(-1);
+        using (var combo = ImRaii.Combo("##GearTargetRace", RaceNames.Describe(session.GearTargetRace)))
+        {
+            if (combo.Success)
+                foreach (var race in session.GearTargetRaces)
+                {
+                    var own = sources.Contains(race);
+                    var label = own ? $"{RaceNames.Describe(race)} (the mod has one)" : RaceNames.Describe(race);
+                    if (ImGui.Selectable($"{label}##{race}", race == session.GearTargetRace)) session.SetGearTargetRace(race);
+                }
+        }
+        Widgets.Tooltip("Lalafell convert only among Lalafell.");
+
+        ImGui.Spacing();
+        Widgets.MutedWrapped(
+            $"The {RaceNames.Name(session.GearSourceRace)} model is reshaped for {RaceNames.Name(session.GearTargetRace)} " +
+            "and keeps its materials and textures. The race gets the item's EQDP entry, so the game loads its new model" +
+            (SlotInfo.ToGearSlot(session.TargetSlot) == GearSlot.Head
+                ? ", and the EST entry naming the extra skeleton its physics bones need."
+                : "."));
     }
 
     /// <summary>
@@ -608,10 +675,12 @@ internal sealed class ConversionCards(ConverterSession session)
         if (chosen != null)
             Widgets.ModdedBadge(session.Modded.Customization(session.TargetCustomizationKind, session.TargetRace, chosen.Id));
 
+        var clanNote = ClanNote(source);
         var note = source.Kind is AssetKind.Tail or AssetKind.VieraEar
-            ? "Tails and Viera ears can convert into each other." + XaelaNote(source)
-            : null;
-        var noteHeight = note == null ? 0 : ImGui.GetTextLineHeightWithSpacing() * 2;
+            ? "Tails and Viera ears can convert into each other." + clanNote
+            : clanNote.Length > 0 ? clanNote.TrimStart() : null;
+        var noteHeight = note == null ? 0
+            : ImGui.CalcTextSize(note, false, ImGui.GetContentRegionAvail().X).Y + ImGui.GetStyle().ItemSpacing.Y * 2;
 
         using (var grid = ImRaii.Child("##IdGrid", new Vector2(-1, -noteHeight), true))
         {
@@ -643,19 +712,21 @@ internal sealed class ConversionCards(ConverterSession session)
         if (note != null) Widgets.MutedWrapped(note);
     }
 
-    /// <summary>What happens to the Xaela material root of an Au Ra tail on either side, or nothing.</summary>
-    private string XaelaNote(DetectedItem source)
+    /// <summary>
+    /// What the other clan sharing the model gets, on either side (Au Ra tails, and Au Ra, Hrothgar
+    /// and Viera faces), or nothing.
+    /// </summary>
+    private string ClanNote(DetectedItem source)
     {
         if (source.GenderRace is not { } sourceRace || !ushort.TryParse(source.ModelIdPadded, out var sourceId)) return string.Empty;
-        var sourceXaela = CustomizationPaths.ClanMaterialEndpoint(new CustomizationPathEndpoint(source.Kind, sourceRace, sourceId));
-        var targetXaela = CustomizationPaths.ClanMaterialEndpoint(new CustomizationPathEndpoint(
-            session.TargetCustomizationKind, session.TargetRace, (ushort)session.TargetCustomizationId));
-        return (sourceXaela, targetXaela) switch
-        {
-            ({ } from, { } to) => $" Its Xaela material (tail {from.ModelId}) moves to tail {to.ModelId}.",
-            ({ } from, null)   => $" Its Xaela material (tail {from.ModelId}) is left out: the target has none.",
-            (null, { } to)     => $" Xaela get the same material, under tail {to.ModelId}.",
-            _                  => string.Empty,
-        };
+        var from = new CustomizationPathEndpoint(source.Kind, sourceRace, sourceId);
+        var to = new CustomizationPathEndpoint(session.TargetCustomizationKind, session.TargetRace, (ushort)session.TargetCustomizationId);
+        string Name(CustomizationPathEndpoint e) => $"{CustomizationPaths.ClanOf(e)} {CustomizationKinds.Get(e.Kind).DisplayName.ToLowerInvariant()} {e.ModelId}";
+        var note = string.Empty;
+        if (CustomizationPaths.OtherClan(from) is { } sourceOther)
+            note += $" Only the {CustomizationPaths.ClanOf(from)} materials convert; the {Name(sourceOther)} ones are an entry of their own.";
+        if (CustomizationPaths.OtherClan(to) is { } targetOther)
+            note += $" {Name(targetOther)} loads the same model and gets these materials only where the game has none of its own.";
+        return note;
     }
 }
