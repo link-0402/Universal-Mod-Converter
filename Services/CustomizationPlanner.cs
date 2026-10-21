@@ -358,8 +358,23 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                     var ordered = keys.OrderSourceMaterialPaths(sourcePaths);
                     var sourcePath = ordered.FirstOrDefault(p => resources.Files.ContainsKey(p) || resources.FileSwaps.ContainsKey(p))
                                      ?? ordered[0];
+                    // A model both clans load may name a material the mod gives only one of them (Xaela
+                    // horns, say) and the game neither: that clan's copy is the only one there is.
+                    var otherClan = sourceClan == source ? CustomizationPaths.ClanMaterialEndpoint(source) : source;
+                    var borrowed = false;
+                    if (otherClan != null && !resources.Files.ContainsKey(sourcePath) && !resources.FileSwaps.ContainsKey(sourcePath) &&
+                        CustomizationPaths.MaterialPaths(otherClan.Value, material)
+                            .FirstOrDefault(p => resources.Files.ContainsKey(p) || resources.FileSwaps.ContainsKey(p)) is { } other &&
+                        gameData?.GetRawFileBytes(sourcePath) == null)
+                    {
+                        borrowed = true;
+                        task.Diagnostics.Add(new PlanDiagnostic("material_from_other_clan",
+                            $"'{Path.GetFileName(file)}' loads '{sourcePath}', which neither the mod nor the game has; " +
+                            $"the target gets the mod's '{other}' there instead.", false));
+                        sourcePath = other;
+                    }
                     // Modded materials are already discovered and rewritten with their textures.
-                    if (resources.Files.ContainsKey(sourcePath)) continue;
+                    if (resources.Files.ContainsKey(sourcePath) && !borrowed) continue;
                     var targetPaths = CustomizationPaths.MaterialPaths(targetClan, renamed);
                     if (!copies.TryGetValue(sourcePath, out var targetPath))
                     {

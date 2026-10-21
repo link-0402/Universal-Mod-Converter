@@ -51,6 +51,7 @@ internal static class DiagnosticText
         ["rewrite_failed"]         = "File could not be rewritten",
         ["missing_material"]       = "Material missing",
         ["missing_material_dependency"] = "Material dependency missing",
+        ["material_from_other_clan"] = "Material taken from the other clan",
         ["material_animation"]     = "Material animation",
         ["unreadable_resource"]    = "File unreadable",
         ["malformed_mdl"]          = "Model file malformed",
