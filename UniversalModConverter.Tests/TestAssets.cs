@@ -153,10 +153,11 @@ internal static class TestAssets
     /// An MDL v6 with one LOD and one single-triangle mesh per material (in order). Mesh 0's
     /// submesh carries the attribute "atr_test"; <paramref name="shapeMesh"/> gets a shape.
     /// <paramref name="attributes"/> replaces "atr_test", and <paramref name="partMasks"/> gives
-    /// every part (submesh, mesh by mesh) its own attribute mask.
+    /// every part (submesh, mesh by mesh) its own attribute mask. <paramref name="shapeNameUncounted"/>
+    /// leaves the shape name out of the string count and pads the table, as one hair mod does.
     /// </summary>
     public static byte[] CreateMultiMeshMdl(string[] materials, int? shapeMesh = null, int partsPerMesh = 1,
-        string[]? attributes = null, uint[]? partMasks = null)
+        string[]? attributes = null, uint[]? partMasks = null, bool shapeNameUncounted = false)
     {
         attributes ??= ["atr_test"];
         var meshCount = materials.Length;
@@ -190,7 +191,8 @@ internal static class TestAssets
                 offsets.Add((uint)text.Length);
                 text.Write(Encoding.UTF8.GetBytes(value + "\0"));
             }
-            writer.Write((ushort)strings.Count); writer.Write((ushort)0);
+            if (shapeNameUncounted) text.Write(new byte[8]);
+            writer.Write((ushort)(strings.Count - (shapeNameUncounted ? 1 : 0))); writer.Write((ushort)0);
             writer.Write((uint)text.Length); writer.Write(text.ToArray());
         }
         uint Offset(string value) => offsets[strings.IndexOf(value)];

@@ -242,13 +242,19 @@ public sealed class MdlFile
         var stringList = ImmutableArray.CreateBuilder<string>(stringCount);
         var stringOffsets = new Dictionary<uint, string>();
         var stringPosition = 0;
-        for (var i = 0; i < stringCount; i++)
+        // Some exporters leave strings out of the count (one hair mod names its shape that way);
+        // the game reads names by offset, so those count too. Zero padding ends the table.
+        for (var i = 0; i < stringCount || (stringPosition < stringData.Length && stringData[stringPosition] != 0); i++)
         {
             if (stringPosition >= stringData.Length)
                 throw new InvalidDataException("MDL string table count exceeds its data.");
             var end = stringPosition;
             while (end < stringData.Length && stringData[end] != 0) end++;
-            if (end == stringData.Length) throw new InvalidDataException("MDL string table is unterminated.");
+            if (end == stringData.Length)
+            {
+                if (i >= stringCount) break;
+                throw new InvalidDataException("MDL string table is unterminated.");
+            }
             var value = Encoding.UTF8.GetString(stringData[stringPosition..end]);
             stringList.Add(value);
             stringOffsets.Add((uint)stringPosition, value);

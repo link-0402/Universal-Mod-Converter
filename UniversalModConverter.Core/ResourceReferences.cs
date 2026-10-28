@@ -274,9 +274,12 @@ public static partial class ResourceReferences
         var offsets = new List<int>(count);
         var position = dataStart;
         var end = dataStart + (int)size;
-        for (var i = 0; i < count && position < end; i++)
+        // Some exporters leave strings out of the count (one hair mod names its shape that way);
+        // the game reads names by offset, so those count too. Zero padding ends the table.
+        for (var i = 0; position < end && (i < count || data[position] != 0); i++)
         {
             var terminator = Array.IndexOf(data, (byte)0, position, end - position);
+            if (terminator < 0 && i >= count) break;
             if (terminator < 0) throw new InvalidDataException("MDL string table is unterminated.");
             strings.Add(Encoding.UTF8.GetString(data, position, terminator - position));
             offsets.Add(position);

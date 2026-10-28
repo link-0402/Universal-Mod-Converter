@@ -60,6 +60,7 @@ var tests = new (string Name, Action Run)[]
     ("MDL mesh removal drops the removed mesh's shape", TestMeshRemovalDropsShape),
     ("MDL mesh removal drops strings nothing references", TestMeshRemovalDropsOrphanedStrings),
     ("MDL mesh removal guards", TestMeshRemovalGuards),
+    ("MDL material rename with a shape name the string count leaves out", TestMdlRenameWithUncountedShapeName),
     ("Customization descriptors restrict races", TestCustomizationDescriptors),
     ("Customization targets exclude Lalafell and cross-gender faces", TestCustomizationTargets),
     ("Canonical customization path rewriting", TestCustomizationPaths),
@@ -806,6 +807,26 @@ static void TestMeshRemovalDropsOrphanedStrings()
     True(ResourceReferences.ReadMdlMaterials(output).SequenceEqual(parsed.Materials));
     Equal("/mt_c0201e0100_top_b.mtrl", parsed.Materials[parsed.Meshes[1].MaterialIndex]);
     Equal("atr_test", MdlMeshGroups.Describe(output)[0].Attributes.Single());
+}
+
+static void TestMdlRenameWithUncountedShapeName()
+{
+    // As in one hair mod: the shape's name sits behind the strings the table's count covers.
+    var bytes = TestAssets.CreateMultiMeshMdl(ThreeMaterials(), shapeMesh: 2, shapeNameUncounted: true);
+    var original = MdlFile.Read(bytes);
+    const string renamed = "/mt_c0201e0100_top_a_longer_name.mtrl";
+    var output = ResourceReferences.Rewrite("model.mdl", bytes,
+        new Dictionary<string, string> { [original.Materials[0]] = renamed });
+    var parsed = MdlFile.Read(output);
+
+    Equal(renamed, parsed.Materials[0]);
+    True(parsed.Materials.Skip(1).SequenceEqual(original.Materials.Skip(1)));
+    True(parsed.Attributes.SequenceEqual(original.Attributes));
+    True(parsed.Bones.SequenceEqual(original.Bones));
+    True(parsed.Shapes.Select(s => s.Name).SequenceEqual(original.Shapes.Select(s => s.Name)));
+    True(bytes.AsSpan(original.DataOffset).SequenceEqual(output.AsSpan(parsed.DataOffset)));
+    Equal("shp_test", parsed.Shapes.Single().Name);
+    Equal("shp_test", MdlFile.Read(parsed.WriteRebuilt()).Shapes.Single().Name);
 }
 
 static void TestMeshRemovalGuards()
