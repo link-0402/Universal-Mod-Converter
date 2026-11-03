@@ -16,6 +16,8 @@ internal static partial class GearConversionTests
         ("MDL v5 same-length material rewrite", MdlV5Rewrite),
         ("v4 new mod: cross-slot conversion with vanilla dependencies", NewModCrossSlotV4),
         ("In place: shared resources are kept, exclusive ones move", InPlaceSameSlot),
+        ("In place: a texture named for no slot moves, one named for another slot stays", InPlaceUntaggedTextureMoves),
+        ("In place: a material another slot's game model loads stays, with its textures", InPlaceSharedMaterialKeepsTextures),
         ("Add to mod: the original keeps working beside the converted item", AddToModKeepsSource),
         ("Add to mod with its own option: the new files and metadata go into it", OwnOptionTakesTheNewFiles),
         ("Add to mod with its own option: models that differ per option stay in them", OwnOptionLeavesVariantsInTheirOptions),
@@ -961,6 +963,98 @@ internal static partial class GearConversionTests
         var issues = GearConversionVerifier.Verify(output.Path, request.Target, request.Source, game);
         Assert.True(issues.Count == 0, string.Join("; ", issues.Select(i => i.Message)));
         Assert.True(!File.Exists(Path.Combine(output.Path, "stuff", "legs.mdl")));
+    }
+
+    /// <summary>
+    /// What stays behind is what something else loads, whatever the file is called: a part's
+    /// <c>c0201e0100_lining_n</c> and a misnamed <c>_glv_</c> texture nothing else loads move, a
+    /// texture the game's own legs material loads stays.
+    /// </summary>
+    private static void InPlaceUntaggedTextureMoves()
+    {
+        using var mod = new TempDir();
+        const string root = "chara/equipment/e0100";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Untagged",
+             "DefaultData":{
+              "Files":{
+               "{{{root}}}/model/c0201e0100_top.mdl":"chara\\equipment\\e0100\\model\\c0201e0100_top.mdl",
+               "{{{root}}}/material/v0001/mt_c0201e0100_top_a.mtrl":"chara\\equipment\\e0100\\material\\v0001\\mt_c0201e0100_top_a.mtrl",
+               "{{{root}}}/texture/v01_c0201e0100_lining_n_123.tex":"chara\\equipment\\e0100\\texture\\v01_c0201e0100_lining_n_123.tex",
+               "{{{root}}}/texture/v01_c0201e0100_dwn_n.tex":"chara\\equipment\\e0100\\texture\\v01_c0201e0100_dwn_n.tex",
+               "{{{root}}}/texture/v01_c0201e0100_glv_s.tex":"chara\\equipment\\e0100\\texture\\v01_c0201e0100_glv_s.tex"},
+             "FileSwaps":{},"Manipulations":[]}}
+            """);
+        mod.File("chara/equipment/e0100/model/c0201e0100_top.mdl", TestAssets.CreateMdl(material: "/mt_c0201e0100_top_a.mtrl"));
+        mod.File("chara/equipment/e0100/material/v0001/mt_c0201e0100_top_a.mtrl",
+            Mtrl($"{root}/texture/v01_c0201e0100_lining_n_123.tex", $"{root}/texture/v01_c0201e0100_dwn_n.tex",
+                $"{root}/texture/v01_c0201e0100_glv_s.tex"));
+        mod.File("chara/equipment/e0100/texture/v01_c0201e0100_lining_n_123.tex", [1]);
+        mod.File("chara/equipment/e0100/texture/v01_c0201e0100_dwn_n.tex", [2]);
+        mod.File("chara/equipment/e0100/texture/v01_c0201e0100_glv_s.tex", [3]);
+
+        var game = StandardGame();
+        game.Files[$"{root}/model/c0201e0100_dwn.mdl"] = TestAssets.CreateMdl(material: "/mt_c0201e0100_dwn_a.mtrl");
+        game.Files[$"{root}/material/v0001/mt_c0201e0100_dwn_a.mtrl"] = Mtrl($"{root}/texture/v01_c0201e0100_dwn_n.tex");
+        var request = new GearConversionRequest(new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Body, 300, 1),
+            ConversionOutputMode.InPlace);
+        var plan = new GearConversionPlanner(game).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        GearConversionExecutor.ApplyInPlace(plan, mod.Path);
+
+        var files = PenumbraMod.Load(mod.Path).Default.FileEntries().ToDictionary(e => e.Key, e => e.Local);
+        Assert.True(!files.ContainsKey($"{root}/texture/v01_c0201e0100_lining_n_123.tex"), "the untagged texture's source path is gone");
+        Assert.Equal("chara\\equipment\\e0300\\texture\\v01_c0201e0300_lining_n_123.tex",
+            files["chara/equipment/e0300/texture/v01_c0201e0300_lining_n_123.tex"]);
+        Assert.True(File.Exists(Path.Combine(mod.Path, "chara", "equipment", "e0300", "texture", "v01_c0201e0300_lining_n_123.tex")));
+        Assert.True(!File.Exists(Path.Combine(mod.Path, "chara", "equipment", "e0100", "texture", "v01_c0201e0100_lining_n_123.tex")));
+        Assert.True(!files.ContainsKey($"{root}/texture/v01_c0201e0100_glv_s.tex"), "a texture nothing else loads moves, whatever its name");
+        Assert.True(files.Keys.Any(k => k.StartsWith("chara/equipment/e0300/texture/v01_c0201e0300_glv", StringComparison.Ordinal)));
+        // The game's legs material loads this one: kept, and added for the target.
+        Assert.True(files.ContainsKey($"{root}/texture/v01_c0201e0100_dwn_n.tex"), "the texture the game's legs load stays");
+        Assert.True(files.ContainsKey("chara/equipment/e0300/texture/v01_c0201e0300_dwn_top_n.tex"));
+
+        var issues = GearConversionVerifier.Verify(mod.Path, request.Target, null, game);
+        Assert.True(issues.Count == 0, string.Join("; ", issues.Select(i => i.Message)));
+    }
+
+    /// <summary>
+    /// The game's left ring models load the right ring's material, so a right ring's material
+    /// stays where it is, unchanged, and so must every texture it still loads.
+    /// </summary>
+    private static void InPlaceSharedMaterialKeepsTextures()
+    {
+        using var mod = new TempDir();
+        const string root = "chara/accessory/a0100";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Ring",
+             "DefaultData":{
+              "Files":{
+               "{{{root}}}/model/c0201a0100_rir.mdl":"ring.mdl",
+               "{{{root}}}/material/v0001/mt_c0201a0100_rir_a.mtrl":"ring.mtrl",
+               "{{{root}}}/texture/v01_c0201a0100_rir_n.tex":"ring.tex"},
+             "FileSwaps":{},"Manipulations":[]}}
+            """);
+        mod.File("ring.mdl", TestAssets.CreateMdl(material: "/mt_c0201a0100_rir_a.mtrl"));
+        mod.File("ring.mtrl", Mtrl($"{root}/texture/v01_c0201a0100_rir_n.tex"));
+        mod.File("ring.tex", [1]);
+
+        var game = new FakeGame();
+        game.Files[$"{root}/a0100.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+        game.Files[$"{root}/model/c0201a0100_ril.mdl"] = TestAssets.CreateMdl(material: "/mt_c0201a0100_rir_a.mtrl");
+        var request = new GearConversionRequest(new GearItem(GearSlot.RFinger, 100, 1), new GearItem(GearSlot.RFinger, 300, 1),
+            ConversionOutputMode.InPlace);
+        var plan = new GearConversionPlanner(game).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        GearConversionExecutor.ApplyInPlace(plan, mod.Path);
+
+        var files = PenumbraMod.Load(mod.Path).Default.FileEntries().ToDictionary(e => e.Key, e => e.Local);
+        Assert.Equal("ring.mtrl", files[$"{root}/material/v0001/mt_c0201a0100_rir_a.mtrl"]);
+        Assert.Equal("ring.tex", files[$"{root}/texture/v01_c0201a0100_rir_n.tex"]);
+        Assert.True(files.ContainsKey("chara/accessory/a0300/material/v0001/mt_c0201a0300_rir_a.mtrl"));
+        Assert.True(files.ContainsKey("chara/accessory/a0300/texture/v01_c0201a0300_rir_n.tex"));
+        Assert.Equal(new[] { $"{root}/texture/v01_c0201a0100_rir_n.tex" },
+            MtrlFile.ReadTexturePaths(File.ReadAllBytes(Path.Combine(mod.Path, "ring.mtrl"))).ToArray());
     }
 
     private static void InPlaceSameSlot()

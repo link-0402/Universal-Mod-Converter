@@ -991,7 +991,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                     _plan.Changes.Add(new GearPlanChange("Game path", original.Label, key,
                         moves ? target
                         : KeepsSource ? $"{target} (added; the original stays)"
-                        : $"{target} (the source path stays as well: another file loads it, or its name does not tie it to this slot)"));
+                        : $"{target} (the source path stays as well: another file of the mod or the game loads it)"));
                 }
 
                 foreach (var (key, value) in original.SwapEntries())
@@ -1102,9 +1102,9 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         }
 
         /// <summary>
-        /// Source paths an in-place conversion may move away. Anything referenced by a mod
-        /// resource that is not converted, or named for a different slot (deliberately shared
-        /// part textures), stays in place so the rest of the mod keeps working.
+        /// Source paths an in-place conversion may move away. Anything a file outside the
+        /// conversion loads (one of the mod's, or the game's for the set's other slots) stays in
+        /// place so the rest of the mod and the set keep working. File names decide nothing.
         /// </summary>
         private HashSet<string> ExclusiveSourcePaths()
         {
@@ -1133,9 +1133,81 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
                 }
             }
 
-            var slotToken = $"{_srcEp.Token}_{_src.Slot.Suffix()}";
-            return _map.Keys.Where(p => !external.Contains(p) && ContainsToken(Path.GetFileName(p), slotToken))
-                .ToHashSet(StringComparer.Ordinal);
+            foreach (var path in OtherSlotLoads()) external.Add(path);
+
+            // A file that stays keeps its old references, so what it loads stays too.
+            var pending = new Queue<string>(external);
+            while (pending.Count > 0)
+            {
+                var path = pending.Dequeue();
+                if (!IsOwned(path)) continue;
+                var loads = new List<string>();
+                if (_swaps.TryGetValue(path, out var swaps)) loads.AddRange(swaps.Select(s => s.Target));
+                if (ResourceReferences.CanContainReferences(path) && !path.EndsWith(".mdl", StringComparison.Ordinal))
+                {
+                    var sources = _files.TryGetValue(path, out var files)
+                        ? files.DistinctBy(f => f.FullPath, StringComparer.OrdinalIgnoreCase).Select(f => Local(f.FullPath))
+                        : [Game(path)];
+                    foreach (var bytes in sources.OfType<byte[]>())
+                        try { loads.AddRange(ResourceReferences.Read(path, bytes)); }
+                        catch (Exception) { /* Unreadable: it loads nothing we can know of. */ }
+                }
+                foreach (var load in loads)
+                    if (external.Add(GamePath.Normalize(load))) pending.Enqueue(GamePath.Normalize(load));
+            }
+
+            return _map.Keys.Where(p => !external.Contains(p)).ToHashSet(StringComparer.Ordinal);
+        }
+
+        /// <summary>
+        /// What the set's other slots load from its folder: the materials their models (the mod's
+        /// or the game's) name in the material folders their IMC entries use, and their effects.
+        /// The source slot's own game files are left out: moving its files is the point, and the
+        /// source item falls back to the game's look.
+        /// </summary>
+        private HashSet<string> OtherSlotLoads()
+        {
+            var loads = new HashSet<string>(StringComparer.Ordinal);
+            // Head gear and facewear share their model paths, so they count as one slot.
+            var others = Enum.GetValues<GearSlot>()
+                .Where(s => s.IsAccessory() == _src.IsAccessory && s.Suffix() != _src.Slot.Suffix())
+                .DistinctBy(s => s.Suffix())
+                .Select(s => new GearItem(s, _src.SetId, 0));
+            foreach (var item in others)
+            {
+                var entries = ReadImc(item).Values.ToList();
+                foreach (var container in _mod.Containers)
+                foreach (var manipulation in container.Manipulations?.OfType<JsonObject>() ?? [])
+                    if (GearManipulations.IsImcFor(manipulation, item, null) &&
+                        ImcEntry.FromJson(manipulation["Manipulation"]?["Entry"]) is { } entry)
+                        entries.Add(entry);
+                var folders = entries.Select(e => (int)e.MaterialId).Where(id => id > 0).Distinct().ToList();
+                foreach (var vfxId in entries.Select(e => (int)e.VfxId).Where(id => id != 0).Distinct())
+                    loads.Add(GamePath.Normalize(GearSlots.VfxPath(item, vfxId)));
+
+                foreach (var race in GenderRaces.Playable)
+                {
+                    var model = GamePath.Normalize(GearSlots.ModelPath(item, race));
+                    var sources = _files.TryGetValue(model, out var files)
+                        ? files.DistinctBy(f => f.FullPath, StringComparer.OrdinalIgnoreCase).Select(f => Local(f.FullPath))
+                        : [Game(model)];
+                    foreach (var bytes in sources.OfType<byte[]>())
+                    {
+                        IReadOnlyList<string> materials;
+                        try { materials = ResourceReferences.Read(model, bytes); }
+                        catch (Exception) { continue; }
+                        foreach (var material in materials.Where(m => !ResourceReferences.IsSkinMaterial(m)))
+                        {
+                            if (material.TrimStart('/').Contains('/'))
+                                loads.Add(GamePath.Normalize(material));
+                            else
+                                foreach (var folder in folders)
+                                    loads.Add($"{_srcRoot}/material/v{folder:D4}/{GamePath.Normalize(material)}");
+                        }
+                    }
+                }
+            }
+            return loads;
         }
 
         // ── Output: new mod ─────────────────────────────────────────────────
