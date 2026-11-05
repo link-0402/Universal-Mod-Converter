@@ -242,10 +242,8 @@ public sealed partial class ConverterSession
     private readonly Dictionary<object, bool> _swapTargets = new();
 
     /// <summary>
-    /// Whether a swap to the emote writes anything: the game has an animation of its own at one of
-    /// the destinations for one of the source's races at least. Every other race plays the file of
-    /// a race it inherits from, and the game never asks for one of its own, so nothing is written
-    /// for it.
+    /// Whether a swap to the emote writes anything: the game has a file to load, the race's own or a
+    /// race's it borrows from, at one of the destinations for one of the source's races at least.
     /// </summary>
     public bool CanSwapToEmote(AnimationSource source, EmoteInfo emote)
         => GameHasForSourceRaces(source, emote, () => EmoteVariant(source, emote).AllDestinations);
@@ -264,7 +262,7 @@ public sealed partial class ConverterSession
         if (_swapTargets.TryGetValue(target, out var known)) return known;
         var locations = destinations().Distinct(StringComparer.Ordinal).ToList();
         return _swapTargets[target] = source.Races.Any(race =>
-            locations.Any(location => GameData.Animations.FileExists(PapGamePath(race, location))));
+            locations.Any(location => GameData.Animations.FileExists(LoadedPapPath(race, location))));
     }
 
     public void SetAnimationSourceRace(ushort race)
@@ -310,10 +308,9 @@ public sealed partial class ConverterSession
     private IReadOnlyList<ushort> _retargetRaces = [];
 
     /// <summary>
-    /// The races a retarget can give the source's animation: those the game has a file of their
-    /// own for, at one of the locations it writes at least (see <see cref="RetargetLocations"/>).
-    /// Every other race plays the file of a race it inherits from, and the game never asks for one
-    /// of its own, so a file written for it would never load.
+    /// The races a retarget can give the source's animation: those the game has a file to load
+    /// for, their own or a race's they borrow from, at one of the locations it writes at least
+    /// (see <see cref="RetargetLocations"/>). The planner writes each race's copy to that file.
     /// </summary>
     public IReadOnlyList<ushort> RetargetRaces(AnimationSource source)
     {
@@ -324,7 +321,7 @@ public sealed partial class ConverterSession
             _retargetRacesFor = source;
             _retargetRacesKey = key;
             _retargetRaces = GenderRaces.Playable
-                .Where(race => locations.Any(location => GameData.Animations.FileExists(PapGamePath(race, location))))
+                .Where(race => locations.Any(location => GameData.Animations.FileExists(LoadedPapPath(race, location))))
                 .ToList();
         }
         return _retargetRaces;
@@ -628,22 +625,33 @@ public sealed partial class ConverterSession
 
     private string? ModdedRace(AnimationSource source, IReadOnlyList<string> locations, ushort race)
         => Modded.Paths((source, string.Join("|", locations)), race, () => locations
-            .Select(location => PapGamePath(race, location))
+            .Select(location => LoadedPapPath(race, location))
             .Where(GameData.Animations.FileExists));
 
     /// <summary>
-    /// What <paramref name="races"/> play at <paramref name="locations"/>: each race's own file
-    /// where the game has one, or else the one of the first race up its skeleton parents that has.
+    /// What <paramref name="races"/> play at <paramref name="locations"/>: the file the load table
+    /// gives each, or without one the race's own where the game has it, or else the one of the first
+    /// race up its skeleton parents that has.
     /// </summary>
     private IEnumerable<string> PlayedPaths(IReadOnlyList<ushort> races, IReadOnlyList<string> locations)
         => races.SelectMany(race => locations.Select(location =>
-                AnimationConversionPlanner.ResolvingRace(race, r => GameData.Animations.FileExists(PapGamePath(r, location)),
+            {
+                if (_plugin.Converter.LoadTable != null)
+                    return LoadedPapPath(race, location) is var loaded && GameData.Animations.FileExists(loaded) ? loaded : null;
+                return AnimationConversionPlanner.ResolvingRace(race, r => GameData.Animations.FileExists(PapGamePath(r, location)),
                     _plugin.Converter.ParentRace) is { } owner
                     ? PapGamePath(owner, location)
-                    : null))
+                    : null;
+            }))
             .OfType<string>();
 
     private static string PapGamePath(ushort race, string location) => $"chara/human/c{race:D4}/animation/{location}.pap";
+
+    /// <summary>The file the game loads when <paramref name="race"/> plays <paramref name="location"/>.</summary>
+    private string LoadedPapPath(ushort race, string location)
+        => _plugin.Converter.LoadTable is { } table && PapPath.TryParse(PapGamePath(race, location), out var path)
+            ? table.Resolve(path).GamePath
+            : PapGamePath(race, location);
 
     /// <summary>Short label for the default new mod name.</summary>
     private string AnimationNameLabel(AnimationSource source)

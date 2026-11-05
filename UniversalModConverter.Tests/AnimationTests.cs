@@ -48,6 +48,18 @@ internal static class AnimationTests
         ("Retarget adds target races, moves them in place and reports inheritance", RetargetPlan),
         ("A file of the mod's own that a retarget replaces is removed, adding to the mod or not", RetargetRemovesReplacedFile),
         ("Retarget hands the mod's skeletons over and names the source once", RetargetHandsOverSkeletons),
+        ("The load table finds whose file a race loads", LoadTableResolves),
+        ("A broken load table is refused, and the plan says so", LoadTableUnreadable),
+        ("A race that borrows gets its copy in the file it loads, built for that file's race", RetargetGoesWhereTheRaceLoads),
+        ("Races sharing a file get one copy, and the note names who else plays it", RetargetSharedFile),
+        ("A race borrowing the source's file needs no copy, and that file stays", RetargetBorrowsTheSource),
+        ("The mod's own file at a borrowed path stays unless that race was chosen", RetargetKeepsTheModsLenderFile),
+        ("A swap retargeted on the way goes where each race loads the destination", SwapRetargetGoesWhereTheRaceLoads),
+        ("A borrowing race follows the lender's slot group, or holds the file itself", SlotGroupsFollowTheLender),
+        ("An expression group holds a borrowing race's copy once, at the file it loads", ExpressionGroupGoesWhereTheRaceLoads),
+        ("A plain swap goes where the race loads the destination, as it is", SwapGoesWhereTheRaceLoads),
+        ("A race's own file at a destination wins over one that borrows it, in any order", SwapLenderWins),
+        ("A plain swap into slot groups goes where each race loads the slot", SwapSlotGroupsGoWhereTheRaceLoads),
     ];
 
     private const string Loop3 = "chara/human/c0101/animation/a0001/bt_common/emote/pose03_loop.pap";
@@ -1513,6 +1525,579 @@ internal static class AnimationTests
         {
             Variants = variants,
         };
+    }
+
+    // ── The load table ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A load table as the game lays one out, over <paramref name="names"/> in bt_common, with the
+    /// remaps given per race: (race, name) borrows (lender, set, folder).
+    /// </summary>
+    private static byte[] LoadTable(string[] names, params (ushort Race, string Name, ushort Lender)[] borrows)
+        => LoadTable(names, ["bt_common", "bt_other"], borrows.Select(b => (b.Race, b.Name, b.Lender, (ushort)1, "bt_common")).ToArray());
+
+    private static byte[] LoadTable(string[] names, string[] folders, (ushort Race, string Name, ushort Lender, ushort Set, string Folder)[] borrows)
+    {
+        const int groupSize = 4, recordSize = 168, bits = 8;
+        var folderBlob = new MemoryStream();
+        var folderAt = new Dictionary<string, int>();
+        foreach (var folder in folders)
+        {
+            folderAt[folder] = (int)folderBlob.Position;
+            folderBlob.Write(Encoding.ASCII.GetBytes(folder + "\0"));
+        }
+        var nameBlob = new MemoryStream();
+        var nameAt = new int[names.Length];
+        for (var i = 0; i < names.Length; i++)
+        {
+            nameAt[i] = (int)nameBlob.Position;
+            nameBlob.Write(Encoding.ASCII.GetBytes(names[i] + "\0"));
+        }
+
+        // One record per borrowing race, for set a0001; the groups it remaps get all four slots.
+        var races = borrows.Select(b => b.Race).Distinct().Order().ToList();
+        var groupCount = (names.Length + groupSize - 1) / groupSize;
+        var records = new MemoryStream();
+        var remaps = new MemoryStream();
+        var nextGroup = 0;
+        foreach (var race in races)
+        {
+            var mine = borrows.Where(b => b.Race == race).ToDictionary(b => Array.IndexOf(names, b.Name));
+            var record = new byte[recordSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(record, race);
+            BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(4), 1);
+            BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(6), (ushort)nextGroup);
+            for (var group = 0; group < groupCount; group++)
+            {
+                if (!mine.Keys.Any(entry => entry / groupSize == group)) continue;
+                record[bits + group / 8] |= (byte)(1 << group % 8);
+                for (var slot = 0; slot < groupSize; slot++)
+                {
+                    var remap = new byte[8];
+                    if (mine.TryGetValue(group * groupSize + slot, out var borrow))
+                    {
+                        BinaryPrimitives.WriteUInt32LittleEndian(remap, borrow.Lender);
+                        BinaryPrimitives.WriteUInt16LittleEndian(remap.AsSpan(4), borrow.Set);
+                        BinaryPrimitives.WriteUInt16LittleEndian(remap.AsSpan(6), (ushort)folderAt[borrow.Folder]);
+                    }
+                    else
+                    {
+                        // The other slots of a remapped group load the race's own file.
+                        BinaryPrimitives.WriteUInt32LittleEndian(remap, race);
+                        BinaryPrimitives.WriteUInt16LittleEndian(remap.AsSpan(4), 1);
+                        BinaryPrimitives.WriteUInt16LittleEndian(remap.AsSpan(6), (ushort)folderAt["bt_common"]);
+                    }
+                    remaps.Write(remap);
+                }
+                nextGroup++;
+            }
+            records.Write(record);
+        }
+
+        var stream = new MemoryStream();
+        var writer = new BinaryWriter(stream);
+        var entries = 16 + names.Length * 12;
+        var foldersOffset = (int)(entries + records.Length + remaps.Length);
+        writer.Write((ushort)names.Length);
+        writer.Write((ushort)races.Count);
+        writer.Write(0);
+        writer.Write(foldersOffset);
+        writer.Write(foldersOffset + (int)folderBlob.Length);
+        for (var i = 0; i < names.Length; i++)
+        {
+            writer.Write(0);
+            writer.Write(folderAt["bt_common"]);
+            writer.Write(nameAt[i]);
+        }
+        writer.Write(records.ToArray());
+        writer.Write(remaps.ToArray());
+        writer.Write(folderBlob.ToArray());
+        writer.Write(nameBlob.ToArray());
+        return stream.ToArray();
+    }
+
+    private static PapPath Pap(ushort race, string key)
+        => new(race, "a0001", "bt_common", key);
+
+    private static string[] Keys(AnimationConversionPlan plan)
+        => [.. plan.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order()];
+
+    /// <summary>The bytes a plan writes for <paramref name="gamePath"/> in the default container.</summary>
+    private static PapFile WrittenAt(AnimationConversionPlan plan, string gamePath)
+    {
+        var local = plan.Result.Default.FileEntries().Single(e => GamePath.Normalize(e.Key) == gamePath).Local;
+        return new PapFile(plan.Files.Single(f => f.Operation == LocalFileOperation.Write &&
+            GamePath.NormalizeLocal(f.Destination) == GamePath.NormalizeLocal(local)).Content!);
+    }
+
+    private const string Box = "emote/loop_emot14_loop";
+
+    /// <summary>
+    /// A game like the real one for /box: Midlander males hold the file and Au Ra males hold one the
+    /// table sends nobody to; Miqo'te females, Highlander males, Roegadyn females and Au Ra males
+    /// borrow the Midlander's, Lalafell females the Lalafell male's.
+    /// </summary>
+    private static FakeGame BorrowingGame()
+    {
+        var game = new FakeGame();
+        game.Files["chara/action/emote/loop_emot14_loop.tmb"] = ActionTimeline("cbem_box");
+        foreach (var race in new ushort[] { 101, 1101, 1301 })
+            game.Files[Pap(race, Box).GamePath] = BuildPap([("cbem_box", 0)], model: race);
+        game.Files[PapLoadTable.FilePath] = LoadTable(["emote/first", "emote/second", "emote/third", "emote/fourth", Box],
+            (301, Box, 101), (801, Box, 101), (1001, Box, 101), (1301, Box, 101), (1201, Box, 1101));
+        return game;
+    }
+
+    private static AnimationConversionRequest BoxRetarget(ConversionOutputMode mode, ushort source, params ushort[] targets)
+        => new([Pap(source, Box).Location], AnimationOperation.Retarget, mode, "test") { SourceRace = source, TargetRaces = [.. targets] };
+
+    private static void LoadTableResolves()
+    {
+        string[] names = ["emote/a", "emote/b", "emote/c", "emote/d", "emote/e", "emote/f", "emote/g", "emote/h", "emote/i"];
+        var table = new PapLoadTable(LoadTable(names, ["bt_common", "bt_other"],
+        [
+            (801, "emote/b", 101, 1, "bt_common"),
+            (801, "emote/i", 301, 7, "bt_other"),
+            (201, "emote/f", 801, 1, "bt_common"),
+        ]));
+
+        // A borrowed entry, wherever it is in its group and however many groups come before it.
+        Assert.Equal(Pap(101, "emote/b"), table.Resolve(Pap(801, "emote/b")));
+        Assert.Equal(new PapPath(301, "a0007", "bt_other", "emote/i"), table.Resolve(Pap(801, "emote/i")));
+        Assert.Equal(Pap(801, "emote/f"), table.Resolve(Pap(201, "emote/f")));
+        // Not remapped: the race's own, in a group of its own, in a remapped group, in another race's record.
+        Assert.Equal(Pap(801, "emote/e"), table.Resolve(Pap(801, "emote/e")));
+        Assert.Equal(Pap(801, "emote/a"), table.Resolve(Pap(801, "emote/a")));
+        Assert.Equal(Pap(201, "emote/b"), table.Resolve(Pap(201, "emote/b")));
+        // Not in the table: a race without a record, another set, a name it does not list, a face.
+        Assert.Equal(Pap(1401, "emote/b"), table.Resolve(Pap(1401, "emote/b")));
+        var otherSet = new PapPath(801, "a0002", "bt_common", "emote/b");
+        Assert.Equal(otherSet, table.Resolve(otherSet));
+        Assert.Equal(Pap(801, "emote/unknown"), table.Resolve(Pap(801, "emote/unknown")));
+        var face = new PapPath(801, "f0002", "nonresident", "emote/b");
+        Assert.Equal(face, table.Resolve(face));
+    }
+
+    private static void LoadTableUnreadable()
+    {
+        var whole = LoadTable(["emote/a"], (801, "emote/a", 101));
+        Assert.Throws<InvalidDataException>(() => _ = new PapLoadTable(whole[..15]));
+        Assert.Throws<InvalidDataException>(() => _ = new PapLoadTable(whole[..(whole.Length - 4)]));
+        var pastRemaps = (byte[])whole.Clone();
+        BinaryPrimitives.WriteUInt16LittleEndian(pastRemaps.AsSpan(16 + 12 + 6), 500);
+        Assert.Throws<InvalidDataException>(() => _ = new PapLoadTable(pastRemaps));
+        Assert.True(PapLoadTable.TryRead(new FakeGame(), out var none) == null && none == null, "a game without a table is no problem");
+
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Pap(101, Box).GamePath}}}":"box.pap"}}""");
+        mod.File("box.pap", BuildPap([("cbem_box", 0)], model: 101));
+        var game = BorrowingGame();
+        game.Files[PapLoadTable.FilePath] = whole[..15];
+        var plan = new AnimationConversionPlanner(game, _ => null, new FakeRetargeter())
+            .Plan(mod.Path, BoxRetarget(ConversionOutputMode.AddToMod, 101, 1301));
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "load_table_unreadable" && !d.IsBlocker), "the plan says so");
+        Assert.Equal(new[] { Pap(101, Box).GamePath, Pap(1301, Box).GamePath }.Order().ToArray(), Keys(plan));
+    }
+
+    /// <summary>
+    /// The game never asks for a borrower's own path (measured in game 2026-11-05: a mod file at
+    /// c0801's own /box or event_base_sorry path never played; one at c0101's did), so the copy
+    /// goes to the lender's path, whether or not the game has a file at the race's own.
+    /// </summary>
+    private static void RetargetGoesWhereTheRaceLoads()
+    {
+        using var mod = new TempDir();
+        var source = Pap(1101, Box).GamePath;
+        Definition(mod, $$$"""{"Files":{"{{{source}}}":"c1101\\box.pap"}}""");
+        mod.File("c1101/box.pap", BuildPap([("cbem_box", 0)], model: 1101));
+        var retargeter = new FakeRetargeter();
+        // Au Ra male has a file of its own in the game, which it never loads.
+        var plan = new AnimationConversionPlanner(BorrowingGame(), _ => null, retargeter)
+            .Plan(mod.Path, BoxRetarget(ConversionOutputMode.AddToMod, 1101, 1301));
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+
+        var lender = Pap(101, Box).GamePath;
+        Assert.Equal(new[] { lender, source }.Order().ToArray(), Keys(plan));
+        Assert.Equal((ushort)101, WrittenAt(plan, lender).ModelId);
+        Assert.Equal((ushort)101, retargeter.Requests.Single().TargetRace);
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "borrowed_file" && d.Message.Contains("Midlander")), "said where it went and why");
+        Assert.Equal(@"c0101\box.pap", GamePath.NormalizeLocal(plan.Result.Default.FileEntries().Single(e => GamePath.Normalize(e.Key) == lender).Local));
+
+        // A race with no record keeps its own path, like Lalafell male's own at the source.
+        var own = new AnimationConversionPlanner(BorrowingGame(), _ => null, new FakeRetargeter())
+            .Plan(mod.Path, BoxRetarget(ConversionOutputMode.AddToMod, 1101, 101));
+        Assert.Equal(new[] { lender, source }.Order().ToArray(), Keys(own));
+        Assert.True(!own.Diagnostics.Any(d => d.Code == "borrowed_file"), "nothing is borrowed");
+
+        // Nothing at the path it loads: nothing is written, and the race is named.
+        var missing = BorrowingGame();
+        missing.Files.Remove(lender);
+        var none = new AnimationConversionPlanner(missing, _ => null, new FakeRetargeter())
+            .Plan(mod.Path, BoxRetarget(ConversionOutputMode.AddToMod, 1101, 801));
+        Assert.Equal(new[] { source }, Keys(none));
+        Assert.True(none.Diagnostics.Any(d => d.Code == "no_race_file" && d.Message.Contains("Miqo'te")), "the race is named");
+
+        // Loading a file of another folder or set: that file plays for other requests too, so it
+        // is left alone. The game's file there is what the race plays, and the plan says so.
+        foreach (var (set, folder) in new[] { ((ushort)1, "bt_other"), ((ushort)7, "bt_common") })
+        {
+            var moved = BorrowingGame();
+            var elsewhere = new PapPath(101, $"a{set:D4}", folder, Box).GamePath;
+            moved.Files[elsewhere] = BuildPap([("cbem_box", 0)], model: 101);
+            moved.Files[PapLoadTable.FilePath] = LoadTable(["emote/first", Box], ["bt_common", "bt_other"], [(801, Box, 101, set, folder)]);
+            var skipped = new AnimationConversionPlanner(moved, _ => null, new FakeRetargeter())
+                .Plan(mod.Path, BoxRetarget(ConversionOutputMode.AddToMod, 1101, 801));
+            Assert.True(!skipped.HasBlockers, string.Join(" ", skipped.Diagnostics.Select(d => d.Message)));
+            Assert.Equal(new[] { source }, Keys(skipped));
+            Assert.True(skipped.Diagnostics.Any(d => d.Code == "moved_request" && d.Message.Contains(elsewhere)), "the file is named");
+            Assert.True(!skipped.Diagnostics.Any(d => d.Code == "inherited_by"), "nothing was written for anyone to share");
+        }
+    }
+
+    private static void RetargetSharedFile()
+    {
+        using var mod = new TempDir();
+        var source = Pap(1101, Box).GamePath;
+        Definition(mod, $$$"""{"Files":{"{{{source}}}":"c1101\\box.pap"}}""");
+        mod.File("c1101/box.pap", BuildPap([("cbem_box", 0)], model: 1101));
+        var lender = Pap(101, Box).GamePath;
+        var retargeter = new FakeRetargeter();
+        // Any order: the lender ticked too, before or after the races that borrow from it.
+        var plan = new AnimationConversionPlanner(BorrowingGame(), _ => null, retargeter)
+            .Plan(mod.Path, BoxRetarget(ConversionOutputMode.AddToMod, 1101, 301, 101, 801));
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(1, retargeter.Calls);
+        Assert.Equal(new[] { lender, source }.Order().ToArray(), Keys(plan));
+        Assert.Equal(1, plan.Files.Count(f => f.Operation == LocalFileOperation.Write));
+        Assert.Equal(1, plan.Outputs.Count(o => o.GamePath == lender));
+        Assert.True(!plan.Diagnostics.Any(d => d.Code == "destination_replaced"), "its own copy replaces nothing");
+
+        // The table, not the skeleton parents, says who else plays it: Roegadyn female plays the
+        // Midlander file and Lalafell female the source's, whatever their parents are.
+        var note = plan.Diagnostics.Single(d => d.Code == "inherited_by" && d.Message.Contains("Midlander"));
+        Assert.True(note.Message.Contains("Roegadyn Female") && note.Message.Contains("Au Ra Male") && !note.Message.Contains("Lalafell"), note.Message);
+
+        var fresh = new AnimationConversionPlanner(BorrowingGame(), _ => null, new FakeRetargeter())
+            .Plan(mod.Path, BoxRetarget(ConversionOutputMode.NewMod, 1101, 301, 101, 801));
+        Assert.Equal(0, AnimationConversionVerifierIssues(mod, fresh));
+    }
+
+    /// <summary>Writes a new mod's plan out and verifies it.</summary>
+    private static int AnimationConversionVerifierIssues(TempDir mod, AnimationConversionPlan plan)
+    {
+        using var output = new TempDir(create: false);
+        GearConversionExecutor.WriteNewMod(plan, mod.Path, output.Path, "Verified");
+        return AnimationConversionVerifier.Verify(output.Path, plan).Count;
+    }
+
+    private static void RetargetBorrowsTheSource()
+    {
+        var source = Pap(101, Box).GamePath;
+        TempDir Mod()
+        {
+            var mod = new TempDir();
+            Definition(mod, $$$"""{"Files":{"{{{source}}}":"c0101\\box.pap"}}""");
+            mod.File("c0101/box.pap", BuildPap([("cbem_box", 0)], model: 101));
+            return mod;
+        }
+
+        // Added to this mod, Miqo'te just plays the source's file: nothing to rebuild.
+        using (var mod = Mod())
+        {
+            var retargeter = new FakeRetargeter();
+            var added = new AnimationConversionPlanner(BorrowingGame(), _ => null, retargeter)
+                .Plan(mod.Path, BoxRetarget(ConversionOutputMode.AddToMod, 101, 801));
+            Assert.True(!added.HasBlockers, string.Join(" ", added.Diagnostics.Select(d => d.Message)));
+            Assert.Equal(0, retargeter.Calls);
+            Assert.Equal(new[] { source }, Keys(added));
+            Assert.Equal(0, added.Files.Count(f => f.Operation == LocalFileOperation.Write));
+            Assert.True(added.Diagnostics.Any(d => d.Code == "borrowed_file" && d.Message.Contains("no copy")), "told");
+
+            // Converting in place "moves" the animation away from the source race, but the race
+            // it goes to loads that very file, so it stays, and nothing is deleted.
+            var moved = new AnimationConversionPlanner(BorrowingGame(), _ => null, new FakeRetargeter())
+                .Plan(mod.Path, BoxRetarget(ConversionOutputMode.InPlace, 101, 801));
+            Assert.Equal(new[] { source }, Keys(moved));
+            Assert.True(!moved.Files.Any(f => f.Operation == LocalFileOperation.Delete), "the file stays");
+
+            // Moved to a race with its own file as well: the file stays for the borrower.
+            var both = new AnimationConversionPlanner(BorrowingGame(), _ => null, new FakeRetargeter())
+                .Plan(mod.Path, BoxRetarget(ConversionOutputMode.InPlace, 101, 801, 1101));
+            Assert.Equal(new[] { source, Pap(1101, Box).GamePath }.Order().ToArray(), Keys(both));
+
+            // A new mod with the source race: the source's file is there once, as it is.
+            var copied = new AnimationConversionPlanner(BorrowingGame(), _ => null, new FakeRetargeter())
+                .Plan(mod.Path, BoxRetarget(ConversionOutputMode.NewMod, 101, 801));
+            Assert.Equal(new[] { source }, Keys(copied));
+            Assert.Equal(0, AnimationConversionVerifierIssues(mod, copied));
+
+            // A new mod without it must still hold the file the race loads.
+            var alone = new AnimationConversionPlanner(BorrowingGame(), _ => null, new FakeRetargeter())
+                .Plan(mod.Path, BoxRetarget(ConversionOutputMode.NewMod, 101, 801) with { IncludeSourceRace = false });
+            Assert.Equal(new[] { source }, Keys(alone));
+            Assert.Equal((ushort)101, WrittenAt(alone, source).ModelId);
+            Assert.Equal(0, AnimationConversionVerifierIssues(mod, alone));
+        }
+
+        // Header and path disagree: the copy for the path's race is rebuilt, with no double conversion.
+        using (var mod = new TempDir())
+        {
+            Definition(mod, $$$"""{"Files":{"{{{source}}}":"c0101\\box.pap"}}""");
+            mod.File("c0101/box.pap", BuildPap([("cbem_box", 0)], model: 801));
+            var retargeter = new FakeRetargeter();
+            var alone = new AnimationConversionPlanner(BorrowingGame(), _ => null, retargeter)
+                .Plan(mod.Path, BoxRetarget(ConversionOutputMode.NewMod, 101, 1301) with { IncludeSourceRace = false });
+            Assert.Equal((ushort)101, retargeter.Requests.Single().TargetRace);
+            Assert.Equal((ushort)101, WrittenAt(alone, source).ModelId);
+        }
+
+        // Converting in place with a face: the file has to change, so it is written and takes the key over.
+        using (var mod = Mod())
+        {
+            var game = BorrowingGame();
+            game.Files["chara/human/c0101/animation/f0002/nonresident/smile.pap"] = BuildPap([("cfxf_smile", 1)]);
+            var faced = new AnimationConversionPlanner(game, _ => null, new FakeRetargeter())
+                .Plan(mod.Path, BoxRetarget(ConversionOutputMode.InPlace, 101, 801) with { Expression = new ExpressionDonor("/Smile", Pose: "smile") });
+            Assert.True(!faced.HasBlockers, string.Join(" ", faced.Diagnostics.Select(d => d.Message)));
+            Assert.Equal(new[] { source }, Keys(faced));
+            Assert.Equal(["cfxf_smile"], TmbTimeline.Parse(WrittenAt(faced, source).Timeline(0)).Faces);
+            Assert.True(!faced.Diagnostics.Any(d => d.Code == "destination_replaced"), "the source's own key gives way without a word");
+        }
+    }
+
+    private static void RetargetKeepsTheModsLenderFile()
+    {
+        using var mod = new TempDir();
+        var source = Pap(1101, Box).GamePath;
+        var lender = Pap(101, Box).GamePath;
+        Definition(mod, $$$"""{"Files":{"{{{source}}}":"c1101\\box.pap","{{{lender}}}":"c0101\\mine.pap"}}""");
+        mod.File("c1101/box.pap", BuildPap([("cbem_box", 0)], model: 1101));
+        mod.File("c0101/mine.pap", BuildPap([("cbem_box", 0)], model: 101));
+
+        var retargeter = new FakeRetargeter();
+        var kept = new AnimationConversionPlanner(BorrowingGame(), _ => null, retargeter)
+            .Plan(mod.Path, BoxRetarget(ConversionOutputMode.AddToMod, 1101, 801));
+        Assert.Equal(0, retargeter.Calls);
+        Assert.Equal(@"c0101\mine.pap", GamePath.NormalizeLocal(kept.Result.Default.FileEntries().Single(e => GamePath.Normalize(e.Key) == lender).Local));
+        Assert.True(kept.Diagnostics.Any(d => d.Code == "borrowed_file" && d.Message.Contains("stays")), "told");
+
+        // Ticked, the lender's own is replaced as any target race's is, however the races are ordered.
+        var replaced = new AnimationConversionPlanner(BorrowingGame(), _ => null, new FakeRetargeter())
+            .Plan(mod.Path, BoxRetarget(ConversionOutputMode.AddToMod, 1101, 801, 101));
+        Assert.Equal(1, replaced.Diagnostics.Count(d => d.Code == "destination_replaced"));
+        Assert.Equal((ushort)101, WrittenAt(replaced, lender).ModelId);
+        Assert.Equal(@"c0101\box.pap", GamePath.NormalizeLocal(replaced.Result.Default.FileEntries().Single(e => GamePath.Normalize(e.Key) == lender).Local));
+
+        // A new mod holds neither of the mod's other files, so the copy goes there.
+        var fresh = new AnimationConversionPlanner(BorrowingGame(), _ => null, new FakeRetargeter())
+            .Plan(mod.Path, BoxRetarget(ConversionOutputMode.NewMod, 1101, 801));
+        Assert.Equal(new[] { lender, source }.Order().ToArray(), Keys(fresh));
+        Assert.Equal((ushort)101, WrittenAt(fresh, lender).ModelId);
+    }
+
+    private static void SwapRetargetGoesWhereTheRaceLoads()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"loop.pap"}}""");
+        mod.File("loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
+        var game = Game();
+        var pose5 = Pap(1101, "emote/pose05_loop");
+        game.Files[pose5.GamePath] = BuildPap([("cbem_pose05_1lp", 0)], model: 1101);
+        game.Files[Loop3.Replace("c0101", "c0301")] = BuildPap([("cbem_pose03_1lp", 0)], model: 301);
+        // Highlander male has its own pose 3 but borrows Lalafell male's pose 5; Roegadyn female
+        // borrows Midlander's pose 5, which the source race writes itself, and has its own pose 3.
+        game.Files[PapLoadTable.FilePath] = LoadTable(["emote/pose03_loop", "emote/pose03_start", "emote/pose05_loop"],
+            (301, "emote/pose05_loop", 1101), (1001, "emote/pose05_loop", 101));
+        var retargeter = new FakeRetargeter();
+        var request = SlotRequest(ConversionOutputMode.AddToMod, ("Standing idle 5", Loop5, Start5)) with
+        {
+            KeepOriginal = true,
+            SourceRace = 101,
+            TargetRaces = [301, 1001],
+        };
+        var plan = new AnimationConversionPlanner(game, _ => null, retargeter).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+
+        Assert.Equal(new[] { Loop3, Loop5, pose5.GamePath }.Order().ToArray(), Keys(plan));
+        var copy = WrittenAt(plan, pose5.GamePath);
+        Assert.Equal((ushort)1101, copy.ModelId);
+        Assert.Equal("cbem_pose05_1lp", copy.Entries.Single().Name);
+        Assert.Equal((ushort)1101, retargeter.Requests.Single().TargetRace);
+        Assert.Equal((ushort)101, WrittenAt(plan, Loop5).ModelId);
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "borrowed_file" && d.Message.Contains("Roegadyn Female") && d.Message.Contains("stays")),
+            "Roegadyn female plays the source race's new pose 5");
+    }
+
+    private static void SlotGroupsFollowTheLender()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"c0101\\loop.pap"}}""");
+        mod.File("c0101/loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
+        var game = Game();
+        var lala3 = Pap(1101, "emote/pose03_loop").GamePath;
+        var lala5 = Pap(1101, "emote/pose05_loop").GamePath;
+        game.Files[lala3] = BuildPap([("cbem_pose03_1lp", 0)], model: 1101);
+        game.Files[lala5] = BuildPap([("cbem_pose05_1lp", 0)], model: 1101);
+        // Lalafell female borrows both from the male; Highlander male borrows pose 5 from Midlander, pose 3 from Lalafell male.
+        game.Files[PapLoadTable.FilePath] = LoadTable(["emote/pose03_loop", "emote/pose03_start", "emote/pose05_loop"],
+            (1201, "emote/pose03_loop", 1101), (1201, "emote/pose05_loop", 1101),
+            (301, "emote/pose03_loop", 1101), (301, "emote/pose05_loop", 101));
+
+        // No group for the lender: the first race that loads it holds the file, the others follow.
+        var alone = new AnimationConversionPlanner(game, _ => null, new FakeRetargeter()).Plan(mod.Path,
+            SlotGroupRequest(ConversionOutputMode.NewMod) with { SourceRace = 101, TargetRaces = [1201, 301], IncludeSourceRace = false });
+        Assert.True(!alone.HasBlockers, string.Join(" ", alone.Diagnostics.Select(d => d.Message)));
+        var groups = alone.Result.Groups.ToDictionary(g => g.Name);
+        var highlander = SlotOptions(groups["Standing idle (Highlander Male)"]);
+        Assert.Equal(new[] { lala3 }, highlander["Standing idle 3"].Keys.ToArray());
+        Assert.Equal(new[] { Loop5 }, highlander["Standing idle 5"].Keys.ToArray());
+        var lalafell = SlotOptions(groups["Standing idle (Lalafell Female)"]);
+        Assert.True(!lalafell.ContainsKey("Standing idle 3"), "Highlander male's group holds that file");
+        Assert.Equal(new[] { lala5 }, lalafell["Standing idle 5"].Keys.ToArray());
+
+        // The lender is written for itself: only its group holds the file.
+        var withLender = new AnimationConversionPlanner(game, _ => null, new FakeRetargeter()).Plan(mod.Path,
+            SlotGroupRequest(ConversionOutputMode.NewMod) with { SourceRace = 101, TargetRaces = [1201, 1101], IncludeSourceRace = false });
+        Assert.True(!withLender.HasBlockers, string.Join(" ", withLender.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { "Standing idle (Lalafell Male)" }, withLender.Result.Groups.Select(g => g.Name).ToArray());
+        Assert.True(withLender.Diagnostics.Any(d => d.Code == "borrowed_file" && d.Message.Contains("follows the Lalafell Male group")), "told");
+    }
+
+    private static void ExpressionGroupGoesWhereTheRaceLoads()
+    {
+        using var mod = new TempDir();
+        var source = Pap(1101, Box).GamePath;
+        var lender = Pap(101, Box).GamePath;
+        Definition(mod, $$$"""{"Files":{"{{{source}}}":"c1101\\box.pap"}}""");
+        mod.File("c1101/box.pap", BuildPap([("cbem_box", 0)], model: 1101));
+        var game = BorrowingGame();
+        game.Files["chara/human/c0101/animation/f0002/nonresident/smile.pap"] = BuildPap([("cfxf_smile", 1)]);
+        game.Files["chara/human/c1101/animation/f0002/nonresident/smile.pap"] = BuildPap([("cfxf_smile", 1)]);
+        var request = new AnimationConversionRequest([Pap(1101, Box).Location], AnimationOperation.Swap, ConversionOutputMode.AddToMod, "test")
+        {
+            StaysAtSource = true,
+            KeepOriginal = true,
+            SourceRace = 1101,
+            // Both load the Midlander's; Lalafell female plays the source's.
+            TargetRaces = [801, 1301, 1201],
+            Expression = new ExpressionDonor("/Smile", Pose: "smile"),
+        };
+        var plan = new AnimationConversionPlanner(game, _ => null, new FakeRetargeter()).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+
+        Assert.Equal(new[] { lender, source }.Order().ToArray(), Keys(plan));
+        Assert.Equal(0, TmbTimeline.Parse(WrittenAt(plan, lender).Timeline(0)).Faces.Count());
+        var group = plan.Result.Groups.Single(g => g.Name == AnimationConversionPlanner.ExpressionGroupName);
+        var faced = group.Containers[1].FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray();
+        Assert.Equal(new[] { lender, source }.Order().ToArray(), faced);
+        Assert.Equal(1, plan.Outputs.Count(o => o.Scope.Contains(AnimationConversionPlanner.ExpressionGroupName) && o.GamePath == lender));
+    }
+
+    /// <summary>A swap of pose 3 to pose 5, in a game where Miqo'te females borrow pose 5 from Midlander males.</summary>
+    private static FakeGame PoseBorrowingGame()
+    {
+        var game = Game();
+        game.Files[PapLoadTable.FilePath] = LoadTable(["emote/pose03_loop", "emote/pose03_start", "emote/pose05_loop"],
+            (801, "emote/pose05_loop", 101), (1001, "emote/pose05_loop", 101));
+        return game;
+    }
+
+    private static void SwapGoesWhereTheRaceLoads()
+    {
+        using var mod = new TempDir();
+        var miqo3 = Pap(801, "emote/pose03_loop").GamePath;
+        var miqo5 = Pap(801, "emote/pose05_loop").GamePath;
+        Definition(mod, $$$"""{"Files":{"{{{miqo3}}}":"loop.pap"}}""");
+        mod.File("loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 801));
+        string Location(string path) => PapPath.TryParse(path, out var p) ? p.Location : throw new Exception(path);
+        var request = new AnimationConversionRequest([Location(miqo3)], AnimationOperation.Swap, ConversionOutputMode.InPlace, "test")
+        {
+            Variants = [new AnimationSwapVariant("Standing idle 5",
+                ImmutableDictionary<string, string>.Empty.Add(Location(miqo3), Location(miqo5)))],
+        };
+
+        // No retargeter is needed: the file goes there as it is, naming its own race, and the game converts it.
+        var plan = new AnimationConversionPlanner(PoseBorrowingGame(), _ => null, null).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { Loop5 }, Keys(plan));
+        var written = WrittenAt(plan, Loop5);
+        Assert.Equal((ushort)801, written.ModelId);
+        Assert.Equal("cbem_pose05_1lp", written.Entries.Single().Name);
+        var note = plan.Diagnostics.Single(d => d.Code == "borrowed_file");
+        Assert.True(note.Message.Contains("Roegadyn Female") && note.Message.Contains("Midlander Male"), note.Message);
+
+        // The mod's own file for the lender, not part of what moves, stays, and nothing is left to do.
+        using var kept = new TempDir();
+        Definition(kept, $$$"""{"Files":{"{{{miqo3}}}":"loop.pap","{{{Loop5}}}":"mine.pap"}}""");
+        kept.File("loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 801));
+        kept.File("mine.pap", BuildPap([("cbem_pose05_1lp", 0)], model: 101));
+        var blocked = new AnimationConversionPlanner(PoseBorrowingGame(), _ => null, null).Plan(kept.Path, request);
+        Assert.True(blocked.Diagnostics.Any(d => d.IsBlocker && d.Code == "nothing_written"), "the animation is not removed for nothing");
+        var added = new AnimationConversionPlanner(PoseBorrowingGame(), _ => null, null)
+            .Plan(kept.Path, request with { Mode = ConversionOutputMode.AddToMod, KeepOriginal = true });
+        Assert.True(!added.HasBlockers, string.Join(" ", added.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(@"mine.pap", GamePath.NormalizeLocal(added.Result.Default.FileEntries().Single(e => GamePath.Normalize(e.Key) == Loop5).Local));
+
+        // The game has nothing at the file it loads: the race is named, by what the table says.
+        var missing = PoseBorrowingGame();
+        missing.Files.Remove(Loop5);
+        var none = new AnimationConversionPlanner(missing, _ => null, null).Plan(mod.Path, request);
+        Assert.True(none.Diagnostics.Any(d => d.Code == "no_race_file" && d.Message.StartsWith("The game has no") && d.Message.Contains("Miqo'te")),
+            "the race is named");
+    }
+
+    private static void SwapLenderWins()
+    {
+        var miqo3 = Pap(801, "emote/pose03_loop").GamePath;
+        var roe3 = Pap(1001, "emote/pose03_loop").GamePath;
+        foreach (var files in new[]
+                 {
+                     // The borrowers before the lender, then after: the mod's order must not matter.
+                     $$$"""{"Files":{"{{{miqo3}}}":"m.pap","{{{roe3}}}":"r.pap","{{{Loop3}}}":"o.pap"}}""",
+                     $$$"""{"Files":{"{{{Loop3}}}":"o.pap","{{{miqo3}}}":"m.pap","{{{roe3}}}":"r.pap"}}""",
+                 })
+        {
+            using var mod = new TempDir();
+            Definition(mod, files);
+            mod.File("m.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 801));
+            mod.File("r.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 1001));
+            mod.File("o.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
+            var plan = new AnimationConversionPlanner(PoseBorrowingGame(), _ => null, null)
+                .Plan(mod.Path, SlotRequest(ConversionOutputMode.NewMod, ("Standing idle 5", Loop5, Start5)));
+            Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+            Assert.Equal(new[] { Loop5 }, Keys(plan));
+            Assert.Equal((ushort)101, WrittenAt(plan, Loop5).ModelId);
+            Assert.Equal(2, plan.Diagnostics.Count(d => d.Code == "borrowed_file" && d.Message.Contains("stays")));
+            Assert.True(!plan.Diagnostics.Any(d => d.Code == "destination_replaced"), "nothing was replaced");
+            Assert.Equal(0, AnimationConversionVerifierIssues(mod, plan));
+        }
+
+        // With no lender among them, the first borrower takes the file and the other is told.
+        using var borrowers = new TempDir();
+        Definition(borrowers, $$$"""{"Files":{"{{{miqo3}}}":"m.pap","{{{roe3}}}":"r.pap"}}""");
+        borrowers.File("m.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 801));
+        borrowers.File("r.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 1001));
+        var first = new AnimationConversionPlanner(PoseBorrowingGame(), _ => null, null)
+            .Plan(borrowers.Path, SlotRequest(ConversionOutputMode.NewMod, ("Standing idle 5", Loop5, Start5)));
+        Assert.True(!first.HasBlockers, string.Join(" ", first.Diagnostics.Select(d => d.Message)));
+        Assert.Equal((ushort)801, WrittenAt(first, Loop5).ModelId);
+        Assert.True(first.Diagnostics.Any(d => d.Code == "borrowed_file" && d.Message.Contains("Roegadyn Female") && d.Message.Contains("stays")), "told");
+        Assert.Equal(0, AnimationConversionVerifierIssues(borrowers, first));
+    }
+
+    private static void SwapSlotGroupsGoWhereTheRaceLoads()
+    {
+        using var mod = new TempDir();
+        var miqo3 = Pap(801, "emote/pose03_loop").GamePath;
+        Definition(mod, $$$"""{"Files":{"{{{miqo3}}}":"m.pap"}}""");
+        mod.File("m.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 801));
+        var game = PoseBorrowingGame();
+        game.Files[miqo3] = BuildPap([("cbem_pose03_1lp", 0)], model: 801);
+        var plan = new AnimationConversionPlanner(game, _ => null, null).Plan(mod.Path, SlotGroupRequest(ConversionOutputMode.NewMod));
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        var options = SlotOptions(plan.Result.Groups.Single());
+        Assert.Equal(new[] { miqo3 }, options["Standing idle 3"].Keys.ToArray());
+        Assert.Equal(new[] { Loop5 }, options["Standing idle 5"].Keys.ToArray());
     }
 
     private static FakeGame Game()

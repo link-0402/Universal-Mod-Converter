@@ -37,6 +37,9 @@ public sealed class ModConverterService
     /// <summary>The game's race tree, read once whichever thread asks first: planning and the window both do.</summary>
     private readonly Lazy<HumanPbd?> _pbd;
 
+    /// <summary>The game's PAP load table, read once whichever thread asks first.</summary>
+    private readonly Lazy<PapLoadTable?> _loadTable;
+
     public ModConverterService(IPluginLog log, GameDataService? gameData = null, IFramework? framework = null,
         IAnimationRetargeter? retargeter = null, Configuration? configuration = null)
     {
@@ -46,6 +49,7 @@ public sealed class ModConverterService
         _configuration = configuration;
         _gameFiles     = (IGameFileProvider?)gameData ?? NoGameFiles.Instance;
         _pbd           = new Lazy<HumanPbd?>(ReadRaceTree);
+        _loadTable     = new Lazy<PapLoadTable?>(ReadLoadTable);
         var skeletons = gameData == null || framework == null
             ? null
             : new SkeletonHierarchyService(gameData, new HavokSkeletonHierarchyReader(framework), log);
@@ -453,6 +457,16 @@ public sealed class ModConverterService
 
     /// <summary>The skeleton parent of a race in the game's race tree (human.pbd).</summary>
     public ushort? ParentRace(ushort race) => _pbd.Value?.GetParentRace(race);
+
+    /// <summary>Whose copy of an animation each race loads; null when the game's table cannot be read.</summary>
+    public PapLoadTable? LoadTable => _loadTable.Value;
+
+    private PapLoadTable? ReadLoadTable()
+    {
+        var table = PapLoadTable.TryRead(_gameFiles, out var problem);
+        if (problem != null) _log.Warning("[UMC] Could not read the PAP load table: {0}", problem);
+        return table;
+    }
 
     private HumanPbd? ReadRaceTree()
     {
