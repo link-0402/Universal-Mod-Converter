@@ -5,3 +5,5 @@ obj/
 TestData/Local/
 *.user
 *.suo
+docs/superpowers/
+.superpowers/
