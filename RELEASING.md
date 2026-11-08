@@ -64,8 +64,9 @@ In `repo.json`, change only the `UniversalModConverter` entry:
 The changelog is written for players: what they can now do or what no longer goes wrong, one bullet
 each, no commit hashes or internal names. Draft it from `git log v<previous>..v<new>`.
 
-`repo.json` uses CRLF line endings and two-space indentation. Edit the fields in place rather than
-reloading and re-serializing the whole file, which rewrites every other entry.
+`repo.json` uses LF line endings and two-space indentation. Clone it with
+`git -c core.autocrlf=false clone`, since a checkout with `autocrlf` on turns it CRLF. Edit the fields
+in place rather than reloading and re-serializing the whole file, which rewrites every other entry.
 
 Commit as "Bump Universal Mod Converter to 1.5.2.0" and push. If the push is rejected, someone bumped
 another plugin in the meantime:
