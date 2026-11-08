@@ -46,6 +46,9 @@ public class Configuration : IPluginConfiguration
     /// <summary>Leave targets other mods already change (the ones marked red) out of the target lists.</summary>
     public bool HideModdedTargets { get; set; }
 
+    /// <summary>Gear targets: list only items of sets whose free slots are exactly the ones the mod fills.</summary>
+    public bool OnlyFreeSetTargets { get; set; }
+
     /// <summary>
     /// Replaced by <see cref="OutputMode"/> in version 3. Kept so an older configuration file
     /// still deserializes, and migrated once.

@@ -27,8 +27,14 @@ public sealed class DetectedItem
     /// <summary>Variant index resolved from the Item sheet (bits 16-31 of ModelMain).</summary>
     public ushort Variant         { get; init; }
 
-    /// <summary>Full display ID including variant suffix, e.g. "0585-2".</summary>
-    public string ModelIdDisplay  => $"{ModelIdPadded}-{Variant}";
+    /// <summary>
+    /// Every variant this root stands for, lowest (<see cref="Variant"/>) first: variants the mod
+    /// gives the same look are one root. Empty when no game item has the model.
+    /// </summary>
+    public IReadOnlyList<ushort> Variants { get; init; } = [];
+
+    /// <summary>Full display ID including the variant suffix, e.g. "0585-2", or "0585-1/2" for a root of several.</summary>
+    public string ModelIdDisplay  => Variants.Count > 1 ? $"{ModelIdPadded}-{string.Join("/", Variants)}" : $"{ModelIdPadded}-{Variant}";
 
     /// <summary>Whether this is an accessory (prefix 'a') rather than equipment (prefix 'e').</summary>
     public bool   IsAccessory     { get; init; }
@@ -514,12 +520,13 @@ public sealed class GameDataService : IGameFileProvider
         var contents = new Dictionary<(EquipSlot, string), AssetContents>();
         var custom = new HashSet<(AssetKind Kind, ushort Race, string Id, bool FanOut, AssetContents Contents)>();
         var animations = new List<AnimationSource>();
+        PenumbraMod? mod = null;
 
         try
         {
             // Only the game paths a mod redirects decide what it changes; local file names are
             // arbitrary. This reads both the legacy multi-file and the Penumbra 1.7+ layout.
-            var mod = PenumbraMod.Load(modDir);
+            mod = PenumbraMod.Load(modDir);
             // Every root asks about the same redirects and materials; they are gathered and read once.
             var index = new ModIndex(mod, modDir);
             foreach (var redirect in index.Redirects)
@@ -592,23 +599,24 @@ public sealed class GameDataService : IGameFileProvider
                     continue;
                 }
 
-                foreach (var variantGroup in matches.GroupBy(i => i.Variant))
+                foreach (var variantGroup in GroupByLook(mod, logicalSlot, modelId, matches))
                 {
-                    var match = variantGroup.First();
-                    var ambiguous = variantGroup.Skip(1).Any();
+                    var match = variantGroup[0];
+                    var ambiguous = variantGroup.Count > 1;
                     result.Add(new DetectedItem
                     {
                         Kind          = logicalSlot == EquipSlot.Facewear ? AssetKind.Facewear : AssetKind.Gear,
                         Slot          = logicalSlot,
                         ModelIdPadded = id,
                         Variant       = match.Variant,
+                        Variants      = variantGroup.Select(i => i.Variant).Distinct().Order().ToArray(),
                         IsAccessory   = match.IsAccessory,
                         IsFacewear    = match.IsFacewear,
                         IsAmbiguous   = ambiguous,
                         Contents      = contents.GetValueOrDefault((slot, id)),
                         ModelRaces    = modelRaces,
                         Icon          = match.Icon,
-                        ItemName      = ambiguous ? $"{match.Name} (+{variantGroup.Count() - 1} shared items)" : match.Name,
+                        ItemName      = ambiguous ? $"{match.Name} (+{variantGroup.Count - 1} shared items)" : match.Name,
                     });
                 }
             }
@@ -641,6 +649,32 @@ public sealed class GameDataService : IGameFileProvider
     // ─────────────────────────────────────────────────────────────────────────
     // Internal helpers
     // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The items of one model in a slot, one list per root, lowest variant first: variants the
+    /// game and the mod give the same look (<see cref="GearLook"/>) convert to the same thing, so
+    /// they are one root. Variants that look different stay apart, as does facewear, and every
+    /// variant when the mod could not be read.
+    /// </summary>
+    private List<List<GameItem>> GroupByLook(PenumbraMod? mod, EquipSlot slot, ushort modelId, List<GameItem> matches)
+    {
+        var byVariant = matches.GroupBy(i => i.Variant).OrderBy(g => g.Key).Select(g => g.ToList()).ToList();
+        if (mod == null || slot == EquipSlot.Facewear || byVariant.Count < 2) return byVariant;
+
+        var gearSlot = SlotInfo.ToGearSlot(slot);
+        var vanilla = GetRawFileBytes(GearSlots.ImcFile(new GearItem(gearSlot, modelId, 1))) is { } bytes
+            ? GameMetadata.ReadImc(bytes, gearSlot.ImcPartIndex()).ToDictionary(r => r.Variant, r => r.Entry)
+            : new Dictionary<ushort, ImcEntry>();
+        var roots = new List<(GearLook Look, List<GameItem> Items)>();
+        foreach (var items in byVariant)
+        {
+            var look = GearLook.Of(mod, vanilla, new GearItem(gearSlot, modelId, items[0].Variant));
+            var same = roots.FindIndex(r => r.Look.SameAs(look));
+            if (same >= 0) roots[same].Items.AddRange(items);
+            else roots.Add((look, items));
+        }
+        return roots.Select(r => r.Items).ToList();
+    }
 
     /// <summary>Records the item a token names; returns its key, or null when the slot is unknown.</summary>
     private static (EquipSlot, string)? RecordToken(Match m, Dictionary<(EquipSlot, string), bool> found)

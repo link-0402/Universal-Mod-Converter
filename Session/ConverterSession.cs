@@ -82,6 +82,7 @@ public sealed partial class ConverterSession
         NewModOnlyConverted = plugin.Configuration.NewModOnlyConverted;
         AddToModOwnOption = plugin.Configuration.AddToModOwnOption;
         HideModdedTargets = plugin.Configuration.HideModdedTargets;
+        OnlyFreeSetTargets = plugin.Configuration.OnlyFreeSetTargets;
         Modded          = new ModdedTargets(plugin.PenumbraIpc,
             folder => Mods.FirstOrDefault(m => string.Equals(m.Folder, folder, StringComparison.OrdinalIgnoreCase))?.Name,
             () => PenumbraModDirectory);
@@ -147,27 +148,86 @@ public sealed partial class ConverterSession
     /// </summary>
     public bool ShowsTarget(string? modded, bool chosen) => chosen || modded == null || !HideModdedTargets;
 
+    /// <summary>
+    /// Gear targets: list only items of sets whose free slots are exactly the ones the mod fills
+    /// (<see cref="FreeSetSlots"/>), every other slot already modded.
+    /// </summary>
+    public bool OnlyFreeSetTargets { get; private set; }
+
+    public void SetOnlyFreeSetTargets(bool only)
+    {
+        if (only == OnlyFreeSetTargets) return;
+        OnlyFreeSetTargets = only;
+        Config.OnlyFreeSetTargets = only;
+        Config.Save();
+    }
+
+    /// <summary>Whether the target list is one <see cref="OnlyFreeSetTargets"/> applies to: gear or an accessory to another item.</summary>
+    public bool CanFilterFreeSets
+        => Source is { IsCustomization: false, Animation: null } && !IsGearRaceConversion && TargetSlot != EquipSlot.Facewear;
+
+    /// <summary>Whether <see cref="OnlyFreeSetTargets"/> filters the target list now.</summary>
+    public bool FiltersFreeSets => OnlyFreeSetTargets && CanFilterFreeSets;
+
+    /// <summary>
+    /// The slots <see cref="OnlyFreeSetTargets"/> wants free: those of the mod's gear roots of the
+    /// target slot's kind, the source's own moved to the target slot.
+    /// </summary>
+    public IReadOnlySet<GearSlot> FreeSetSlots
+        => Source is { } source
+            ? FreeSets.Wanted(DetectedItems.Where(i => i is { IsCustomization: false, Animation: null }).Select(i => SlotInfo.ToGearSlot(i.Slot)),
+                SlotInfo.ToGearSlot(source.Slot), SlotInfo.ToGearSlot(TargetSlot))
+            : new HashSet<GearSlot>();
+
+    private static readonly EquipSlot[] SetGearSlots = [EquipSlot.Head, EquipSlot.Body, EquipSlot.Hands, EquipSlot.Legs, EquipSlot.Feet];
+    private static readonly EquipSlot[] SetAccessorySlots = [EquipSlot.Earring, EquipSlot.Neck, EquipSlot.Wrists, EquipSlot.RingRight];
+
+    /// <summary>The ids of the sets of the target slot's kind <see cref="OnlyFreeSetTargets"/> lets through.</summary>
+    private HashSet<ushort> FreeSetIds()
+    {
+        if (!GameData.ItemsReady) return [];
+        var slots = SlotInfo.IsAccessory(TargetSlot) ? SetAccessorySlots : SetGearSlots;
+        var items = slots.SelectMany(GameData.GetAllItemsForSlot)
+            .Select(i => (SlotInfo.ToGearSlot(i.Slot), i.ModelId, Modded.Changes(i)));
+        return FreeSets.Find(items, FreeSetSlots);
+    }
+
     private IReadOnlyList<GameItem>? _shownFrom;
     private GameItem? _shownChosen;
+    private DetectedItem? _shownSource;
     private int _shownVersion;
+    private bool _shownHide;
+    private bool _shownFree;
     private IReadOnlyList<GameItem> _shownCandidates = [];
 
     /// <summary>
     /// The gear targets the list shows: <see cref="TargetCandidates"/>, less the ones other mods
-    /// already change when <see cref="HideModdedTargets"/> is on. Kept until either changes.
+    /// already change when <see cref="HideModdedTargets"/> is on, and only those of free sets when
+    /// <see cref="FiltersFreeSets"/>. Kept until any of them changes.
     /// </summary>
     public IReadOnlyList<GameItem> ShownTargetCandidates
     {
         get
         {
-            if (!HideModdedTargets) return TargetCandidates;
+            var free = FiltersFreeSets;
+            if (!HideModdedTargets && !free) return TargetCandidates;
             var version = Modded.Version;
-            if (!ReferenceEquals(_shownFrom, TargetCandidates) || !ReferenceEquals(_shownChosen, TargetItem) || _shownVersion != version)
+            if (!ReferenceEquals(_shownFrom, TargetCandidates) || !ReferenceEquals(_shownChosen, TargetItem) ||
+                !ReferenceEquals(_shownSource, Source) || _shownVersion != version || _shownHide != HideModdedTargets || _shownFree != free)
             {
-                _shownFrom       = TargetCandidates;
-                _shownChosen     = TargetItem;
-                _shownVersion    = version;
-                _shownCandidates = TargetCandidates.Where(i => ShowsTarget(Modded.Item(i), ReferenceEquals(i, TargetItem))).ToList();
+                _shownFrom    = TargetCandidates;
+                _shownChosen  = TargetItem;
+                _shownSource  = Source;
+                _shownVersion = version;
+                _shownHide    = HideModdedTargets;
+                _shownFree    = free;
+                // A free set's target slot is free, so it hides nothing modded either.
+                var sets = free ? FreeSetIds() : null;
+                _shownCandidates = TargetCandidates
+                    .Where(i => sets != null
+                        ? ReferenceEquals(i, TargetItem) || sets.Contains(i.ModelId)
+                        : ShowsTarget(Modded.Item(i), ReferenceEquals(i, TargetItem)))
+                    .ToList();
             }
             return _shownCandidates;
         }

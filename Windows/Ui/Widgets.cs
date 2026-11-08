@@ -194,16 +194,41 @@ internal static class Widgets
         var start = ImGui.GetCursorPos();
         SectionTitle(text, icon);
         var after = ImGui.GetCursorPos();
+        var right = ImGui.GetContentRegionMax().X;
+        var clicked = TitleCheckbox(start.Y, ref right, toggleText, ref value, tooltip);
+        ImGui.SetCursorPos(after);
+        return clicked;
+    }
 
+    /// <summary>
+    /// Header text with two compact checkboxes at the right end of its line, the second left of
+    /// the first. Returns whether either was clicked; the values then hold the new states.
+    /// </summary>
+    public static bool SectionTitle(string text, FontAwesomeIcon? icon, string firstText, ref bool first, string? firstTooltip,
+        string secondText, ref bool second, string? secondTooltip)
+    {
+        var start = ImGui.GetCursorPos();
+        SectionTitle(text, icon);
+        var after = ImGui.GetCursorPos();
+        var right = ImGui.GetContentRegionMax().X;
+        var clicked = TitleCheckbox(start.Y, ref right, firstText, ref first, firstTooltip);
+        clicked |= TitleCheckbox(start.Y, ref right, secondText, ref second, secondTooltip);
+        ImGui.SetCursorPos(after);
+        return clicked;
+    }
+
+    /// <summary>A title line's checkbox at <paramref name="y"/>, ending at <paramref name="right"/>, which then moves to before it.</summary>
+    private static bool TitleCheckbox(float y, ref float right, string toggleText, ref bool value, string? tooltip)
+    {
         // Without vertical frame padding the box is one text line high, like the title.
         var label = toggleText.Split("##")[0];
-        var width = ImGui.GetTextLineHeight() + ImGui.GetStyle().ItemInnerSpacing.X + ImGui.CalcTextSize(label).X;
-        ImGui.SetCursorPos(new Vector2(ImGui.GetContentRegionMax().X - width, start.Y));
+        right -= ImGui.GetTextLineHeight() + ImGui.GetStyle().ItemInnerSpacing.X + ImGui.CalcTextSize(label).X;
+        ImGui.SetCursorPos(new Vector2(right, y));
         bool clicked;
         using (ImRaii.PushStyle(ImGuiStyleVar.FramePadding, new Vector2(ImGui.GetStyle().FramePadding.X, 0)))
             clicked = ImGui.Checkbox(toggleText, ref value);
         Tooltip(tooltip);
-        ImGui.SetCursorPos(after);
+        right -= ImGui.GetStyle().ItemSpacing.X * 2;
         return clicked;
     }
 
@@ -231,6 +256,23 @@ internal static class Widgets
             ImGui.TextUnformatted(value);
         }
         ImGui.TextColored(Theme.Muted, "Right-click to copy");
+    }
+
+    /// <summary>
+    /// <paramref name="text"/> cut short at the end with "..." to fit <paramref name="maxWidth"/>;
+    /// the same instance when it fits, nothing but "..." when not even one letter does.
+    /// </summary>
+    public static string Truncate(string text, float maxWidth)
+    {
+        if (ImGui.CalcTextSize(text).X <= maxWidth) return text;
+        int low = 0, high = text.Length;
+        while (low < high)
+        {
+            var mid = (low + high + 1) / 2;
+            if (ImGui.CalcTextSize(string.Concat(text.AsSpan(0, mid), "...")).X <= maxWidth) low = mid;
+            else high = mid - 1;
+        }
+        return string.Concat(text.AsSpan(0, low).TrimEnd(), "...");
     }
 
     public static string Ellipsize(string text, float maxWidth)

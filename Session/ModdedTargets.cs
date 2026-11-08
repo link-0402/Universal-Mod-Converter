@@ -94,6 +94,13 @@ public sealed class ModdedTargets
         return note;
     }
 
+    /// <summary>Whether a mod already changes the item, without asking Penumbra who (see <see cref="Item"/>).</summary>
+    public bool Changes(GameItem item)
+    {
+        Update();
+        return _keys.Contains(item.ChangedItemName);
+    }
+
     /// <summary>
     /// Who already changes a hair, face, tail, ear or body (<paramref name="kind"/> of
     /// <paramref name="genderRace"/>, numbered <paramref name="id"/>), or null. A body counts

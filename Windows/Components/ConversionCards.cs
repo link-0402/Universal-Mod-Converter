@@ -162,23 +162,35 @@ internal sealed class ConversionCards(ConverterSession session)
             var (item, index) = filtered[row];
             using var id = ImRaii.PushId(index);
             var start = ImGui.GetCursorPos();
+
+            // A narrow list cuts the name short before it runs into the tags and the ID, and
+            // drops the tags once not even a few letters of the name would fit beside them.
+            var gap     = ImGui.GetStyle().ItemSpacing.X;
+            var idText  = $"{KindLabel(item)} · {IdLabel(item)}";
+            var idWidth = ImGui.CalcTextSize(idText).X;
+            var idX     = ImGui.GetContentRegionMax().X - idWidth;
+            var nameX   = start.X + rowHeight + gap;
+            var tagsX   = idX - gap - ContentsTagsWidth(item);
+            var tags    = item.Contents.Tags().Any() && tagsX - gap - nameX >= ImGui.CalcTextSize("MMMMMM").X;
+            var name    = Widgets.Truncate(item.ItemName, (tags ? tagsX : idX) - gap - nameX);
+
             if (ImGui.Selectable("##row", index == session.SourceIndex, ImGuiSelectableFlags.None, new Vector2(0, rowHeight)))
                 session.SelectSource(index);
+            if (!ReferenceEquals(name, item.ItemName) || !tags && item.Contents.Tags().Any())
+                Widgets.Tooltip(string.Join(" · ", item.Contents.Tags().Select(t => t.Name()).Prepend(item.ItemName)));
             ImGui.SetCursorPos(start);
             DrawKindIcon(item, rowHeight);
             ImGui.SameLine();
             ImGui.SetCursorPosY(start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2);
-            ImGui.TextUnformatted(item.ItemName);
-            var idText  = $"{KindLabel(item)} · {IdLabel(item)}";
-            var idWidth = ImGui.CalcTextSize(idText).X;
+            ImGui.TextUnformatted(name);
             var textY   = start.Y + (rowHeight - ImGui.GetTextLineHeight()) / 2;
-            if (item.Contents.Tags().Any())
+            if (tags)
             {
-                ImGui.SameLine(ImGui.GetContentRegionMax().X - idWidth - ImGui.GetStyle().ItemSpacing.X - ContentsTagsWidth(item));
+                ImGui.SameLine(tagsX);
                 ImGui.SetCursorPosY(textY - Widgets.BadgePadding.Y);
                 DrawContentsTags(item);
             }
-            ImGui.SameLine(ImGui.GetContentRegionMax().X - idWidth);
+            ImGui.SameLine(idX);
             ImGui.SetCursorPosY(textY);
             Widgets.Muted(idText);
         });
@@ -288,12 +300,26 @@ internal sealed class ConversionCards(ConverterSession session)
 
     private void DrawTarget()
     {
+        const string hideTooltip =
+            "Leave out targets another mod already changes in your collection (the ones shown in red). " +
+            "Whatever is selected or ticked always stays. An idle's slots and the races to retarget to are left " +
+            "out only for what the mod itself has, so ticking in one of those lists never hides anything in the " +
+            "other; other conflicts there still show in red.";
         var hide = session.HideModdedTargets;
-        if (Widgets.SectionTitle("To", FontAwesomeIcon.Bullseye, "Hide modded##HideModded", ref hide,
-                "Leave out targets another mod already changes in your collection (the ones shown in red). " +
-                "Whatever is selected or ticked always stays. An idle's slots and the races to retarget to are left " +
-                "out only for what the mod itself has, so ticking in one of those lists never hides anything in the " +
-                "other; other conflicts there still show in red."))
+        if (session.CanFilterFreeSets)
+        {
+            var free = session.OnlyFreeSetTargets;
+            if (Widgets.SectionTitle("To", FontAwesomeIcon.Bullseye, "Hide modded##HideModded", ref hide, hideTooltip,
+                    "Free set##FreeSet", ref free,
+                    $"List only items of sets in which exactly the slots this mod has items in are free ({FreeSetSlotNames()}), " +
+                    "and every other slot of the set is already changed by a mod in your collection. The selected " +
+                    "item's slot counts in place of the source's. Gear and accessories count apart. The selected item always stays."))
+            {
+                session.SetHideModdedTargets(hide);
+                session.SetOnlyFreeSetTargets(free);
+            }
+        }
+        else if (Widgets.SectionTitle("To", FontAwesomeIcon.Bullseye, "Hide modded##HideModded", ref hide, hideTooltip))
             session.SetHideModdedTargets(hide);
         if (session.Source is not { } source)
         {
@@ -377,7 +403,9 @@ internal sealed class ConversionCards(ConverterSession session)
         if (!list.Success) return;
         if (items.Count == 0)
         {
-            Widgets.Muted(session.TargetCandidates.Count > 0 ? "Every matching item is already modded." : "No items match.");
+            Widgets.MutedWrapped(session.TargetCandidates.Count == 0 ? "No items match."
+                : session.FiltersFreeSets ? $"No matching set has only {FreeSetSlotNames()} free."
+                : "Every matching item is already modded.");
             return;
         }
 
@@ -403,6 +431,10 @@ internal sealed class ConversionCards(ConverterSession session)
             Widgets.Muted(idText);
         });
     }
+
+    /// <summary>The slots "Free set" wants free, e.g. "body, legs".</summary>
+    private string FreeSetSlotNames()
+        => string.Join(", ", session.FreeSetSlots.Order().Select(s => s == GearSlot.RFinger ? "ring" : s.Label()));
 
     /// <summary>
     /// A gear race conversion: the race whose model the mod has (when it has several) and the
