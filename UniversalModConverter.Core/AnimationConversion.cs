@@ -129,8 +129,10 @@ public sealed record AnimationConversionRequest(
     /// Swap of an idle: the name its slot groups start with, "Standing idle". When the idle plays
     /// in more than one slot (see <see cref="InSlotGroups"/>), every race it is written for gets a
     /// single-select option group of its own, "{SlotGroupName} ({race})", with an option per slot,
-    /// so the player picks the slot each race plays it in; the animation then leaves the
-    /// containers it was in for the groups, whatever the mode. Null places it at every destination.
+    /// so the player picks the slot each race plays it in. An idle then leaves the containers it
+    /// was in for the groups, whatever the mode, its own slot being one of the options; a looped
+    /// emote, whose place is none of them, stays or goes as the mode says. Null places it at every
+    /// destination.
     /// </summary>
     public string? SlotGroupName { get; init; }
 
@@ -399,9 +401,12 @@ public sealed class AnimationConversionPlanner(
 
         /// <summary>
         /// Whether the animation's own keys stay: a swap that keeps it, or one that also converts it
-        /// where it is. In slot groups they never do: they move into the groups, whatever the mode.
+        /// where it is. In slot groups that include its own slot (an idle) they never do: they move
+        /// into the groups, whatever the mode. A looped emote's own place is no option of the
+        /// groups, so its keys stay or go as in any swap.
         /// </summary>
-        private bool Keeps => !InSlotGroups && (_request.KeepOriginal || _request.StaysAtSource);
+        private bool Keeps => (_request.KeepOriginal || _request.StaysAtSource) &&
+                              !(InSlotGroups && Variants.Any(AnimationConversionRequest.IsOwnSlot));
 
         /// <summary>Whether the swap goes into option groups, one per race (see <see cref="AnimationConversionRequest.InSlotGroups"/>).</summary>
         private bool InSlotGroups => _request.InSlotGroups;
@@ -615,8 +620,8 @@ public sealed class AnimationConversionPlanner(
         /// anything else the mod has there. A race goes where it loads the file (see
         /// <see cref="CopyPath"/>), so one that loads the file of a race with a group of its own, or
         /// of a race whose file another race's group already holds, follows that group for that
-        /// slot. In every output mode the animation leaves the
-        /// containers it was in for the groups (see <see cref="PlanSwap"/>): its own files become
+        /// slot. In every output mode an idle leaves the
+        /// containers it was in for the groups (see <see cref="Keeps"/>): its own files become
         /// the option for its own slot, so choosing a slot is all that decides where it plays.
         /// One group holds one file per game path, so where options of the mod each have their
         /// own version, the chosen one is used and the others are left out.

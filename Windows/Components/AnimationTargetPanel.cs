@@ -32,14 +32,34 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
 
         var operation = session.AnimationOperation;
         var facial = source.Kind == AnimationSourceKind.Expression;
+        var toSlots = operation == AnimationOperation.Swap && session.AnimationAcrossKinds;
         using (ImRaii.Disabled(!session.CanSwapAnimation))
         {
-            if (ImGui.RadioButton(facial ? "Swap to another expression" : "Swap to another emote", operation == AnimationOperation.Swap))
+            if (ImGui.RadioButton(facial ? "Swap to another expression" : "Swap to another emote", operation == AnimationOperation.Swap && !toSlots))
+            {
                 session.SetAnimationOperation(AnimationOperation.Swap);
+                session.SetAnimationAcrossKinds(false);
+            }
         }
         Widgets.Tooltip(!session.CanSwapAnimation ? "Only idles, emotes and expressions can be swapped."
             : facial ? "Play this face for another expression of the emote list, with its pace and options."
             : "Play this animation for another emote, for the same race.");
+        if (source.Kind == AnimationSourceKind.Emote)
+        {
+            ImGui.SameLine(0, 20f * Theme.Scale);
+            var looped = session.CanSwapAcrossKinds(source);
+            using (ImRaii.Disabled(!looped))
+            {
+                if (ImGui.RadioButton("Swap to idle slots", toSlots))
+                {
+                    session.SetAnimationOperation(AnimationOperation.Swap);
+                    session.SetAnimationAcrossKinds(true);
+                }
+            }
+            Widgets.Tooltip(looped
+                ? "Play this looped emote as an idle: its loop goes to each ticked slot's loop and its start to the slot's start."
+                : "Only looped emotes (a loop with a start, like dances and Box) can play as an idle.");
+        }
         using (ImRaii.Disabled(facial))
         {
             ImGui.SameLine(0, 20f * Theme.Scale);
@@ -78,7 +98,36 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         ImGui.Spacing();
 
         if (operation == AnimationOperation.Retarget) DrawRetarget(source);
-        else DrawEmoteSwap(source);
+        else if (toSlots) DrawEmoteSlots(source);
+        else DrawEmoteSwap(source, loopedOnly: false);
+    }
+
+    /// <summary>A looped emote into idle slots: the family to take them from, then the slots, as for an idle.</summary>
+    private void DrawEmoteSlots(AnimationSource source)
+    {
+        if (session.NeedsAnimationSourceContainer) DrawSourceContainer(source);
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("Family");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(-1);
+        var current = IdleSlots.GetFamily(session.AnimationTargetFamily);
+        using (var combo = ImRaii.Combo("##TargetFamily", current?.Label ?? session.AnimationTargetFamily))
+        {
+            if (combo.Success)
+                foreach (var family in IdleSlots.Families)
+                    if (ImGui.Selectable(family.Label, family == current))
+                        session.SetAnimationTargetFamily(family.Key);
+        }
+        Widgets.Tooltip("The kind of idle the emote becomes. Changing it clears the ticked slots.");
+        ImGui.Spacing();
+
+        var slots = session.AnimationSlots;
+        if (slots.Count == 0)
+        {
+            Widgets.MutedWrapped("The game's slots for this idle could not be found.");
+            return;
+        }
+        DrawIdleSlots(source, slots);
     }
 
     // ── Idles ───────────────────────────────────────────────────────────────
@@ -89,6 +138,15 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
     /// </summary>
     private void DrawIdle(AnimationSource source)
     {
+        var toEmote = session.AnimationAcrossKinds;
+        if (ImGui.RadioButton("To idle slots", !toEmote)) session.SetAnimationAcrossKinds(false);
+        Widgets.Tooltip($"Play the animation in other slots of the {IdleSlots.GetFamily(source.Family ?? string.Empty)?.Label.ToLowerInvariant() ?? "idle"} family.");
+        ImGui.SameLine(0, 20f * Theme.Scale);
+        if (ImGui.RadioButton("To a looped emote", toEmote)) session.SetAnimationAcrossKinds(true);
+        Widgets.Tooltip("Play the animation for a looped emote instead (a dance, Box, a cheer...): its loop goes to the emote's " +
+                        "loop and its start to the emote's start. Most looped emotes have no start of their own, and then the " +
+                        "idle's start is left out.");
+
         var retarget = session.AnimationAlsoRetargets;
         if (ImGui.Checkbox("Retarget to other races", ref retarget)) session.SetAnimationAlsoRetargets(retarget);
         Widgets.Tooltip("Also rebuild the animation for other races' skeletons, rescaled to their proportions, in every slot " +
@@ -103,7 +161,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         ImGui.Spacing();
 
         var slots = session.AnimationSlots;
-        if (slots.Count == 0)
+        if (!toEmote && slots.Count == 0)
         {
             Widgets.MutedWrapped("The game's slots for this idle could not be found.");
             return;
@@ -113,7 +171,8 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         using var table = ImRaii.Table("##IdleTargets", retarget ? 2 : 1, ImGuiTableFlags.SizingStretchSame);
         if (!table.Success) return;
         ImGui.TableNextColumn();
-        DrawIdleSlots(source, slots);
+        if (toEmote) DrawEmoteSwap(source, loopedOnly: true);
+        else DrawIdleSlots(source, slots);
         if (!retarget) return;
         ImGui.TableNextColumn();
         DrawRetargetSource(source);
@@ -122,23 +181,30 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
 
     private void DrawIdleSlots(AnimationSource source, IReadOnlyList<IdleSlot> slots)
     {
+        var idle = source.Kind == AnimationSourceKind.Idle;
         ImGui.AlignTextToFramePadding();
         ImGui.TextUnformatted("Output slots");
-        Widgets.Tooltip("Tick every slot the animation should play in. Its current slot keeps it only while ticked: " +
-                        "unticked, converting in place moves it away, while adding to this mod leaves it there as it is.\n\n" +
-                        "Ticked in more than one slot, every race gets a single-select option group in Penumbra with an " +
-                        "option for each ticked slot, starting on \"-\", so the slot each race plays it in is chosen there. " +
-                        "The animation's own files move into those groups too, in every output mode.");
+        Widgets.Tooltip((idle
+                            ? "Tick every slot the animation should play in. Its current slot keeps it only while ticked: " +
+                              "unticked, converting in place moves it away, while adding to this mod leaves it there as it is."
+                            : "Tick every slot the emote should play in. The emote itself keeps it as the output mode says: " +
+                              "adding to this mod keeps it, converting in place moves it away.") +
+                        "\n\nTicked in more than one slot, every race gets a single-select option group in Penumbra with an " +
+                        "option for each ticked slot, starting on \"-\", so the slot each race plays it in is chosen there." +
+                        (idle ? " The animation's own files move into those groups too, in every output mode." : string.Empty));
         if (session.AnimationSlotGroups)
         {
             ImGui.SameLine();
             Widgets.Badge("slot choice per race", Theme.Accent);
-            Widgets.Tooltip($"Every race gets a single-select option group, \"{ConverterSession.SlotGroupName(source)} " +
+            Widgets.Tooltip($"Every race gets a single-select option group, \"{session.SlotGroupName(source)} " +
                             $"({RaceNames.Name(source.Races.FirstOrDefault())})\" and so on, with an option for each ticked slot " +
-                            "in slot order. The animation's own files move out of the options they are in, into the option " +
-                            "for its own slot, in every output mode. Every group starts on \"-\", so the animation plays " +
-                            "nowhere until a slot is chosen in Penumbra. Tick only one slot to place the animation there " +
-                            "directly.");
+                            "in slot order. " +
+                            (idle
+                                ? "The animation's own files move out of the options they are in, into the option for its own " +
+                                  "slot, in every output mode. Every group starts on \"-\", so the animation plays nowhere until " +
+                                  "a slot is chosen in Penumbra."
+                                : "Every group starts on \"-\", so the emote plays in no slot until one is chosen in Penumbra.") +
+                            " Tick only one slot to place the animation there directly.");
         }
 
         var missing = slots.Count(s => s.Index != source.SlotIndex && !session.CanSwapToIdleSlot(source, s));
@@ -300,7 +366,8 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
 
     // ── Emotes ──────────────────────────────────────────────────────────────
 
-    private void DrawEmoteSwap(AnimationSource source)
+    /// <summary>The emotes the animation can move to; only looped ones for an idle (<paramref name="loopedOnly"/>).</summary>
+    private void DrawEmoteSwap(AnimationSource source, bool loopedOnly)
     {
         var emotes = session.AnimationEmotes;
         if (emotes == null)
@@ -321,7 +388,7 @@ internal sealed class AnimationTargetPanel(ConverterSession session)
         else Widgets.Muted("No emote selected.");
 
         var filter = _emoteFilter.Trim();
-        var candidates = emotes.Where(e => e.Id != source.EmoteId).ToList();
+        var candidates = emotes.Where(e => e.Id != source.EmoteId && (!loopedOnly || e.IsLooped)).ToList();
         var missing = candidates.Count(e => e.Id != session.AnimationTargetEmote && !session.CanSwapToEmote(source, e));
         if (missing > 0) NotListed(source, missing, missing == 1 ? "emote is" : "emotes are");
         var matching = candidates.Where(e => (e.Id == session.AnimationTargetEmote || session.CanSwapToEmote(source, e)) &&

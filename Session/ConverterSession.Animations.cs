@@ -54,8 +54,19 @@ public sealed partial class ConverterSession
                ? RunEntries.Any(e => e.Task.AnimationRequest?.ExpressionAtSource == true)
                : Source?.Animation is { } animation && ExpressionAtSource(animation));
 
-    /// <summary>Emote swap: the destination emote, or 0.</summary>
+    /// <summary>Emote swap, or an idle swapped to a looped emote: the destination emote, or 0.</summary>
     public uint AnimationTargetEmote { get; private set; }
+
+    /// <summary>
+    /// Whether the swap goes to the other kind: an idle to a looped emote (see
+    /// <see cref="AnimationTargetEmote"/>) instead of its slots, or a looped emote into idle slots
+    /// of <see cref="AnimationTargetFamily"/> (see <see cref="AnimationOutputSlots"/>) instead of
+    /// another emote. Pairs by role (see <see cref="LoopRoles"/>).
+    /// </summary>
+    public bool AnimationAcrossKinds { get; private set; }
+
+    /// <summary>A looped emote swapped into idle slots: the family of those slots.</summary>
+    public string AnimationTargetFamily { get; private set; } = IdleSlots.Families[0].Key;
 
     public ushort AnimationSourceRace { get; private set; }
 
@@ -78,11 +89,43 @@ public sealed partial class ConverterSession
 
     private bool _emotesLoading;
 
-    /// <summary>The slots of the selected idle's family, in slot order.</summary>
+    /// <summary>
+    /// The slots the selection can go to, in slot order: those of the selected idle's family, or of
+    /// <see cref="AnimationTargetFamily"/> for a looped emote.
+    /// </summary>
     public IReadOnlyList<IdleSlot> AnimationSlots
-        => Source?.Animation is { Kind: AnimationSourceKind.Idle, Family: { } family }
+        => Source?.Animation is { } source && SlotFamily(source) is { } family
             ? GameData.Animations.IdleSlots(family)
             : [];
+
+    private string? SlotFamily(AnimationSource source) => source.Kind switch
+    {
+        AnimationSourceKind.Idle  => source.Family,
+        AnimationSourceKind.Emote => AnimationTargetFamily,
+        _                         => null,
+    };
+
+    /// <summary>Whether the swap can go to the other kind: any idle can, an emote only when it loops.</summary>
+    public bool CanSwapAcrossKinds(AnimationSource source) => source.Kind switch
+    {
+        AnimationSourceKind.Idle  => true,
+        AnimationSourceKind.Emote => GameData.Animations.EmotesReady && GameData.Animations.FindEmote(source.EmoteId) is { IsLooped: true },
+        _                         => false,
+    };
+
+    /// <summary>Whether the selection goes to idle slots: an idle not swapped to an emote, or a looped emote swapped into slots.</summary>
+    private bool TargetsSlots(AnimationSource source) => source.Kind switch
+    {
+        AnimationSourceKind.Idle  => !AnimationAcrossKinds,
+        AnimationSourceKind.Emote => AnimationAcrossKinds && AnimationOperation == AnimationOperation.Swap,
+        _                         => false,
+    };
+
+    /// <summary>Whether the selection is an idle swapped to a looped emote.</summary>
+    private bool IdleToEmote(AnimationSource source) => source.Kind == AnimationSourceKind.Idle && AnimationAcrossKinds;
+
+    /// <summary>Whether the selection is a looped emote swapped into idle slots.</summary>
+    private bool EmoteToSlots(AnimationSource source) => source.Kind == AnimationSourceKind.Emote && TargetsSlots(source);
 
     /// <summary>All emotes with body animations, or null while they are being read.</summary>
     public IReadOnlyList<EmoteInfo>? AnimationEmotes
@@ -112,36 +155,39 @@ public sealed partial class ConverterSession
     // ── What the selection does ─────────────────────────────────────────────
 
     /// <summary>Whether the idle stays in its current slot.</summary>
-    private bool StaysInSlot(AnimationSource source) => _animationOutputSlots.Contains(source.SlotIndex);
+    private bool StaysInSlot(AnimationSource source) => TargetsSlots(source) && _animationOutputSlots.Contains(source.SlotIndex);
 
-    /// <summary>The ticked slots other than the idle's current one, in slot order.</summary>
+    /// <summary>The ticked slots other than the idle's current one (a looped emote has none), in slot order.</summary>
     private List<IdleSlot> OtherOutputSlots(AnimationSource source)
-        => [.. AnimationSlots.Where(s => s.Index != source.SlotIndex && _animationOutputSlots.Contains(s.Index))];
+        => TargetsSlots(source) ? [.. AnimationSlots.Where(s => s.Index != source.SlotIndex && _animationOutputSlots.Contains(s.Index))] : [];
 
     /// <summary>
-    /// The slots the idle plays in once converted, in slot order: the ticked ones, and its current
-    /// one also while adding to this mod, which always keeps it there (see
+    /// The slots the animation plays in once converted, in slot order: the ticked ones, and an
+    /// idle's current one also while adding to this mod, which always keeps it there (see
     /// <see cref="AnimationConversionRequest.PlayedSlots"/>).
     /// </summary>
     private List<IdleSlot> PlayedSlots(AnimationSource source)
-        => [.. AnimationSlots.Where(s => _animationOutputSlots.Contains(s.Index) ||
-                                        s.Index == source.SlotIndex && PlanOutputMode.KeepsSource())];
+        => TargetsSlots(source)
+            ? [.. AnimationSlots.Where(s => _animationOutputSlots.Contains(s.Index) ||
+                                           s.Index == source.SlotIndex && PlanOutputMode.KeepsSource())]
+            : [];
 
     /// <summary>
-    /// Whether the idle goes into a single-select option group per race, with an option per slot
-    /// it plays in (see <see cref="PlayedSlots"/>) after a "-" every group starts on, rather than
-    /// into every ticked slot at once: whenever it plays in more than one slot.
+    /// Whether the animation goes into a single-select option group per race, with an option per
+    /// slot it plays in (see <see cref="PlayedSlots"/>) after a "-" every group starts on, rather
+    /// than into every ticked slot at once: whenever it plays in more than one slot.
     /// </summary>
-    private bool GroupsSlots(AnimationSource source)
-        => source.Kind == AnimationSourceKind.Idle && PlayedSlots(source).Count > 1;
+    private bool GroupsSlots(AnimationSource source) => PlayedSlots(source).Count > 1;
 
-    /// <summary>The name slot groups start with: the idle family's, "Standing idle".</summary>
-    public static string SlotGroupName(AnimationSource source)
-        => source.Family is { } family && IdleSlots.GetFamily(family) is { } descriptor ? descriptor.Label : "Idle";
+    /// <summary>The name slot groups start with: the slots' family's, "Standing idle".</summary>
+    public string SlotGroupName(AnimationSource source)
+        => SlotFamily(source) is { } family && IdleSlots.GetFamily(family) is { } descriptor ? descriptor.Label : "Idle";
 
-    /// <summary>Whether the animation goes somewhere else: an idle to another slot, or any other swap.</summary>
+    /// <summary>Whether the animation goes somewhere else: an idle to another slot or an emote, or any other swap.</summary>
     private bool Moves(AnimationSource source)
-        => source.Kind == AnimationSourceKind.Idle ? OtherOutputSlots(source).Count > 0 : AnimationOperation == AnimationOperation.Swap;
+        => source.Kind == AnimationSourceKind.Idle
+            ? IdleToEmote(source) || OtherOutputSlots(source).Count > 0
+            : AnimationOperation == AnimationOperation.Swap;
 
     private bool Retargets(AnimationSource source)
         => source.Kind == AnimationSourceKind.Idle ? AnimationAlsoRetargets : AnimationOperation == AnimationOperation.Retarget;
@@ -189,6 +235,8 @@ public sealed partial class ConverterSession
         AnimationOperation = source.Kind == AnimationSourceKind.Other ? AnimationOperation.Retarget : AnimationOperation.Swap;
         AnimationAlsoRetargets = false;
         AnimationTargetEmote = 0;
+        AnimationAcrossKinds = false;
+        AnimationTargetFamily = IdleSlots.Families[0].Key;
         AnimationSourceContainer = null;
         AttachExpression = false;
         AnimationIncludesSourceRace = true;
@@ -214,6 +262,28 @@ public sealed partial class ConverterSession
         MarkDirty();
     }
 
+    /// <summary>
+    /// Swaps an idle to a looped emote or back to its slots, or a looped emote into idle slots or
+    /// back to another emote. Ticked slots are kept for switching back; the chosen emote is cleared,
+    /// since the two lists differ (an idle goes only to looped emotes).
+    /// </summary>
+    public void SetAnimationAcrossKinds(bool across)
+    {
+        if (across == AnimationAcrossKinds || across && (Source?.Animation is not { } source || !CanSwapAcrossKinds(source))) return;
+        AnimationAcrossKinds = across;
+        AnimationTargetEmote = 0;
+        MarkDirty();
+    }
+
+    /// <summary>A looped emote swapped into idle slots: the family to choose the slots from. Its ticks are cleared.</summary>
+    public void SetAnimationTargetFamily(string family)
+    {
+        if (family == AnimationTargetFamily || IdleSlots.GetFamily(family) == null) return;
+        AnimationTargetFamily = family;
+        _animationOutputSlots.Clear();
+        MarkDirty();
+    }
+
     public void SetAnimationAlsoRetargets(bool retargets)
     {
         if (retargets == AnimationAlsoRetargets) return;
@@ -231,9 +301,10 @@ public sealed partial class ConverterSession
     public void SetAnimationTargetEmote(uint id)
     {
         if (id == AnimationTargetEmote) return;
-        // Shared with expression swaps, which place the face either way.
-        if (Source?.Animation is { Kind: AnimationSourceKind.Emote } source && GameData.Animations.EmotesReady &&
-            GameData.Animations.FindEmote(id) is { } emote && !CanSwapToEmote(source, emote)) return;
+        // Shared with expression swaps, which place the face either way. An idle goes only to a looped emote.
+        if (Source?.Animation is { Kind: AnimationSourceKind.Emote or AnimationSourceKind.Idle } source && GameData.Animations.EmotesReady &&
+            GameData.Animations.FindEmote(id) is { } emote &&
+            (!CanSwapToEmote(source, emote) || source.Kind == AnimationSourceKind.Idle && !emote.IsLooped)) return;
         AnimationTargetEmote = id;
         MarkDirty();
     }
@@ -279,26 +350,29 @@ public sealed partial class ConverterSession
 
     /// <summary>
     /// The locations an idle conversion writes, for any race: those of every slot it plays in (see
-    /// <see cref="PlayedSlots"/>), the current one's being the idle's own.
+    /// <see cref="PlayedSlots"/>), the current one's being the idle's own, or the looped emote's
+    /// it goes to.
     /// </summary>
     private IReadOnlyList<string> IdleOutputLocations(AnimationSource source)
     {
-        var key = $"{string.Join(",", _animationOutputSlots)}/{PlanOutputMode}";
+        var key = $"{string.Join(",", _animationOutputSlots)}/{PlanOutputMode}/{AnimationAcrossKinds}/{AnimationTargetEmote}";
         if (!ReferenceEquals(source, _idleOutputsFor) || key != _idleOutputsKey)
         {
             _idleOutputsFor = source;
             _idleOutputsKey = key;
-            _idleOutputs = PlayedSlots(source)
-                .SelectMany(s => s.Index == source.SlotIndex ? source.Locations : SlotVariant(source, s).Locations.Values)
-                .Distinct(StringComparer.Ordinal)
-                .ToList();
+            _idleOutputs = IdleToEmote(source)
+                ? AnimationTargetEmote == 0 ? [] : EmoteVariant(source).AllDestinations.Distinct(StringComparer.Ordinal).ToList()
+                : PlayedSlots(source)
+                    .SelectMany(s => s.Index == source.SlotIndex ? source.Locations : SlotVariant(source, s).Locations.Values)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
         }
         return _idleOutputs;
     }
 
     /// <summary>
     /// Where a retarget writes the animation: an idle's ticked slots (its own until one is
-    /// ticked), or where the animation is.
+    /// ticked) or the looped emote it goes to, or where the animation is.
     /// </summary>
     private IReadOnlyList<string> RetargetLocations(AnimationSource source)
         => source.Kind == AnimationSourceKind.Idle && IdleOutputLocations(source) is { Count: > 0 } outputs ? outputs : source.Locations;
@@ -355,6 +429,13 @@ public sealed partial class ConverterSession
 
     private string? IdleBlockReason(AnimationSource source)
     {
+        if (IdleToEmote(source))
+        {
+            if (AnimationEmotes == null) return "Reading the emote list";
+            if (GameData.Animations.FindEmote(AnimationTargetEmote) is not { IsLooped: true })
+                return "Choose the looped emote the animation moves to.";
+            return AnimationAlsoRetargets ? RetargetBlockReason(source) : null;
+        }
         if (_animationOutputSlots.Count == 0)
             return "Tick the slots the animation should play in (its current one to keep or convert it there).";
         if (_animationOutputSlots.All(index => index == source.SlotIndex) && !AnimationAlsoRetargets && !AttachExpression)
@@ -388,6 +469,9 @@ public sealed partial class ConverterSession
                 if (GameData.Animations.FindExpression(AnimationTargetEmote) is not { } target) return "Choose the expression the face moves to.";
                 if (target.Id == source.EmoteId || FacePose(source) == target.Pose) return "Choose a different expression than the current one.";
                 return target.OwnPack ? null : $"/{target.Name} is kept in the shared face pack with every other face, so it cannot be replaced.";
+            case AnimationSourceKind.Emote when EmoteToSlots(source):
+                if (_animationOutputSlots.Count == 0) return "Tick the idle slots the emote should play in.";
+                return SourceContainerBlockReason(source);
             case AnimationSourceKind.Emote:
                 if (AnimationEmotes == null) return "Reading the emote list";
                 if (AnimationTargetEmote == 0) return "Choose the emote the animation moves to.";
@@ -410,18 +494,29 @@ public sealed partial class ConverterSession
         // several, every slot becomes an option, in slot order. Its own slot is always among the
         // variants, leaving it where it is: whether it counts is decided when the plan is made,
         // in the output mode it is made in (see AnimationConversionRequest.PlayedSlots).
+        // Swapped to a looped emote instead, it goes there alone, retargeted on the way all the same.
         if (source.Kind == AnimationSourceKind.Idle)
             return request with
             {
-                Variants          = [.. AnimationSlots.Where(s => s.Index == source.SlotIndex || _animationOutputSlots.Contains(s.Index))
-                                        .Select(slot => SlotVariant(source, slot))],
+                Variants          = IdleToEmote(source)
+                                        ? [EmoteVariant(source)]
+                                        : [.. AnimationSlots.Where(s => s.Index == source.SlotIndex || _animationOutputSlots.Contains(s.Index))
+                                            .Select(slot => SlotVariant(source, slot))],
                 StaysAtSource     = StaysInSlot(source),
-                SlotGroupName     = SlotGroupName(source),
+                SlotGroupName     = IdleToEmote(source) ? null : SlotGroupName(source),
                 SourceRace        = AnimationAlsoRetargets ? AnimationSourceRace : (ushort)0,
                 TargetRaces       = AnimationAlsoRetargets ? [.. _animationTargetRaces] : [],
                 IncludeSourceRace = AnimationIncludesSourceRace,
             };
         if (AnimationOperation == AnimationOperation.Expression) return request;
+        // A looped emote goes to every ticked slot, or into slot groups when there are several. It
+        // has no slot of its own among them.
+        if (EmoteToSlots(source))
+            return request with
+            {
+                Variants      = [.. AnimationSlots.Where(s => _animationOutputSlots.Contains(s.Index)).Select(slot => SlotVariant(source, slot))],
+                SlotGroupName = SlotGroupName(source),
+            };
         if (AnimationOperation == AnimationOperation.Retarget)
             return request with
             {
@@ -437,21 +532,13 @@ public sealed partial class ConverterSession
             : null;
     }
 
-    /// <summary>The source idle's loop moves to the slot's loop, and its start to the slot's start when both have one.</summary>
+    /// <summary>
+    /// The source idle's or looped emote's loop moves to the slot's loop, and its start to the
+    /// slot's start when both have one.
+    /// </summary>
     private static AnimationSwapVariant SlotVariant(AnimationSource source, IdleSlot slot)
-    {
-        const string prefix = "a0001/bt_common/";
-        var map   = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
-        var roles = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
-        foreach (var location in source.Locations)
-        {
-            if (!IdleSlots.TryDescribe(location[prefix.Length..], out _, out _, out var isStart)) continue;
-            roles[location] = isStart ? "start" : "looping";
-            if (!isStart) map[location] = prefix + slot.LoopKey;
-            else if (slot.StartKey != null) map[location] = prefix + slot.StartKey;
-        }
-        return new AnimationSwapVariant(slot.Label, map.ToImmutable()) { SourceRoles = roles.ToImmutable() };
-    }
+        => LoopRoles.Variant(slot.Label, source.Locations, LoopRoles.BodyPrefix + slot.LoopKey,
+            slot.StartKey == null ? null : LoopRoles.BodyPrefix + slot.StartKey);
 
     /// <summary>The pose a facial expression source's packs hold, e.g. <c>smile</c>.</summary>
     private static string FacePose(AnimationSource source)
@@ -469,9 +556,16 @@ public sealed partial class ConverterSession
     private AnimationSwapVariant EmoteVariant(AnimationSource source)
         => EmoteVariant(source, GameData.Animations.FindEmote(AnimationTargetEmote));
 
-    /// <summary>An emote's animations pair with the destination's by their positions in the emote (see <see cref="EmotePairing"/>).</summary>
+    /// <summary>
+    /// An emote's animations pair with the destination's by their positions in the emote (see
+    /// <see cref="EmotePairing"/>); an idle's go to a looped emote's by role (see <see cref="LoopRoles"/>).
+    /// </summary>
     private AnimationSwapVariant EmoteVariant(AnimationSource source, EmoteInfo? to)
     {
+        if (source.Kind == AnimationSourceKind.Idle)
+            return to?.Loop is { } loop
+                ? LoopRoles.Variant($"/{to.Name}", source.Locations, loop.Location, to.Start?.Location)
+                : new AnimationSwapVariant(to == null ? "Emote" : $"/{to.Name}", ImmutableDictionary<string, string>.Empty);
         var from = GameData.Animations.FindEmote(source.EmoteId);
         if (from == null || to == null) return new AnimationSwapVariant(to == null ? "Emote" : $"/{to.Name}", ImmutableDictionary<string, string>.Empty);
         var provided = from.Timelines.Where(t => source.Locations.Contains(t.Location)).ToList();
@@ -511,16 +605,26 @@ public sealed partial class ConverterSession
     private string DescribeIdle(AnimationSource source)
     {
         var others = OtherOutputSlots(source);
-        var text = source.Label;
-        if (GroupsSlots(source))
-            text += " → a slot choice per race: " + string.Join(", ", PlayedSlots(source).Select(s => s.Label));
-        else if (others.Count > 0)
-            text += " → " + string.Join(", ", others.Select(s => s.Label)) + (StaysInSlot(source) ? " and its own slot" : string.Empty);
+        var moves = others.Count > 0 || IdleToEmote(source);
+        var text = DescribeSlots(source);
+        if (IdleToEmote(source))
+            text += $" → /{GameData.Animations.FindEmote(AnimationTargetEmote)?.Name ?? "?"}";
         if (AnimationAlsoRetargets)
-            text += (others.Count > 0 ? ", retargeted " : ": ") + DescribeRetarget();
+            text += (moves ? ", retargeted " : ": ") + DescribeRetarget();
         if (AttachExpression)
-            text += others.Count > 0 || AnimationAlsoRetargets ? $", with the {ExpressionLabel}" : $" + {ExpressionLabel}";
+            text += moves || AnimationAlsoRetargets ? $", with the {ExpressionLabel}" : $" + {ExpressionLabel}";
         return text + ChosenVersionSuffix(source);
+    }
+
+    /// <summary>The source and the slots it goes to: "Standing idle 3 → Standing idle 5 and its own slot", or a slot choice.</summary>
+    private string DescribeSlots(AnimationSource source)
+    {
+        var others = OtherOutputSlots(source);
+        if (GroupsSlots(source))
+            return $"{source.Label} → a slot choice per race: " + string.Join(", ", PlayedSlots(source).Select(s => s.Label));
+        if (others.Count > 0)
+            return $"{source.Label} → " + string.Join(", ", others.Select(s => s.Label)) + (StaysInSlot(source) ? " and its own slot" : string.Empty);
+        return source.Label;
     }
 
     private string DescribeOperation(AnimationSource source)
@@ -529,6 +633,8 @@ public sealed partial class ConverterSession
             return $"{source.Label} + {ExpressionLabel}" + ChosenVersionSuffix(source);
         if (AnimationOperation == AnimationOperation.Retarget)
             return $"{source.Label}: {DescribeRetarget()}";
+        if (EmoteToSlots(source))
+            return DescribeSlots(source);
         if (source.Kind == AnimationSourceKind.Emote)
             return $"{source.Label} → /{GameData.Animations.FindEmote(AnimationTargetEmote)?.Name ?? "?"}";
         return $"{source.Label} → /{GameData.Animations.FindExpression(AnimationTargetEmote)?.Name ?? "?"}";
@@ -656,11 +762,15 @@ public sealed partial class ConverterSession
     /// <summary>Short label for the default new mod name.</summary>
     private string AnimationNameLabel(AnimationSource source)
     {
-        if (source.Kind == AnimationSourceKind.Idle)
+        if (source.Kind == AnimationSourceKind.Idle || EmoteToSlots(source))
         {
             var others = OtherOutputSlots(source);
             if (GroupsSlots(source)) return "Slot choice";
             if (others.Count > 0) return others.Count == 1 ? others[0].Label : $"{others.Count} slots";
+            if (IdleToEmote(source))
+                return GameData.Animations.EmotesReady && GameData.Animations.FindEmote(AnimationTargetEmote) is { } target
+                    ? $"as /{target.Name}"
+                    : "Swapped";
             if (AnimationAlsoRetargets) return RetargetNameLabel();
             return AttachExpression ? $"with {ExpressionLabel}" : "Swapped";
         }

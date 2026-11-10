@@ -35,6 +35,9 @@ internal static class AnimationTests
         ("Swap pairs the animation the action timeline plays", SwapFromDefaultIdle),
         ("An animation with no counterpart is explained in plain words", UnpairedIsExplained),
         ("Emote swaps pair every position an animation plays in", EmotePositions),
+        ("Idles and looped emotes pair by role: loop to loop, start to start", LoopRolesPair),
+        ("An idle goes to a looped emote, its start left out where the emote has none", IdleToLoopedEmote),
+        ("A looped emote goes into slot groups and keeps its own place as the output mode says", LoopedEmoteToSlotGroups),
         ("A facial expression swaps to another, with its timeline in every option", FaceSwap),
         ("Attaching an expression names the face in the body's timeline", ExpressionAttach),
         ("Game expressions: one pose, read from the race's own face animations", GameExpressionDonor),
@@ -705,6 +708,111 @@ internal static class AnimationTests
         var plan = Planner(Game()).Plan(mod.Path, request);
         Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
         Assert.Equal(new[] { Loop5, Start5 }, plan.Result.Default.FileEntries().Select(e => GamePath.Normalize(e.Key)).Order().ToArray());
+    }
+
+    private const string BoxLoop = "chara/human/c0101/animation/a0001/bt_common/emote/loop_emot14_loop.pap";
+    private const string BoxStart = "chara/human/c0101/animation/a0001/bt_common/emote/loop_emot14_start.pap";
+
+    private static string BodyLocation(string path) => PapPath.TryParse(path, out var p) ? p.Location : throw new Exception(path);
+
+    private static void LoopRolesPair()
+    {
+        Assert.Equal(false, LoopRoles.IsStart("a0001/bt_common/resident/idle"));
+        Assert.Equal(false, LoopRoles.IsStart("a0001/bt_common/emote/s_pose02_loop"));
+        Assert.Equal(true, LoopRoles.IsStart("a0001/bt_common/emote/pose03_start"));
+        Assert.Equal(false, LoopRoles.IsStart("a0001/bt_common/emote/swim_on_emot01_loop"));
+        Assert.Equal(true, LoopRoles.IsStart("a0001/bt_common/emote_sp/sp10_start"));
+        Assert.Equal(null, LoopRoles.IsStart("a0001/bt_common/emote/cheer"));
+        Assert.Equal(null, LoopRoles.IsStart("f0002/nonresident/smile"));
+
+        var idle = new[] { BodyLocation(Loop3), BodyLocation(Start3) };
+        var toBox = LoopRoles.Variant("/Box", idle, BodyLocation(BoxLoop), null);
+        Assert.Equal(new[] { BodyLocation(Loop3) }, toBox.Locations.Keys.ToArray());
+        Assert.Equal(BodyLocation(BoxLoop), toBox.Locations[BodyLocation(Loop3)]);
+        Assert.Equal("start", toBox.SourceRoles[BodyLocation(Start3)]);
+
+        var toSlot = LoopRoles.Variant("Standing idle 5", [BodyLocation(BoxStart), BodyLocation(BoxLoop)], BodyLocation(Loop5), BodyLocation(Start5));
+        Assert.Equal(BodyLocation(Loop5), toSlot.Locations[BodyLocation(BoxLoop)]);
+        Assert.Equal(BodyLocation(Start5), toSlot.Locations[BodyLocation(BoxStart)]);
+    }
+
+    /// <summary>A game with /Box's loop and its timeline but, like most looped emotes, no start file.</summary>
+    private static FakeGame BoxGame()
+    {
+        var game = Game();
+        game.Files[BoxLoop] = BuildPap([("cbem_loop_emot14_1lp", 0)]);
+        game.Files["chara/action/emote/loop_emot14_loop.tmb"] = ActionTimeline("cbem_loop_emot14_1lp");
+        return game;
+    }
+
+    /// <summary>
+    /// An idle moved to a looped emote plays as the emote's loop, renamed for it; the emote has no
+    /// start, so the idle's start has nowhere to go and leaves with the rest, which is explained.
+    /// </summary>
+    private static void IdleToLoopedEmote()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"anim\\loop.pap","{{{Start3}}}":"anim\\start.pap"}}""");
+        mod.File("anim/loop.pap", BuildPap([("cbem_pose03_1lp", 0)]));
+        mod.File("anim/start.pap", BuildPap([("cbem_pose03_1st", 0)]));
+        var request = new AnimationConversionRequest([BodyLocation(Loop3), BodyLocation(Start3)], AnimationOperation.Swap,
+            ConversionOutputMode.InPlace, "test")
+        {
+            Variants = [LoopRoles.Variant("/Box", [BodyLocation(Loop3), BodyLocation(Start3)], BodyLocation(BoxLoop), null)],
+        };
+
+        var plan = Planner(BoxGame()).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { BoxLoop }, Keys(plan));
+        var written = WrittenAt(plan, BoxLoop);
+        Assert.Equal("cbem_loop_emot14_1lp", written.Entries.Single().Name);
+        Assert.Equal(["cbem_loop_emot14_1lp"], PapTimeline.ReadStrings(written.ToArray()).Select(s => s.Value));
+        var unpaired = plan.Diagnostics.Single(d => d.Code == "unpaired");
+        Assert.True(unpaired.Message.Contains("/Box has no start animation of its own"), unpaired.Message);
+
+        // Added to the mod, the idle stays in its slot and plays as /Box too.
+        var added = Planner(BoxGame()).Plan(mod.Path, request.ForMode(ConversionOutputMode.AddToMod));
+        Assert.True(!added.HasBlockers, string.Join(" ", added.Diagnostics.Select(d => d.Message)));
+        Assert.Equal(new[] { BoxLoop, Loop3, Start3 }.Order(StringComparer.Ordinal).ToArray(), Keys(added));
+    }
+
+    /// <summary>
+    /// A looped emote ticked in two slots gets a group per race with an option per slot, its loop
+    /// and start each going to the slot's. It has no own slot among the options, so its own files
+    /// are not taken into the groups: adding to the mod keeps them where they are, converting in
+    /// place moves them, and a new mod holds only the groups.
+    /// </summary>
+    private static void LoopedEmoteToSlotGroups()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{BoxLoop}}}":"anim\\loop.pap","{{{BoxStart}}}":"anim\\start.pap"}}""");
+        mod.File("anim/loop.pap", BuildPap([("cbem_loop_emot14_1lp", 0)]));
+        mod.File("anim/start.pap", BuildPap([("cbem_loop_emot14_1st", 0)]));
+        ImmutableArray<string> sources = [BodyLocation(BoxLoop), BodyLocation(BoxStart)];
+        var request = new AnimationConversionRequest(sources, AnimationOperation.Swap, ConversionOutputMode.InPlace, "test")
+        {
+            Variants =
+            [
+                LoopRoles.Variant("Standing idle 3", sources, BodyLocation(Loop3), BodyLocation(Start3)),
+                LoopRoles.Variant("Standing idle 5", sources, BodyLocation(Loop5), BodyLocation(Start5)),
+            ],
+            SlotGroupName = "Standing idle",
+        };
+        Assert.True(request.InSlotGroups, "two slots make slot groups");
+
+        foreach (var mode in new[] { ConversionOutputMode.InPlace, ConversionOutputMode.AddToMod, ConversionOutputMode.NewMod })
+        {
+            var plan = Planner(BoxGame()).Plan(mod.Path, request.ForMode(mode));
+            Assert.True(!plan.HasBlockers, $"{mode}: " + string.Join(" ", plan.Diagnostics.Select(d => d.Message)));
+            var options = SlotOptions(plan.Result.Groups.Single());
+            Assert.Equal(new[] { "-", "Standing idle 3", "Standing idle 5" }, options.Keys.ToArray());
+            Assert.Equal(new[] { Loop5, Start5 }.Order().ToArray(), options["Standing idle 5"].Keys.Order().ToArray());
+            string Played(string local) => new PapFile(plan.Files.Single(f => f.Operation == LocalFileOperation.Write &&
+                GamePath.NormalizeLocal(f.Destination) == local).Content!).Entries.Single().Name;
+            Assert.Equal("cbem_pose05_1lp", Played(options["Standing idle 5"][Loop5]));
+            Assert.Equal("cbem_pose03_1st", Played(options["Standing idle 3"][Start3]));
+            Assert.Equal(mode == ConversionOutputMode.AddToMod ? new[] { BoxLoop, BoxStart } : [], Keys(plan));
+        }
     }
 
     private static void UnpairedIsExplained()

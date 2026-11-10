@@ -133,10 +133,11 @@ internal sealed class ActionPanels(ConverterSession session, Configuration confi
     private const string SlotGroupsSentence =
         "An idle ticked in several slots goes into a single-select option group per race instead, with an option for " +
         "each slot; its own files move out of the options they were in, into the option for its own slot, and a " +
-        "retarget's source race keeps a group too. Every group starts on \"-\", so choose the slots in Penumbra.";
+        "retarget's source race keeps a group too. A looped emote ticked in several slots gets the same groups, while " +
+        "the emote itself stays or moves as for any swap. Every group starts on \"-\", so choose the slots in Penumbra.";
 
     /// <summary>What becomes of an idle in slot groups until slots are chosen, in a mod it was in.</summary>
-    private const string SlotGroupsUntilChosen = SlotGroupsSentence + " Until then the idle plays nowhere, not even where it was.";
+    private const string SlotGroupsUntilChosen = SlotGroupsSentence + " Until then an idle plays nowhere, not even where it was.";
 
     /// <summary>A new mod keeping the whole mod is this mod converted as in place, written elsewhere.</summary>
     private static string WholeModDescription(PlanContents contents, string? customization)

@@ -126,7 +126,7 @@ public sealed partial class ConverterSession
             // The output mode may still change to one that puts the expression, or the idle's slots,
             // into an option group.
             SourceChoices = source.Animation is { HasVariants: true } animation &&
-                            (ExpressionAtSource(animation) || animation.Kind == AnimationSourceKind.Idle)
+                            (ExpressionAtSource(animation) || TargetsSlots(animation))
                 ? animation.Providers
                 : [],
         });

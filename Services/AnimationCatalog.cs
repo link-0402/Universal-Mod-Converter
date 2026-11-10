@@ -37,7 +37,20 @@ public sealed record EmoteTimeline(int Index, string Key)
     public EmotePairing.Timeline ForPairing => new(Location, Positions);
 }
 
-public sealed record EmoteInfo(uint Id, string Name, uint Icon, ImmutableArray<EmoteTimeline> Timelines);
+public sealed record EmoteInfo(uint Id, string Name, uint Icon, ImmutableArray<EmoteTimeline> Timelines)
+{
+    /// <summary>
+    /// A looped emote's loop: the emote's timelines name a <c>…_loop</c> and a <c>…_start</c>, and
+    /// the loop is not an idle slot (Change Pose plays those). Null for any other emote. It swaps
+    /// with idles (see <see cref="LoopRoles"/>).
+    /// </summary>
+    public EmoteTimeline? Loop { get; init; }
+
+    /// <summary>A looped emote's start, when the game has a file for it; most have none.</summary>
+    public EmoteTimeline? Start { get; init; }
+
+    public bool IsLooped => Loop != null;
+}
 
 /// <summary>
 /// An emote of the game's Expressions list and the facial pose it plays (see <see cref="GameExpressions"/>).
@@ -161,6 +174,7 @@ public sealed class AnimationCatalog(IDataManager data, IPluginLog log)
                         continue;
                     }
                     var timelines = ImmutableArray.CreateBuilder<EmoteTimeline>();
+                    var keys = new List<string>();
                     var index = 0;
                     foreach (var reference in emote.ActionTimeline)
                     {
@@ -168,6 +182,7 @@ public sealed class AnimationCatalog(IDataManager data, IPluginLog log)
                         if (reference.RowId == 0 || !reference.IsValid) continue;
                         var key = reference.Value.Key.ExtractText();
                         if (key.Length == 0) continue;
+                        keys.Add(key);
                         var papKey = AnimationKeys.PapKey(key);
                         if (!PapPath.TryParse(PapPath.ForTimelineKey(ProbeRace, key).GamePath, out var path) ||
                             !FileExists(path.GamePath)) continue;
@@ -176,7 +191,7 @@ public sealed class AnimationCatalog(IDataManager data, IPluginLog log)
                         else timelines.Add(new EmoteTimeline(position, papKey));
                     }
                     if (timelines.Count > 0)
-                        emotes.Add(new EmoteInfo(emote.RowId, name, emote.Icon, timelines.ToImmutable()));
+                        emotes.Add(Looped(new EmoteInfo(emote.RowId, name, emote.Icon, timelines.ToImmutable()), keys));
                 }
             }
             catch (Exception ex)
@@ -195,6 +210,21 @@ public sealed class AnimationCatalog(IDataManager data, IPluginLog log)
             _expressions = expressions.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Id).ToList();
             _emotes = emotes.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Id).ToList();
         }
+    }
+
+    /// <summary>
+    /// Marks a looped emote's loop and start (see <see cref="EmoteInfo.Loop"/>), going by the keys
+    /// its timelines name, since 63 of the game's 100 looped emotes have no start file and the
+    /// sheet's IsLoop is set on starts too (measured 2026-11-10).
+    /// </summary>
+    private static EmoteInfo Looped(EmoteInfo emote, List<string> keys)
+    {
+        var loop = keys.FirstOrDefault(k => k.EndsWith("_loop", StringComparison.Ordinal));
+        var start = keys.FirstOrDefault(k => k.EndsWith("_start", StringComparison.Ordinal));
+        if (loop == null || start == null || Core.IdleSlots.TryDescribe(AnimationKeys.PapKey(loop), out _, out _, out _)) return emote;
+        return emote.Timelines.FirstOrDefault(t => t.Key == AnimationKeys.PapKey(loop)) is { } found
+            ? emote with { Loop = found, Start = emote.Timelines.FirstOrDefault(t => t.Key == AnimationKeys.PapKey(start)) }
+            : emote;
     }
 
     /// <summary>The facial pose an expression plays, when the game has it for the probe race.</summary>

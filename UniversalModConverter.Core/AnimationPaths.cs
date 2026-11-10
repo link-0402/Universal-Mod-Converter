@@ -101,7 +101,8 @@ public sealed record IdleSlot(string Family, int Index, string LoopKey, string? 
 /// under <c>emote/</c> (<c>pose03_loop.pap</c> with an optional <c>pose03_start.pap</c>) and one
 /// unnumbered base member elsewhere: <c>resident/idle.pap</c> for standing, <c>sit</c> for
 /// chair sitting and <c>jmn</c> for ground sitting. The base member is slot 0 and swaps like
-/// any other. Swaps never cross families: a standing idle cannot become a sitting one.
+/// any other. Swaps between idles never cross families: a standing idle cannot become a sitting
+/// one. An idle of any family and a looped emote swap into each other (see <see cref="LoopRoles"/>).
 /// </summary>
 public static partial class IdleSlots
 {
@@ -174,5 +175,47 @@ public static partial class IdleSlots
     {
         var label = GetFamily(family)?.Label ?? family;
         return index == 0 ? $"{label} (default)" : $"{label} {index}";
+    }
+}
+
+/// <summary>
+/// Swaps into an idle slot, and between idles and looped emotes, pair by role: a loop goes to the
+/// destination's loop and a start to its start. An idle's role comes from its slot key (the
+/// unnumbered base member is a loop); a looped emote's from its key, <c>…_loop</c> or <c>…_start</c>
+/// (the game's looped emotes have one of each, in any position of Emote.ActionTimeline).
+/// </summary>
+public static class LoopRoles
+{
+    /// <summary>Where every idle and emote body animation lives.</summary>
+    public const string BodyPrefix = "a0001/bt_common/";
+
+    /// <summary>Whether a body location is a start (true) or a loop (false); null when it is neither.</summary>
+    public static bool? IsStart(string location)
+    {
+        if (!location.StartsWith(BodyPrefix, StringComparison.Ordinal)) return null;
+        var key = location[BodyPrefix.Length..];
+        if (IdleSlots.TryDescribe(key, out _, out _, out var start)) return start;
+        if (key.EndsWith("_loop", StringComparison.Ordinal)) return false;
+        if (key.EndsWith("_start", StringComparison.Ordinal)) return true;
+        return null;
+    }
+
+    /// <summary>
+    /// The source's loop goes to <paramref name="loop"/> and its start to <paramref name="start"/>.
+    /// A start with no start to go to, or a part with no role, has no counterpart, which the
+    /// planner explains (see <see cref="AnimationSwapVariant.SourceRoles"/>).
+    /// </summary>
+    public static AnimationSwapVariant Variant(string label, IEnumerable<string> sources, string loop, string? start)
+    {
+        var map   = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
+        var roles = ImmutableDictionary.CreateBuilder<string, string>(StringComparer.Ordinal);
+        foreach (var location in sources)
+        {
+            if (IsStart(location) is not { } isStart) continue;
+            roles[location] = isStart ? "start" : "looping";
+            if (!isStart) map[location] = loop;
+            else if (start != null) map[location] = start;
+        }
+        return new AnimationSwapVariant(label, map.ToImmutable()) { SourceRoles = roles.ToImmutable() };
     }
 }
