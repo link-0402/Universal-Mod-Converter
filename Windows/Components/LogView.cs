@@ -22,6 +22,8 @@ internal sealed class LogView(LogStore log)
     private int _builtRevision = -1;
     private (bool, bool, bool, string) _builtFilter;
     private List<LogEntry> _visible = new();
+    private float _widthFontSize = -1f;
+    private float _contentWidth;
 
     public void Draw(float minHeight)
     {
@@ -52,6 +54,9 @@ internal sealed class LogView(LogStore log)
 
         var entries = Visible();
         var height  = Math.Max(minHeight, ImGui.GetContentRegionAvail().Y);
+        // The clipper only submits visible rows, so without a fixed width the horizontal scrollbar
+        // comes and goes as long rows scroll in and out, and Follow chases the changing bottom.
+        ImGui.SetNextWindowContentSize(new Vector2(ContentWidth(entries), 0f));
         using var child = ImRaii.Child("##LogScroll", new Vector2(-1, height), true, ImGuiWindowFlags.HorizontalScrollbar);
         if (!child.Success) return;
         if (entries.Count == 0)
@@ -72,10 +77,25 @@ internal sealed class LogView(LogStore log)
         if (_autoScroll && atBottom) ImGui.SetScrollHereY(1f);
     }
 
+    /// <summary>Width of the widest visible row, recomputed when the rows or the font size change.</summary>
+    private float ContentWidth(List<LogEntry> entries)
+    {
+        var fontSize = ImGui.GetFontSize();
+        if (_widthFontSize == fontSize) return _contentWidth;
+        _widthFontSize = fontSize;
+        var spacing = ImGui.GetStyle().ItemSpacing.X;
+        _contentWidth = 0f;
+        foreach (var e in entries)
+            _contentWidth = Math.Max(_contentWidth,
+                ImGui.CalcTextSize(e.Time.ToString("HH:mm:ss")).X + spacing + ImGui.CalcTextSize(e.Text).X);
+        return _contentWidth;
+    }
+
     private List<LogEntry> Visible()
     {
         var filter = (_showInfo, _showWarnings, _showErrors, _filter);
         if (_builtRevision == log.Revision && _builtFilter == filter) return _visible;
+        _widthFontSize = -1f;
         _builtRevision = log.Revision;
         _builtFilter   = filter;
         var q = _filter.Trim();
