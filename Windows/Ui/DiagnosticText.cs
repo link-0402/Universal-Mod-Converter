@@ -69,6 +69,7 @@ internal static class DiagnosticText
         ["est_invalid"]            = "Extra skeleton entry invalid",
         ["est_unavailable"]        = "Extra skeleton data unavailable",
         ["extra_skeleton_missing"] = "Extra skeleton missing",
+        ["race_skeleton_copied"]   = "Extra skeleton copied from the source race",
         ["face_skeleton_replaced"] = "Face skeleton swapped for the target's",
         ["tail_bones_on_ear"]      = "Tail bones on an ear",
         ["hair_skeleton_mismatch"] = "Hair physics bones not on the target",

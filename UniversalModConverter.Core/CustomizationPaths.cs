@@ -554,6 +554,19 @@ public static partial class CustomizationPaths
             .ToArray();
 
     /// <summary>
+    /// A file of race <paramref name="from"/>'s hair skeleton <paramref name="skeleton"/> (its sklb or
+    /// phyb) at the path race <paramref name="to"/> loads it from, or null for a path outside that folder.
+    /// </summary>
+    public static string? HairSkeletonPathFor(string gamePath, ushort skeleton, ushort from, ushort to)
+    {
+        var path = GamePath.Normalize(gamePath);
+        var folder = $"chara/human/c{from:D4}/skeleton/hair/h{skeleton:D4}/";
+        if (!path.StartsWith(folder, StringComparison.Ordinal)) return null;
+        return $"chara/human/c{to:D4}/skeleton/hair/h{skeleton:D4}/" +
+               path[folder.Length..].Replace($"_c{from:D4}h{skeleton:D4}", $"_c{to:D4}h{skeleton:D4}", StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The paths a material the model names by its complete game path resolves to. An Au Ra
     /// Xaela root loads the same material from its own root, so the path moves to it; a
     /// Hrothgar tail loads it from any variant folder, the named one first.

@@ -52,8 +52,9 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         var target = new CustomizationPathEndpoint(targetKind, targetRace, newId);
         var resources = ReadResources(root);
+        var skeletonCopies = HairSkeletonCopies(task, mod, CustomizationPaths.Owner(source), CustomizationPaths.Owner(target), resources);
         var keys = new KeyRules(source, target, resources,
-            path => gameData is IGameFileProvider files && files.FileExists(path));
+            path => gameData is IGameFileProvider files && files.FileExists(path), skeletonCopies.Keys);
         var references = new References();
         // The index keeps one file per game path, the last option's; every option's file is converted.
         var optionFiles = new List<(string GamePath, string Local)>();
@@ -133,7 +134,8 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         PlanJson(task, root, descriptor, source, target, resources, materialDependencies, keys, keepSource,
             FaceSkeletons(task, CustomizationPaths.Owner(source), CustomizationPaths.Owner(target), resources));
         // Both clans of a race load one model, and the extra skeleton with it.
-        PlanExtraSkeleton(task, root, mod, descriptor, CustomizationPaths.Owner(source), CustomizationPaths.Owner(target), resources);
+        PlanExtraSkeleton(task, root, mod, descriptor, CustomizationPaths.Owner(source), CustomizationPaths.Owner(target), resources,
+            skeletonCopies.Skeletons);
         var models = CollectOutputModels(task, root, mod, keys);
         if (keepSource && task.OwnOption is { } own && PlanConvertedOption(task, root, descriptor, own) is { Moved: true } moved)
         {
@@ -794,8 +796,9 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
     /// Options that override it keep doing so, because Penumbra applies option
     /// manipulations over the default ones.
     /// </summary>
+    /// <param name="copied">The hair skeletons the conversion copies to the target race (see <see cref="HairSkeletonCopies"/>).</param>
     private void PlanExtraSkeleton(ConversionTask task, string root, PenumbraMod mod, CustomizationKindDescriptor descriptor,
-        CustomizationPathEndpoint source, CustomizationPathEndpoint target, ModResourceIndex resources)
+        CustomizationPathEndpoint source, CustomizationPathEndpoint target, ModResourceIndex resources, IReadOnlySet<ushort> copied)
     {
         if (!descriptor.SupportsEst || source.Kind != target.Kind) return;
         var estPath = source.Kind == AssetKind.Hair
@@ -816,7 +819,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         bool ExistsFor(ushort skeleton, ushort race) => SkeletonPath(skeleton, race) is var path &&
                                                         (resources.Files.ContainsKey(path) || resources.FileSwaps.ContainsKey(path) ||
                                                          gameData is not IGameFileProvider files || files.FileExists(path));
-        bool Exists(ushort skeleton) => ExistsFor(skeleton, target.GenderRace);
+        bool Exists(ushort skeleton) => copied.Contains(skeleton) || ExistsFor(skeleton, target.GenderRace);
 
         var defaultSource = FindEst(mod.Default, source);
         if (defaultSource == null && FindEst(mod.Default, target) is { } definedTarget)
@@ -911,6 +914,49 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
                        $"(target vanilla {prefix}{targetVanilla:D4}, source default {prefix}{defaultSkeleton:D4})",
             NewValue = manipulation.ToJsonString(),
         });
+    }
+
+    private sealed record SkeletonCopies(IReadOnlyDictionary<string, string> Keys, IReadOnlySet<ushort> Skeletons);
+
+    private static string HairSkeletonFile(ushort race, ushort skeleton)
+        => $"chara/human/c{race:D4}/skeleton/hair/h{skeleton:D4}/skl_c{race:D4}h{skeleton:D4}.sklb";
+
+    /// <summary>
+    /// A hair skeleton the mod ships for the source race and names in an EST entry (Instant Edit's
+    /// custom hair skeletons, h1000-h9999), which the target race has none of: its files are copied
+    /// as they are to the target race's folder, under keys added beside the source's, so the
+    /// converted hair keeps its physics bones. The bones keep the source race's places around the
+    /// head, and the physics file the collision shapes made for the source's body.
+    /// </summary>
+    /// <returns>Each source key with the target key it is copied to, and the skeletons copied.</returns>
+    private SkeletonCopies HairSkeletonCopies(ConversionTask task, PenumbraMod mod, CustomizationPathEndpoint source,
+        CustomizationPathEndpoint target, ModResourceIndex resources)
+    {
+        var keys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var skeletons = new SortedSet<ushort>();
+        if (source.Kind != AssetKind.Hair || target.Kind != AssetKind.Hair || source.GenderRace == target.GenderRace ||
+            gameData is not IGameFileProvider files)
+            return new(keys, skeletons);
+
+        var shipped = resources.Files.Keys.Concat(resources.FileSwaps.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (var skeleton in mod.Containers.Select(c => FindEst(c, source)).OfType<ushort>().Where(id => id != 0).Distinct())
+        {
+            var targetFile = HairSkeletonFile(target.GenderRace, skeleton);
+            if (resources.Files.ContainsKey(targetFile) || resources.FileSwaps.ContainsKey(targetFile) || files.FileExists(targetFile)) continue;
+            var moved = shipped
+                .Select(key => (Key: key, Target: CustomizationPaths.HairSkeletonPathFor(key, skeleton, source.GenderRace, target.GenderRace)))
+                .Where(m => m.Target != null)
+                .ToList();
+            // A skeleton the mod doesn't ship is the game's or nobody's (see PlanExtraSkeleton).
+            if (!moved.Any(m => string.Equals(m.Target, targetFile, StringComparison.Ordinal))) continue;
+            foreach (var (key, copy) in moved) keys[Normalize(key)] = copy!;
+            skeletons.Add(skeleton);
+            task.Diagnostics.Add(new PlanDiagnostic("race_skeleton_copied",
+                $"{RaceNames.Describe(target.GenderRace)} has no hair skeleton h{skeleton:D4}, so the mod's " +
+                $"{RaceNames.Describe(source.GenderRace)} one is copied for it as it is: the hair's physics bones keep their " +
+                "places around the head, and its physics keeps the collision shapes made for the source race's body.", false));
+        }
+        return new(keys, skeletons);
     }
 
     /// <summary>
@@ -1083,12 +1129,16 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         /// <summary>Whether the game has a file at a game path.</summary>
         private readonly Func<string, bool> _inGame;
 
+        /// <summary>Hair skeleton keys copied to the target race's folder (see <see cref="HairSkeletonCopies"/>).</summary>
+        private readonly IReadOnlyDictionary<string, string> _skeletonKeys;
+
         public KeyRules(CustomizationPathEndpoint source, CustomizationPathEndpoint target, ModResourceIndex resources,
-            Func<string, bool> inGame)
+            Func<string, bool> inGame, IReadOnlyDictionary<string, string> skeletonKeys)
         {
             _source = source;
             _target = target;
             _inGame = inGame;
+            _skeletonKeys = skeletonKeys;
             _otherClan = CustomizationPaths.OtherClan(target);
             // Hrothgar tails and skins keep the same material in up to five variant folders. A
             // target with a single folder receives one of them: the tail's own number when present.
@@ -1112,6 +1162,7 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
         public string? Target(string key)
         {
             if (IsSkipped(key)) return null;
+            if (_skeletonKeys.TryGetValue(Normalize(key), out var copy)) return copy;
             var rewritten = CustomizationPaths.Rewrite(key, _source, _target);
             return string.Equals(rewritten, key, StringComparison.Ordinal) ? null : rewritten;
         }
@@ -1120,10 +1171,11 @@ internal sealed partial class CustomizationPlanner(GameDataService? gameData, IP
 
         /// <summary>
         /// Whether this key is added rather than moved: material keys under a root other
-        /// customizations also load.
+        /// customizations also load, and a copied hair skeleton's (other hairs may name it too).
         /// </summary>
         public bool IsShared(string key)
-            => key.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase) &&
+            => _skeletonKeys.ContainsKey(Normalize(key)) ||
+               key.EndsWith(".mtrl", StringComparison.OrdinalIgnoreCase) &&
                CustomizationPaths.FindEndpoints(key).Any(e => CustomizationPaths.IsSharedMaterialRoot(e) &&
                    (e == _source || e == CustomizationPaths.GetMaterialEndpoint(_source)));
 

@@ -10,6 +10,7 @@ internal static class CustomizationRuleTests
         ("Midlander hair to another race's same ID keeps the shared material name", MidlanderHairSameId),
         ("Hair material names resolve the way the game resolves them", GameHairMaterialNames),
         ("Hair physics bones name their skeleton", HairSkeletonsFromBones),
+        ("A hair skeleton's files move to another race's folder", HairSkeletonRaceFolder),
         ("Hrothgar tail materials use t0001 and five variant folders", HrothgarMaterialPaths),
         ("A material named by complete game path is used as it is", CompleteMaterialPaths),
         ("Hrothgar tail to other race tail", HrothgarToOtherTail),
@@ -169,6 +170,17 @@ internal static class CustomizationRuleTests
                 "j_ex_met_a", "/mt_c0101h0111_hir_a.mtrl"])
             .SequenceEqual(new ushort[] { 108, 112 }));
         Assert.Equal(0, CustomizationPaths.HairSkeletons(["j_kao", "j_kubi", "j_sebo_c"]).Count);
+    }
+
+    private static void HairSkeletonRaceFolder()
+    {
+        Assert.Equal("chara/human/c0201/skeleton/hair/h5196/skl_c0201h5196.sklb",
+            CustomizationPaths.HairSkeletonPathFor("chara/human/c0801/skeleton/hair/h5196/skl_c0801h5196.sklb", 5196, 801, 201));
+        Assert.Equal("chara/human/c1401/skeleton/hair/h5196/phy_c1401h5196.phyb",
+            CustomizationPaths.HairSkeletonPathFor("Chara/Human/C0801/Skeleton/Hair/H5196/phy_c0801h5196.phyb", 5196, 801, 1401));
+        Assert.Equal(null, CustomizationPaths.HairSkeletonPathFor("chara/human/c0801/skeleton/hair/h0189/skl_c0801h0189.sklb", 5196, 801, 201));
+        Assert.Equal(null, CustomizationPaths.HairSkeletonPathFor("chara/human/c0101/skeleton/hair/h5196/skl_c0101h5196.sklb", 5196, 801, 201));
+        Assert.Equal(null, CustomizationPaths.HairSkeletonPathFor("chara/human/c0801/obj/hair/h0189/model/c0801h0189_hir.mdl", 5196, 801, 201));
     }
 
     private static void HrothgarMaterialPaths()
