@@ -30,6 +30,12 @@ public sealed class MergeSession(Plugin plugin)
     public string? PlanError { get; private set; }
     public ResultBanner? Result { get; set; }
 
+    /// <summary>
+    /// The folder the last merge created. Its "already exists" error stays hidden until the
+    /// inputs change or the user presses Create again with the same name.
+    /// </summary>
+    private string? _createdPath;
+
     private int _version;
     private int _plannedVersion = -1;
     private bool _planning;
@@ -97,6 +103,7 @@ public sealed class MergeSession(Plugin plugin)
 
     public void SetName(string name)
     {
+        if (Name != name) _createdPath = null;
         Name = name;
         _nameIsDefault = false;
     }
@@ -104,7 +111,9 @@ public sealed class MergeSession(Plugin plugin)
     public void ResetName()
     {
         _nameIsDefault = true;
+        var name = Name;
         UpdateDefaultName();
+        if (Name != name) _createdPath = null;
     }
 
     private void UpdateDefaultName()
@@ -115,6 +124,7 @@ public sealed class MergeSession(Plugin plugin)
 
     private void Changed()
     {
+        _createdPath = null;
         _version++;
         Plan = null;
         PlanError = null;
@@ -157,10 +167,13 @@ public sealed class MergeSession(Plugin plugin)
             if (PlanError != null) return PlanError;
             if (string.IsNullOrWhiteSpace(Name)) return "Enter a name for the merged mod.";
             if (OutputPath is not { } path) return "Cannot determine where to create the merged mod.";
-            if (PathExists(path)) return $"A folder named '{Path.GetFileName(path)}' already exists.";
+            if (PathExists(path) && !IsJustCreated(path)) return $"A folder named '{Path.GetFileName(path)}' already exists.";
             return null;
         }
     }
+
+    /// <summary>Whether <paramref name="path"/> is the folder the last merge created and the inputs have not changed since.</summary>
+    public bool IsJustCreated(string path) => _createdPath != null && ConverterSession.SamePath(_createdPath, path);
 
     /// <summary>Why one of the two folders is not a mod, or null; checked at most once a second.</summary>
     private string? DirectoryError()
@@ -214,6 +227,11 @@ public sealed class MergeSession(Plugin plugin)
     public void Create()
     {
         if (CreateBlockReason != null || Plan is not { } plan || OutputPath is not { } path) return;
+        if (IsJustCreated(path) && PathExists(path))
+        {
+            _createdPath = null; // Pressed again unchanged: now show that the folder exists.
+            return;
+        }
 
         var name = Name.Trim();
         var description = $"Merged '{FirstName}' and '{SecondName}'";
@@ -236,6 +254,7 @@ public sealed class MergeSession(Plugin plugin)
             };
             var record = plugin.History.Record(task, description, plan.BaseName);
             Changed(); // The folder exists now; creating again needs a new name.
+            _createdPath = output;
 
             if (!Main.PenumbraAvailable)
             {

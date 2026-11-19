@@ -167,10 +167,12 @@ public sealed class MergeWindow : Window, IDisposable
         if (_merge.OutputPath is { } path)
         {
             var exists = _merge.PathExists(path);
-            var color = exists ? Theme.Danger : Theme.Muted;
-            Widgets.Icon(exists ? FontAwesomeIcon.ExclamationCircle : FontAwesomeIcon.FolderPlus, color);
+            var created = exists && _merge.IsJustCreated(path);
+            var conflict = exists && !created;
+            var color = conflict ? Theme.Danger : Theme.Muted;
+            Widgets.Icon(conflict ? FontAwesomeIcon.ExclamationCircle : FontAwesomeIcon.FolderPlus, color);
             ImGui.SameLine();
-            ImGui.TextColored(color, exists ? "Already exists:" : "Will be created at:");
+            ImGui.TextColored(color, conflict ? "Already exists:" : created ? "Created at:" : "Will be created at:");
             ImGui.SameLine();
             Widgets.PathText(path, color);
         }
@@ -204,6 +206,14 @@ public sealed class MergeWindow : Window, IDisposable
 
         if (_merge.CreateBlockReason is not { } reason)
         {
+            if (_merge.OutputPath is { } path && _merge.IsJustCreated(path))
+            {
+                Widgets.Icon(FontAwesomeIcon.CheckCircle, Theme.Success);
+                ImGui.SameLine();
+                Widgets.ColoredWrapped(Theme.Success, "Merged. Change the name or the modpacks to merge again.");
+                return;
+            }
+
             var conflicts = _merge.Plan?.Conflicts.Count ?? 0;
             Widgets.Icon(FontAwesomeIcon.CheckCircle, Theme.Success);
             ImGui.SameLine();
