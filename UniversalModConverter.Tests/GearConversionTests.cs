@@ -23,6 +23,7 @@ internal static partial class GearConversionTests
         ("Add to mod with its own option: models that differ per option stay in them", OwnOptionLeavesVariantsInTheirOptions),
         ("The converted item's own option: group reuse, metadata, nothing new", OwnOptionRules),
         ("The converted item's own option keeps what the mod's options choose", OwnOptionKeepsWhatTheOptionsChoose),
+        ("The converted item's own option leaves the IMC entries its IMC group decides", OwnOptionLeavesImcEntriesToTheirGroup),
         ("Two conversions merge into one mod", MergeTwoConversions),
         ("A run answers for every file it read and lets go of what it wrote", MergedPlanInputsAndContents),
         ("A conversion that overlaps another is rejected and rolled back", MergeRejectsOverlap),
@@ -2130,6 +2131,50 @@ internal static partial class GearConversionTests
             .Select(e => GamePath.Normalize(e.Key)).Order(StringComparer.Ordinal).ToArray());
         Assert.True(toggled.Groups[1].Containers[0].FileEntries().Any(e => GamePath.Normalize(e.Key) == glow), "the glow stays with its toggle");
         Assert.True(handed.Kept?.Contains(glow) == true, handed.Kept ?? "no note about the glow");
+    }
+
+    /// <summary>
+    /// Penumbra applies a mod's groups by descending priority and Default last, and the first entry
+    /// for an identity wins. The converted item's copy of the mod's IMC group decides its IMC
+    /// entries, so the ones Default gives the target stay there, below the group, instead of moving
+    /// into the converted item's option at the top, where they would win over the group's toggles.
+    /// Its other metadata still goes into the option.
+    /// </summary>
+    private static void OwnOptionLeavesImcEntriesToTheirGroup()
+    {
+        using var mod = new TempDir();
+        const string root = "chara/equipment/e0100";
+        mod.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Toggles",
+             "DefaultData":{
+              "Files":{"{{{root}}}/model/c0201e0100_top.mdl":"top.mdl",
+                       "{{{root}}}/material/v0001/mt_c0201e0100_top_a.mtrl":"top.mtrl"},
+              "Manipulations":[{"Type":"Eqp","Manipulation":{"Entry":123,"SetId":100,"Slot":"Body"}}]},
+             "Groups":[{"Name":"Parts","Type":"Imc","Id":"{{{G2}}}",
+                        "Identifier":{"PrimaryId":100,"SecondaryId":0,"Variant":1,
+                                      "ObjectType":"Equipment","EquipSlot":"Body","BodySlot":"Unknown"},
+                        "DefaultEntry":{"MaterialId":1,"DecalId":0,"VfxId":0,"MaterialAnimationId":0,
+                                        "AttributeMask":63,"SoundId":0},
+                        "Options":[{"Id":"{{{O1}}}","Name":"Bow","AttributeMask":1}]}]}
+            """);
+        mod.File("top.mdl", TestAssets.CreateMdl(material: "/mt_c0201e0100_top_a.mtrl"));
+        mod.File("top.mtrl", Mtrl("chara/common/texture/white.tex"));
+
+        var request = new GearConversionRequest(new GearItem(GearSlot.Body, 100, 1), new GearItem(GearSlot.Body, 300, 1),
+            ConversionOutputMode.AddToMod) { ConvertedOption = new ConvertedOptionRequest("Target body", "Converted.") };
+        var plan = new GearConversionPlanner(StandardGame()).Plan(mod.Path, request);
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.True(plan.ConvertedPlacement != null, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+
+        var result = plan.Result;
+        Assert.True(result.Groups.Any(g => g.IsImc && Json.GetInt(g.Node["Identifier"]?["PrimaryId"], 0) == 300),
+            "the converted item has its own IMC group");
+        static string[] Types(ModContainer container) => (container.Manipulations?.OfType<JsonObject>() ?? [])
+            .Where(m => Json.GetInt(m["Manipulation"]?["SetId"] ?? m["Manipulation"]?["PrimaryId"], 0) == 300)
+            .Select(m => Json.GetString(m["Type"])!).Order(StringComparer.Ordinal).ToArray();
+        var option = result.Groups.Single(g => g.Name == ConvertedOption.GroupName).Containers.Single();
+        Assert.True(Types(option).Contains("Eqp") && !Types(option).Contains("Imc"), string.Join(", ", Types(option)));
+        Assert.True(Types(result.Default).Contains("Imc"), $"the IMC entries stay in Default: {string.Join(", ", Types(result.Default))}");
     }
 
     // ── Fixtures ────────────────────────────────────────────────────────────

@@ -138,6 +138,21 @@ public static class GearManipulations
                (Json.TryGetBool(group["AllVariants"], out var all) && all);
     }
 
+    /// <summary>
+    /// True when an IMC group sets the entry an IMC manipulation is for: the same item and
+    /// variant, or every variant of the item.
+    /// </summary>
+    public static bool ImcGroupCovers(JsonObject group, JsonObject manipulation)
+        => Json.StringEquals(manipulation["Type"], "Imc") &&
+           manipulation["Manipulation"] is JsonObject m &&
+           group["Identifier"] is JsonObject identifier &&
+           Json.GetString(m["ObjectType"]) is { } objectType && Json.StringEquals(identifier["ObjectType"], objectType) &&
+           Json.GetString(m["EquipSlot"]) is { } slot && Json.StringEquals(identifier["EquipSlot"], slot) &&
+           Json.TryGetInt(m["PrimaryId"], out var id) && Json.GetInt(identifier["PrimaryId"], -1) == id &&
+           Json.GetInt(m["SecondaryId"], 0) == Json.GetInt(identifier["SecondaryId"], 0) &&
+           (Json.GetInt(m["Variant"], -1) == Json.GetInt(identifier["Variant"], -2) ||
+            (Json.TryGetBool(group["AllVariants"], out var all) && all));
+
     private static bool ImcIdentifierMatches(JsonObject identifier, GearItem item)
         => Json.StringEquals(identifier["ObjectType"], item.Slot.ImcObjectType()) &&
            IsSet(identifier["PrimaryId"], item) &&

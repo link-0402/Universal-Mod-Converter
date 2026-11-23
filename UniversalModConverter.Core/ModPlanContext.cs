@@ -16,6 +16,7 @@ public sealed class ModPlanContext
     private readonly Dictionary<string, Action<PenumbraMod>> _finalizers = new(StringComparer.Ordinal);
     private readonly List<string> _finalizerOrder = [];
     private readonly Dictionary<string, string> _unchangedCopies = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<(string Group, string GamePath)> _keptGroups = [];
     private bool _finalized;
 
     /// <param name="shared">
@@ -66,6 +67,20 @@ public sealed class ModPlanContext
 
     /// <summary>Records that <paramref name="local"/> is an unchanged copy of <paramref name="fullPath"/>.</summary>
     internal void NoteUnchangedCopy(string fullPath, string local) => _unchangedCopies[fullPath] = local;
+
+    /// <summary>
+    /// Records that a new mod keeps the group <paramref name="group"/> (as <see cref="PenumbraMod.Serialize"/>
+    /// writes it) unchanged for as long as the result redirects <paramref name="gamePath"/>. A race
+    /// conversion keeps the item, and with it the IMC groups that switch its parts, which pruning
+    /// would otherwise take for groups about an item the new mod does not carry. A conversion that
+    /// was rolled back took its redirect with it, so it keeps nothing.
+    /// </summary>
+    internal void KeepGroup(string group, string gamePath) => _keptGroups.Add((group, gamePath));
+
+    /// <summary>The groups <see cref="KeepGroup"/> keeps in the result as it is now, serialized.</summary>
+    internal IReadOnlySet<string> KeptGroups()
+        => _keptGroups.Where(k => Result.Containers.Any(c => c.FileEntries().Any(e => GamePath.Normalize(e.Key) == k.GamePath)))
+            .Select(k => k.Group).ToHashSet(StringComparer.Ordinal);
 
     /// <summary>
     /// Registers work that finishes the whole mod rather than one entry — pruning empty groups,

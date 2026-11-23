@@ -919,8 +919,10 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
         {
             var isShortMaterial = filePath.EndsWith(".mdl", StringComparison.Ordinal) &&
                                   !reference.TrimStart('/').Contains('/');
+            // The game loads an equipment model's material under the name the model gives it, and a
+            // race conversion keeps the item and its materials, so the names stay as they are.
             if (isShortMaterial)
-                return ResourceReferences.IsSkinMaterial(reference)
+                return _race != null || ResourceReferences.IsSkinMaterial(reference)
                     ? reference
                     : GearPaths.RewriteOwnedReference(reference, _srcEp, _tgtEp);
             return _map.TryGetValue(GamePath.Normalize(reference), out var mapped) ? mapped : reference;
@@ -1547,8 +1549,15 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
 
         private void RetargetImcGroups(PenumbraMod result)
         {
-            // Every race of an item shares its IMC entries, and the groups that switch them.
-            if (_race != null) return;
+            // Every race of an item shares its IMC entries, and the groups that switch them. They stay
+            // as they are, and a new mod keeps the item's for as long as it has the converted model.
+            if (_race != null)
+            {
+                if (!EditsSourceMod)
+                    foreach (var group in result.Groups.Where(g => g.IsImc && GearManipulations.ImcGroupMatches(g.Node, _src, _sourceVariant)))
+                        _context.KeepGroup(PenumbraMod.Serialize(group.Node), RaceTargetModel);
+                return;
+            }
             var added = new List<ModGroup>();
             for (var i = result.Groups.Count - 1; i >= 0; i--)
             {
@@ -1603,7 +1612,7 @@ public sealed partial class GearConversionPlanner(IGameFileProvider game)
 
         private void PruneGroups(PenumbraMod result)
             => ModGroupPruning.Prune(result, _mod, group => _plan.Changes.Add(
-                new GearPlanChange("Group", group.Name, "option group", "not included (no converted content)")));
+                new GearPlanChange("Group", group.Name, "option group", "not included (no converted content)")), _context.KeptGroups());
 
         // ── Race conversion ─────────────────────────────────────────────────
 

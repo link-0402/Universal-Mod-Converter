@@ -461,7 +461,8 @@ public sealed class AnimationConversionPlanner(
                 _context.AddFinalizerOnce("new-mod", mod =>
                 {
                     ModGroupPruning.Prune(mod, _mod, group => _plan.Changes.Add(
-                        new GearPlanChange("Group", group.Name, "option group", "not included (no converted animation)")));
+                        new GearPlanChange("Group", group.Name, "option group", "not included (no converted animation)")),
+                        _context.KeptGroups());
                     mod.Meta.Remove("DefaultPreferredItems");
                     mod.Meta["Identifier"] = Guid.NewGuid().ToString();
                 });

@@ -13,9 +13,15 @@ public static class ModGroupPruning
     /// referenced by the conditions or parent links of kept groups stay, because Penumbra
     /// refuses mods with dangling GUIDs.
     /// </summary>
-    public static void Prune(PenumbraMod result, PenumbraMod source, Action<ModGroup>? dropped = null)
+    /// <param name="kept">
+    /// IMC groups (serialized) that stay although unchanged: a race conversion keeps the item they
+    /// are about (see <see cref="ModPlanContext.KeepGroup"/>).
+    /// </param>
+    public static void Prune(PenumbraMod result, PenumbraMod source, Action<ModGroup>? dropped = null,
+        IReadOnlySet<string>? kept = null)
     {
         var untouched = source.Groups.Where(g => g.IsImc).Select(g => PenumbraMod.Serialize(g.Node))
+            .Where(g => kept?.Contains(g) != true)
             .ToHashSet(StringComparer.Ordinal);
         var keep = result.Groups.Where(g => g.IsImc
             ? !untouched.Contains(PenumbraMod.Serialize(g.Node))

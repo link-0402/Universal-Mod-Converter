@@ -13,6 +13,9 @@ internal static partial class GearConversionTests
         ("Race conversion: an earring moves to another race in place, its EQDP entry with it", RaceConversionInPlaceAccessory),
         ("Race conversion: added to the mod, both races keep a model and an entry", RaceConversionAddToMod),
         ("Race conversion: another item, a body piece or a race without a model is refused", RaceConversionRefusals),
+        ("Race conversion: the model keeps the material names it gives, a left ring's _rir and a hat's _top", RaceConversionKeepsMaterialNames),
+        ("Race conversion: a new mod of only what's converted keeps the item's IMC groups", RaceConversionNewModKeepsImcGroups),
+        ("Race conversion: an entry the mod had and the conversion changed goes into the own option", RaceConversionOwnOptionTakesChangedEntries),
     ];
 
     private const string HatRoot = "chara/equipment/e0350";
@@ -181,6 +184,111 @@ internal static partial class GearConversionTests
         Assert.True(lalafell.Diagnostics.Any(d => d.IsBlocker && d.Code == "race_conversion"), "Lalafell stay among Lalafell");
     }
 
+    /// <summary>
+    /// The game loads an equipment model's materials under the names the model gives them, and a
+    /// race conversion keeps the item, so the names stay: a left ring names the right ring's
+    /// material, as every one of the game's does, and a hat may name its set's top material.
+    /// </summary>
+    private static void RaceConversionKeepsMaterialNames()
+    {
+        foreach (var (slot, set, model, material) in new[]
+                 {
+                     (GearSlot.LFinger, (ushort)1, "chara/accessory/a0001/model/c0101a0001_ril.mdl", "/mt_c0101a0001_rir_a.mtrl"),
+                     (GearSlot.Head, (ushort)350, $"{HatRoot}/model/c0101e0350_met.mdl", "/mt_c0101e0350_top_a.mtrl"),
+                 })
+        {
+            using var mod = new TempDir();
+            mod.Json("meta.json", $$$"""
+                {"FileVersion":4,"Name":"Piece","DefaultData":{"Files":{"{{{model}}}":"piece.mdl"} } }
+                """);
+            mod.File("piece.mdl", TestAssets.CreateMdl(boneName: "j_kao", material: material));
+            var game = HatGame();
+            game.Files["chara/accessory/a0001/a0001.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+
+            var plan = PlanRace(mod.Path, game, slot, set, 101, 1401, ConversionOutputMode.NewMod);
+            Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+            var written = plan.Files.Single(f => f.Destination.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase));
+            Assert.Equal(material, MdlFile.Read(written.Content!).Strings.First(s => s.EndsWith(".mtrl", StringComparison.Ordinal)));
+            Assert.True(plan.Changes.All(c => c.Category != "Reference"),
+                $"{slot}: " + string.Join("; ", plan.Changes.Where(c => c.Category == "Reference").Select(c => $"{c.From} -> {c.To}")));
+        }
+    }
+
+    /// <summary>
+    /// Every race of an item shares its IMC entries and the IMC groups that switch its parts, so a
+    /// new mod of only the converted race's hat keeps the hat's group as it is. A group about another
+    /// item is still left out, and so is the hat's when the run takes the conversion back.
+    /// </summary>
+    private static void RaceConversionNewModKeepsImcGroups()
+    {
+        using var mod = HatMod(groups: $""","Groups":[{HatImcGroup("Parts", 350)},{HatImcGroup("Other", 351)}]""");
+        var plan = PlanRace(mod.Path, HatGame(), GearSlot.Head, 350, 101, 1401, ConversionOutputMode.NewMod);
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+
+        var source = PenumbraMod.Load(mod.Path);
+        var kept = plan.Result.Groups.Single();
+        Assert.Equal("Parts", kept.Name);
+        Assert.Equal(PenumbraMod.Serialize(source.Groups[0].Node), PenumbraMod.Serialize(kept.Node));
+        var dropped = plan.Changes.Where(c => c.Category == "Group" && c.To.StartsWith("not included", StringComparison.Ordinal))
+            .Select(c => c.Scope).ToArray();
+        Assert.Equal(new[] { "Other" }, dropped);
+
+        // A conversion the run takes back keeps nothing: the hat's group goes with it.
+        using var both = new TempDir();
+        both.Json("meta.json", $$$"""
+            {"FileVersion":4,"Name":"Hat and earring","DefaultData":{"Files":{
+              "{{{HatRoot}}}/model/c0101e0350_met.mdl":"hat.mdl",
+              "chara/accessory/a0120/model/c0101a0120_ear.mdl":"ear.mdl"}},
+             "Groups":[{{{HatImcGroup("Parts", 350)}}}]}
+            """);
+        both.File("hat.mdl", HatModel());
+        both.File("ear.mdl", TestAssets.CreateMdl(boneName: "j_kao", material: "/mt_c0101a0120_ear_a.mtrl"));
+        var game = HatGame();
+        game.Files["chara/accessory/a0120/a0120.imc"] = Imc(1, 5, (_, _) => new ImcEntry(1, 0, 0x3FF, 0, 0, 0));
+        var planner = new GearConversionPlanner(game);
+        var context = new ModPlanContext(both.Path, ConversionOutputMode.NewMod, shared: true);
+        var merger = new ModPlanMerger(context);
+        GearConversionRequest Race(GearSlot slot, ushort set) => new(new GearItem(slot, set, 1), new GearItem(slot, set, 1),
+            ConversionOutputMode.NewMod) { Race = new GearRaceChange(101, 1401) };
+        var earring = merger.Add("earring", ["shared"], ctx => planner.Plan(ctx, Race(GearSlot.Ears, 120)));
+        Assert.True(!earring.Rejected, string.Join("; ", earring.Diagnostics.Select(d => d.Message)));
+        Assert.True(merger.Add("hat", ["shared"], ctx => planner.Plan(ctx, Race(GearSlot.Head, 350))).Rejected,
+            "the hat is refused beside the earring");
+        context.RunFinalizers();
+        Assert.Equal(0, context.Result.Groups.Count);
+    }
+
+    /// <summary>
+    /// With the converted race in an option of its own, switching the option off gives back the mod
+    /// as it was. The mod's entry for Au Ra women (no model of their own, so they show the Midlander
+    /// one) becomes "has its own model" for the converted one: that goes into the option with the
+    /// model, and Default keeps the mod's entry. Entries the conversion left as they were stay.
+    /// </summary>
+    private static void RaceConversionOwnOptionTakesChangedEntries()
+    {
+        using var mod = HatMod(manipulations: """,{"Type":"Eqdp","Manipulation":{"Entry":0,"Gender":"Female","Race":"AuRa","SetId":350,"Slot":"Head"}}""");
+        var plan = new GearConversionPlanner(HatGame()).Plan(mod.Path, new GearConversionRequest(
+            new GearItem(GearSlot.Head, 350, 1), new GearItem(GearSlot.Head, 350, 1), ConversionOutputMode.AddToMod)
+            {
+                Race = new GearRaceChange(101, 1401),
+                ConvertedOption = new ConvertedOptionRequest("Au Ra Female", "Converted."),
+            });
+        Assert.True(!plan.HasBlockers, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+        Assert.True(plan.ConvertedPlacement != null, string.Join("; ", plan.Diagnostics.Select(d => d.Message)));
+
+        static string[] Entries(ModContainer container) => (container.Manipulations?.OfType<JsonObject>() ?? [])
+            .Select(m => m["Manipulation"]!)
+            .Select(m => $"{m["Race"] ?? "Imc"}|{m["Gender"]}|{m["Entry"]?.ToJsonString()}").Order(StringComparer.Ordinal).ToArray();
+        var option = plan.Result.Groups.Single(g => g.Name == ConvertedOption.GroupName).Containers.Single();
+        Assert.True(option.FileEntries().Any(e => GamePath.Normalize(e.Key) == $"{HatRoot}/model/c1401e0350_met.mdl"),
+            "the converted model is in the option");
+        Assert.Equal(new[] { "AuRa|Female|3" }, Entries(option));
+        var defaults = Entries(plan.Result.Default);
+        Assert.True(defaults.Contains("AuRa|Female|0") && defaults.Contains("Midlander|Male|3") && defaults.Contains("Midlander|Female|3") &&
+                    defaults.Any(e => e.StartsWith("Imc|", StringComparison.Ordinal)) && defaults.Length == 4,
+            $"Default is as it was: {string.Join(", ", defaults)}");
+    }
+
     // ── Fixtures ────────────────────────────────────────────────────────────
 
     private static GearConversionPlan PlanRace(string directory, FakeGame game, GearSlot slot, ushort set,
@@ -190,8 +298,11 @@ internal static partial class GearConversionTests
 
     private static byte[] HatModel() => TestAssets.CreateMdl(boneName: "j_kao", material: "/mt_c0101e0350_met_a.mtrl");
 
-    /// <summary>A Midlander man hat with an IMC entry and EQDP entries for both Midlanders.</summary>
-    private static TempDir HatMod()
+    /// <summary>
+    /// A Midlander man hat with an IMC entry and EQDP entries for both Midlanders, then the
+    /// <paramref name="manipulations"/> (each after a comma) and top-level <paramref name="groups"/> given.
+    /// </summary>
+    private static TempDir HatMod(string manipulations = "", string groups = "")
     {
         var mod = new TempDir();
         mod.Json("meta.json", $$$"""
@@ -202,12 +313,20 @@ internal static partial class GearConversionTests
                {"Type":"Imc","Manipulation":{"ObjectType":"Equipment","PrimaryId":350,"SecondaryId":0,"Variant":1,"EquipSlot":"Head",
                 "BodySlot":"Unknown","Entry":{"MaterialId":1,"DecalId":0,"VfxId":0,"MaterialAnimationId":0,"AttributeMask":1023,"SoundId":0} } },
                {"Type":"Eqdp","Manipulation":{"Entry":3,"Gender":"Male","Race":"Midlander","SetId":350,"Slot":"Head"}},
-               {"Type":"Eqdp","Manipulation":{"Entry":3,"Gender":"Female","Race":"Midlander","SetId":350,"Slot":"Head"}}]}}
+               {"Type":"Eqdp","Manipulation":{"Entry":3,"Gender":"Female","Race":"Midlander","SetId":350,"Slot":"Head"}}{{{manipulations}}}]}{{{groups}}} }
             """);
         mod.File("hat.mdl", HatModel());
         mod.File("hat.mtrl", Mtrl("chara/common/texture/white.tex"));
         return mod;
     }
+
+    /// <summary>An IMC group switching a part of head gear <paramref name="set"/>, variant 1.</summary>
+    private static string HatImcGroup(string name, int set) => $$$"""
+        {"Type":"Imc","Name":"{{{name}}}","Identifier":{"PrimaryId":{{{set}}},"SecondaryId":0,"Variant":1,"ObjectType":"Equipment",
+          "EquipSlot":"Head","BodySlot":"Unknown"},
+         "DefaultEntry":{"MaterialId":1,"DecalId":0,"VfxId":0,"MaterialAnimationId":0,"AttributeMask":0,"SoundId":0},
+         "Options":[{"Name":"Visor","AttributeMask":1}]}
+        """;
 
     /// <summary>Game data for hat e0350: Au Ra women have no model of their own, and their race tree moves the head.</summary>
     private static FakeGame HatGame()

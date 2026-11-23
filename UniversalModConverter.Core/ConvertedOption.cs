@@ -43,7 +43,7 @@ public sealed record ConvertedOptionOutcome(
 /// mod puts the target's paths beside the source's, in the same options. Most of them load the
 /// mod's own files (textures, shared materials); those stay there, so the mod's options keep
 /// choosing them. What the conversion made new, though (a converted model, a copy it had to patch,
-/// a file it took from the game) and the metadata it added for the target belong to the converted
+/// a file it took from the game) and the metadata it added or changed for the target belong to the converted
 /// item alone: they move into an option of their own beside the original's, so the converted item
 /// is switched on and off by itself. That option goes into the group whose option holds the
 /// original's model: a multi-select group (a toggle per item) as it is, a single-select one that
@@ -82,7 +82,11 @@ public static class ConvertedOption
     {
         // What the conversion added: paths an option did not have, loading a file it made.
         var files = new List<(ModContainer Container, string Key, string Local)>();
-        var manipulations = new List<(ModContainer Container, JsonObject Manipulation)>();
+        // Metadata it added, and what it changed in Default (a race given a model of its own, say).
+        // Penumbra applies Default after every option, so a changed entry goes into the option and
+        // Default gets the mod's own back, which is what applies with the option off. An option's own
+        // entry stays changed: put back, it could win over the converted item's option beside it.
+        var manipulations = new List<(ModContainer Container, JsonObject Manipulation, JsonObject? Original)>();
         foreach (var container in after.Containers)
         {
             if (Original(before, container) is not { } original) continue; // a group the conversion added itself
@@ -91,11 +95,20 @@ public static class ConvertedOption
                 if (!had.Contains(GamePath.Normalize(key)) && newFiles.Contains(GamePath.NormalizeLocal(local)))
                     files.Add((container, key, local));
 
-            var identities = (original.Manipulations?.OfType<JsonObject>() ?? [])
-                .Select(GearManipulations.Identity).ToHashSet(StringComparer.Ordinal);
+            var entries = (original.Manipulations?.OfType<JsonObject>() ?? [])
+                .ToLookup(GearManipulations.Identity, StringComparer.Ordinal);
             foreach (var manipulation in container.Manipulations?.OfType<JsonObject>() ?? [])
-                if (!identities.Contains(GearManipulations.Identity(manipulation)))
-                    manipulations.Add((container, manipulation));
+            {
+                // Penumbra applies groups before Default and keeps the first entry for an identity, so
+                // an IMC group decides the entries it sets. Moved to the option, above the group, one
+                // would win over the group's toggles; where it is, the group keeps deciding.
+                if (after.Groups.Any(g => g.IsImc && GearManipulations.ImcGroupCovers(g.Node, manipulation))) continue;
+                var identity = GearManipulations.Identity(manipulation);
+                if (!entries.Contains(identity)) manipulations.Add((container, manipulation, null));
+                else if (container.Address.IsDefault &&
+                         entries[identity].All(e => e.ToJsonString() != manipulation.ToJsonString()))
+                    manipulations.Add((container, manipulation, entries[identity].First()));
+            }
         }
         if (files.Count == 0) return ConvertedOptionOutcome.Nothing;
 
@@ -170,7 +183,9 @@ public static class ConvertedOption
         var home = HomeGroup(moved.Where(f => IsModel(GamePath.Normalize(f.Key))).Select(f => f.Container));
         var movedMeta = manipulations.Where(m => chosen.ContainsKey(GearManipulations.Identity(m.Manipulation))).ToList();
         foreach (var (container, key, _) in moved) container.Files!.Remove(key);
-        foreach (var (container, manipulation) in movedMeta) container.Manipulations!.Remove(manipulation);
+        foreach (var (container, manipulation, original) in movedMeta)
+            if (original == null) container.Manipulations!.Remove(manipulation);
+            else container.Manipulations![container.Manipulations.IndexOf(manipulation)] = original.DeepClone();
 
         var optionFiles = new JsonObject();
         foreach (var (_, key, local) in moved.OrderBy(f => GamePath.Normalize(f.Key), StringComparer.Ordinal))
