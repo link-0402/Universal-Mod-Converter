@@ -6,7 +6,8 @@ using UniversalModConverter.Core;
 internal static class TestAssets
 {
     public static byte[] CreateMdl(bool faceData = false, bool shape = false, string boneName = "j_root",
-        bool twoBones = false, string material = "mt_test.mtrl", bool neckMorph = false, bool garbledNeckMorph = false)
+        bool twoBones = false, string material = "mt_test.mtrl", bool neckMorph = false, bool garbledNeckMorph = false,
+        ushort boneTableIndex = 0)
     {
         var boneNames = twoBones ? new[] { "a", "b" } : new[] { boneName };
         var vertexCount = shape ? 2 : 1;
@@ -61,7 +62,7 @@ internal static class TestAssets
         writer.Write(new byte[60 * 3]);
         // Mesh.
         writer.Write((ushort)vertexCount); writer.Write((ushort)0); writer.Write(3u);
-        writer.Write((ushort)0); writer.Write((ushort)0); writer.Write((ushort)1); writer.Write((ushort)0);
+        writer.Write((ushort)0); writer.Write((ushort)0); writer.Write((ushort)1); writer.Write(boneTableIndex);
         writer.Write(0u);
         writer.Write(0u); writer.Write((uint)(vertexCount * 20)); writer.Write(0u);
         writer.Write((byte)20); writer.Write((byte)16); writer.Write((byte)0); writer.Write((byte)2);

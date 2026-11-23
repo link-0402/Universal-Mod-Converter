@@ -55,6 +55,7 @@ var tests = new (string Name, Action Run)[]
     ("MDL with an over-reported stream count deforms", TestMdlStreamCountByte),
     ("MDL neck-morph count without data (Penumbra export)", TestMdlNeckMorphCountWithoutData),
     ("MDL unresolved bone identity warning", TestMdlUnresolvedBone),
+    ("MDL mesh without a bone table (index 255) is not deformed", TestMdlUnskinnedMesh),
     ("MDL mesh groups are described", TestMeshGroupsDescribe),
     ("MDL mesh removal renumbers metadata and keeps data", TestMeshRemoval),
     ("MDL mesh removal drops the removed mesh's shape", TestMeshRemovalDropsShape),
@@ -578,6 +579,20 @@ static RacialDeformationPlan OneStep(IReadOnlyDictionary<string, Matrix4x4> matr
 static byte[] CreateMdl(bool faceData = false, bool shape = false, string boneName = "j_root",
     bool twoBones = false)
     => TestAssets.CreateMdl(faceData, shape, boneName, twoBones);
+
+static void TestMdlUnskinnedMesh()
+{
+    // Penumbra's importer writes bone table 255 for a mesh without bones. With fewer tables than
+    // that it names none, and the mesh has nothing to deform: here it is the only mesh.
+    var model = MdlFile.Read(TestAssets.CreateMdl(boneTableIndex: 255));
+    try
+    {
+        MdlRaceConverter.Convert(model, OneStep(
+            new Dictionary<string, Matrix4x4> { ["j_root"] = Matrix4x4.CreateTranslation(2, 3, 4) }));
+        throw new Exception("Expected MdlConversionException.");
+    }
+    catch (MdlConversionException ex) { Equal("empty_mdl", ex.Code); }
+}
 
 static byte[] CreatePbd(short parent)
 {

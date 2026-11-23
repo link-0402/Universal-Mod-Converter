@@ -64,8 +64,10 @@ public static class MdlRaceConverter
             for (var meshIndex = lod.MeshIndex; meshIndex < lod.MeshIndex + lod.MeshCount; meshIndex++)
             {
                 var mesh = model.Meshes[meshIndex];
-                // Unskinned meshes (no bone table) have no bones to deform and stay as they are.
-                if (mesh.BoneTableIndex == ushort.MaxValue) continue;
+                // Unskinned meshes (no bone table) have no bones to deform and stay as they are. Penumbra's
+                // importer marks them with 255, which names no table in a model with fewer than that.
+                if (mesh.BoneTableIndex == ushort.MaxValue ||
+                    mesh.BoneTableIndex == 255 && model.BoneTables.Length <= 255) continue;
                 if (mesh.BoneTableIndex >= model.BoneTables.Length)
                     throw new MdlConversionException("malformed_bone_table", $"Mesh {meshIndex} references an invalid bone table.");
                 var declaration = model.VertexDeclarations[meshIndex];
