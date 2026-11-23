@@ -16,6 +16,8 @@ internal static class CustomizationRuleTests
         ("Hrothgar tail to other race tail", HrothgarToOtherTail),
         ("Other race tail to Hrothgar tail", OtherToHrothgarTail),
         ("Hrothgar tail to Hrothgar tail keeps shared materials", HrothgarToHrothgarTail),
+        ("A Hrothgar tail material already named for its tail keeps the shared root's name", TaggedHrothgarTail),
+        ("A second clan's face keeps the metadata written for the face it loads", ClanFaceMetadata),
         ("Face, tail and ear materials are named as the game reads them", GameMaterialIdentity),
         ("Face and ear materials have no variant folder", FaceAndEarFolders),
         ("Au Ra tails own a Xaela material root at ID + 100", AuRaXaelaRoots),
@@ -268,6 +270,44 @@ internal static class CustomizationRuleTests
             CustomizationPaths.Rewrite(material, Tail(1501, 3), Tail(1601, 4)));
         Assert.Equal("/mt_c1601t0001_t0004_til_a.mtrl",
             CustomizationPaths.RewriteOwnedReference("/mt_c1501t0001_til_a.mtrl", Tail(1501, 3), Tail(1601, 4)));
+    }
+
+    private static void TaggedHrothgarTail()
+    {
+        // What converting another race's tail to a Hrothgar's writes: the shared root's identity, then
+        // the tail's ID. Converted on to the other gender's same tail, the name keeps both, once.
+        var source = Tail(1501, 3);
+        var target = Tail(1601, 3);
+        const string converted = "chara/human/c1601/obj/tail/t0001/material/v0001/mt_c1601t0001_t0003_a.mtrl";
+        Assert.Equal(converted,
+            CustomizationPaths.Rewrite("chara/human/c1501/obj/tail/t0001/material/v0001/mt_c1501t0001_t0003_a.mtrl", source, target));
+        var reference = CustomizationPaths.RewriteOwnedReference("/mt_c1501t0001_t0003_a.mtrl", source, target);
+        Assert.Equal("/mt_c1601t0001_t0003_a.mtrl", reference);
+        Assert.Equal(converted, CustomizationPaths.MaterialPath(target, reference));
+        // Another tail's ID is not this tail's tag and stays in the name.
+        Assert.Equal("/mt_c1601t0001_t0004_t0003_a.mtrl",
+            CustomizationPaths.RewriteOwnedReference("/mt_c1501t0001_t0003_a.mtrl", source, Tail(1601, 4)));
+    }
+
+    private static void ClanFaceMetadata()
+    {
+        // A second clan's face (101-104) loads the first clan's model, so the conversion writes its
+        // metadata for that face (1-4): a new mod of only the converted face keeps it.
+        var xaela = new CustomizationPathEndpoint(AssetKind.Face, 1401, 101);
+        static System.Text.Json.Nodes.JsonObject Parse(string json) => System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        Assert.True(CustomizationOutput.IsAbout(Parse(
+            """{"Type":"Shp","Manipulation":{"Slot":"Face","Id":1,"GenderRaceCondition":1401,"Shape":"shpx_a","Entry":true}}"""), xaela),
+            "the shape switch of the face it loads");
+        Assert.True(CustomizationOutput.IsAbout(Parse(
+            """{"Type":"Est","Manipulation":{"Entry":3,"Gender":"Female","Race":"AuRa","SetId":1,"Slot":"Face"}}"""), xaela),
+            "the extra skeleton of the face it loads");
+        Assert.True(!CustomizationOutput.IsAbout(Parse(
+            """{"Type":"Est","Manipulation":{"Entry":3,"Gender":"Female","Race":"AuRa","SetId":2,"Slot":"Face"}}"""), xaela),
+            "another face's stays out");
+        // A hair has no clans: ID 101 is hair 101.
+        Assert.True(CustomizationOutput.IsAbout(Parse(
+            """{"Type":"Est","Manipulation":{"Entry":101,"Gender":"Female","Race":"AuRa","SetId":101,"Slot":"Hair"}}"""),
+            new CustomizationPathEndpoint(AssetKind.Hair, 1401, 101)), "a hair keeps its own ID");
     }
 
     /// <summary>

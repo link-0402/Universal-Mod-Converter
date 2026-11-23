@@ -472,7 +472,8 @@ public static partial class CustomizationPaths
         if (sourceRoot != source) value = RewriteIdentity(value, Identity(sourceRoot), newCombined, source, target);
         if (!IsHrothgarTail(target)) return value;
         var token = CustomizationKinds.Get(target.Kind).Token(target.ModelId);
-        return Regex.Replace(value, @"(?<=mt_)" + Regex.Escape(newCombined) + @"(?!\d)(?!_" + token + ")",
+        // A name that already carries the tail's ID (one an earlier conversion wrote) keeps it once.
+        return Regex.Replace(value, @"(?<=mt_)" + Regex.Escape(newCombined) + @"(?!\d)(?:_" + token + @"(?!\d))?",
             $"{Identity(targetRoot)}_{token}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 

@@ -163,10 +163,12 @@ public static class CustomizationOutput
     /// <summary>
     /// Whether a manipulation is about the converted customization itself: its extra skeleton
     /// (Est), or a shape or attribute switch (Shp, Atr) for its ID and race. Anything about other
-    /// items, or every hair or face of a race, is not part of it.
+    /// items, or every hair or face of a race, is not part of it. A second clan's face (101-104)
+    /// loads the first clan's model, and its metadata is written for that face.
     /// </summary>
     public static bool IsAbout(JsonObject manipulation, CustomizationPathEndpoint target)
     {
+        target = CustomizationPaths.Owner(target);
         if (manipulation["Manipulation"] is not JsonObject fields) return false;
         var slot = target.Kind switch { AssetKind.Hair => "Hair", AssetKind.Face => "Face", _ => null };
         if (slot == null || !string.Equals(Json.GetString(fields["Slot"]), slot, StringComparison.OrdinalIgnoreCase)) return false;
