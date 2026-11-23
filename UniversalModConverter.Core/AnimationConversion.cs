@@ -1158,6 +1158,14 @@ public sealed class AnimationConversionPlanner(
             foreach (var target in targets)
             foreach (var provider in providers)
                 PlaceRetargeted(RetargetedTo(provider, target), withExpression: true);
+            // As for a swap: every target race may have been left out (no file of its own in the game,
+            // or one in another folder), and the source race's animation would go with nothing in its place.
+            if (!SourceRaceStays && _targetFiles.Count == 0 && _lentFiles.Count == 0 && !_plan.HasBlockers)
+            {
+                Block("nothing_written", "Nothing would be written for the chosen races, yet the source race's animation would " +
+                                         "be removed. Choose a race the game has this animation for, or add it to this mod instead.");
+                return;
+            }
             if (!SourceRaceStays) foreach (var provider in providers) RemoveKey(provider);
             else if (_request.Mode.IsNewMod()) EditAtSource(providers);
             if (_plan.HasBlockers) return;

@@ -50,6 +50,7 @@ internal static class AnimationTests
         ("A face from another mod is checked for every race it plays on", ModFacePerRace),
         ("Retarget adds target races, moves them in place and reports inheritance", RetargetPlan),
         ("A file of the mod's own that a retarget replaces is removed, adding to the mod or not", RetargetRemovesReplacedFile),
+        ("A retarget that would write nothing is refused instead of removing the source race's animation", RetargetWritingNothingIsRefused),
         ("Retarget hands the mod's skeletons over and names the source once", RetargetHandsOverSkeletons),
         ("The load table finds whose file a race loads", LoadTableResolves),
         ("A broken load table is refused, and the plan says so", LoadTableUnreadable),
@@ -1569,6 +1570,34 @@ internal static class AnimationTests
             Assert.True(plan.Files.Any(f => f.Operation == LocalFileOperation.Delete && f.Destination == @"c0101\loop.pap") == (mode == ConversionOutputMode.InPlace),
                 $"{mode}: the source race's file goes only when converting in place");
         }
+    }
+
+    private static void RetargetWritingNothingIsRefused()
+    {
+        using var mod = new TempDir();
+        Definition(mod, $$$"""{"Files":{"{{{Loop3}}}":"c0101\\loop.pap"}}""");
+        mod.File("c0101/loop.pap", BuildPap([("cbem_pose03_1lp", 0)], model: 101));
+        var game = Game();
+        game.Files[PapPath.BaseSkeletonPath(101)] = [1];
+        game.Files[PapPath.BaseSkeletonPath(301)] = [3];
+        // Highlander males have no file of their own for this idle, so none is written for them.
+        var request = new AnimationConversionRequest([PapPath.TryParse(Loop3, out var p) ? p.Location : ""],
+            AnimationOperation.Retarget, ConversionOutputMode.InPlace, "test")
+        {
+            SourceRace = 101,
+            TargetRaces = [301],
+        };
+        ushort? Parent(ushort race) => race == 101 ? null : 101;
+
+        // Converting in place would remove the Midlander animation and write none: refused.
+        var plan = new AnimationConversionPlanner(game, Parent, new FakeRetargeter()).Plan(mod.Path, request);
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "no_race_file" && d.Message.Contains("Highlander")), "the race is left out");
+        Assert.True(plan.Diagnostics.Any(d => d.Code == "nothing_written" && d.IsBlocker), "the empty retarget is a blocker");
+
+        // Added to the mod, the source race keeps its own, so the plan stands (with its warning).
+        var added = new AnimationConversionPlanner(game, Parent, new FakeRetargeter())
+            .Plan(mod.Path, request with { Mode = ConversionOutputMode.AddToMod });
+        Assert.True(!added.Diagnostics.Any(d => d.Code == "nothing_written"), "nothing is removed, so nothing is refused");
     }
 
     /// <summary>
