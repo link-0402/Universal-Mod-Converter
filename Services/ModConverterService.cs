@@ -708,6 +708,9 @@ public sealed class ModConverterService
 
         foreach (var generated in task.PlannedGeneratedFiles)
         {
+            // A plan that was written lets go of its bytes (ReleaseContents): never write it a second time.
+            if (generated.Data.Length == 0)
+                throw new InvalidOperationException("This plan was already written. Wait for the preview to update, then try again.");
             PathSafety.EnsureContained(task.ModDirectory, generated.FilePath);
             Directory.CreateDirectory(Path.GetDirectoryName(generated.FilePath)!);
             using var stream = new FileStream(generated.FilePath, FileMode.CreateNew, FileAccess.Write);

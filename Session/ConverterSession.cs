@@ -1495,6 +1495,10 @@ public sealed partial class ConverterSession
                         ? "Penumbra could not load the converted mod, so the original was restored."
                         : $"Penumbra could not load the converted mod and the automatic rollback failed. The original is at {task.RecoveryPath}.",
                     restored ? task.ModDirectory : task.RecoveryPath);
+                // As for any failed apply: the plan is spent (its bytes are released), so it is
+                // previewed afresh rather than offered again, and the banner stays meanwhile.
+                MarkPlanDirty();
+                _keepResultThroughPreview = true;
                 Rescan();
                 return;
             }
