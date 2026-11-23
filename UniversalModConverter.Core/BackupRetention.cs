@@ -46,10 +46,12 @@ public static partial class BackupRetention
     /// The backups to delete, newest-first order preserved. Two independent caps apply: a
     /// backup older than <paramref name="keepDays"/> goes, and so does one beyond the newest
     /// <paramref name="keepCount"/>, so neither a long-idle install nor a busy afternoon can
-    /// let the folder grow without bound. A path in <paramref name="protectedPaths"/> is never
-    /// returned, however old or numerous — those are the backups a revert still depends on.
+    /// let the folder grow without bound. A folder named in <paramref name="protectedNames"/> is
+    /// never returned, however old or numerous — those are the backups a revert still depends on.
+    /// They are told by name, which is unique to a backup (see <see cref="FolderName"/>): the same
+    /// folder can be reached by more than one path (an 8.3 short name, a junction).
     /// </summary>
-    public static List<string> Expired(IEnumerable<BackupFolder> folders, IReadOnlySet<string> protectedPaths,
+    public static List<string> Expired(IEnumerable<BackupFolder> folders, IReadOnlySet<string> protectedNames,
         int keepDays, int keepCount, DateTime nowUtc)
     {
         var cutoff = nowUtc - TimeSpan.FromDays(Math.Max(1, keepDays));
@@ -59,7 +61,7 @@ public static partial class BackupRetention
 
         foreach (var folder in folders.OrderByDescending(f => f.WrittenUtc).ThenBy(f => f.Path, StringComparer.OrdinalIgnoreCase))
         {
-            if (protectedPaths.Contains(folder.Path))
+            if (protectedNames.Contains(Path.GetFileName(folder.Path)))
             {
                 // A protected backup still occupies one of the kept slots, so the cap counts
                 // total backups rather than only the ones we are free to delete.

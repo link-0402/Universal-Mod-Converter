@@ -88,17 +88,17 @@ public sealed class BackupMaintenanceService(
         // A backup the user could still revert to outlives every limit: losing it would lose
         // the only untouched copy of their mod. That includes one waiting behind later in-place
         // conversions of the same mod, which have to be reverted first.
-        var protectedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var protectedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var records = history.Snapshot();
         foreach (var record in records.Where(history.CanStillRevert))
-            if (!string.IsNullOrEmpty(record.RecoveryPath))
-                protectedPaths.Add(Path.GetFullPath(record.RecoveryPath).TrimEnd('\\', '/'));
+            if (FolderName(record.RecoveryPath) is { } name)
+                protectedNames.Add(name);
 
         var deleted = new List<string>();
         long bytes = 0;
         foreach (var root in Roots(penumbraRoot))
         {
-            foreach (var folder in BackupRetention.Expired(Backups(root), protectedPaths,
+            foreach (var folder in BackupRetention.Expired(Backups(root), protectedNames,
                          configuration.BackupRetentionDays, configuration.BackupRetentionCount, DateTime.UtcNow))
             {
                 var size = SizeOf(folder);
@@ -196,9 +196,16 @@ public sealed class BackupMaintenanceService(
                 yield return new BackupFolder(folder, taken);
     }
 
+    /// <summary>
+    /// A backup's folder name, which is unique to it. A record and a sweep may spell the path to the
+    /// same folder differently (an 8.3 short name, a junction), so backups are compared by name.
+    /// </summary>
+    private static string? FolderName(string? path)
+        => string.IsNullOrWhiteSpace(path) ? null : Path.GetFileName(path.TrimEnd('\\', '/'));
+
     private static bool Matches(string? path, List<string> deleted)
-        => !string.IsNullOrEmpty(path) &&
-           deleted.Contains(Path.GetFullPath(path).TrimEnd('\\', '/'), StringComparer.OrdinalIgnoreCase);
+        => FolderName(path) is { Length: > 0 } name &&
+           deleted.Any(folder => string.Equals(Path.GetFileName(folder), name, StringComparison.OrdinalIgnoreCase));
 
     private static string? Parent(string? path)
         => string.IsNullOrWhiteSpace(path) ? null : Path.GetDirectoryName(Path.GetFullPath(path).TrimEnd('\\', '/'));

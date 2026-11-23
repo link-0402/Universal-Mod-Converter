@@ -56,6 +56,7 @@ var tests = new (string Name, Action Run)[]
     ("MDL neck-morph count without data (Penumbra export)", TestMdlNeckMorphCountWithoutData),
     ("MDL unresolved bone identity warning", TestMdlUnresolvedBone),
     ("MDL mesh without a bone table (index 255) is not deformed", TestMdlUnskinnedMesh),
+    ("Backup retention protects a backup by its folder name", TestBackupProtectedByName),
     ("MDL mesh groups are described", TestMeshGroupsDescribe),
     ("MDL mesh removal renumbers metadata and keeps data", TestMeshRemoval),
     ("MDL mesh removal drops the removed mesh's shape", TestMeshRemovalDropsShape),
@@ -592,6 +593,19 @@ static void TestMdlUnskinnedMesh()
         throw new Exception("Expected MdlConversionException.");
     }
     catch (MdlConversionException ex) { Equal("empty_mdl", ex.Code); }
+}
+
+static void TestBackupProtectedByName()
+{
+    var now = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+    var taken = now.AddDays(-60);
+    var name = BackupRetention.FolderName("MyMod", taken, "0123456789abcdef");
+    // The folder a revert depends on, reached through another spelling of its parent than the one
+    // the conversion recorded (an 8.3 short name, a junction): it is still that backup.
+    var folders = new[] { new BackupFolder(@"C:\Users\FIRSTN~1\AppData\Local\Temp\UniversalModConverter-backups\" + name, taken) };
+    var protectedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { name.ToUpperInvariant() };
+    Equal(0, BackupRetention.Expired(folders, protectedNames, 14, 10, now).Count);
+    Equal(1, BackupRetention.Expired(folders, new HashSet<string>(), 14, 10, now).Count);
 }
 
 static byte[] CreatePbd(short parent)
